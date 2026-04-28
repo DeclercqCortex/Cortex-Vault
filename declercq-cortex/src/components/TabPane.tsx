@@ -56,6 +56,13 @@ export type TabPaneHandle = {
   insertExperimentBlock(name: string, iter: number): void;
   /** Insert a table at the cursor. */
   insertTable(rows: number, cols: number, withHeaderRow: boolean): void;
+  /**
+   * Cluster 10 — insert a GitHub summary block at the cursor (slash-
+   * command equivalent for `Ctrl+Shift+G`). Inserted as plain text
+   * paragraphs containing markdown syntax; renders fully on the next
+   * save+reload, the same way `::experiment` blocks behave.
+   */
+  insertGitHubMarkdown(markdown: string): void;
   /** Load a file into this pane (handles PDF vs markdown routing). */
   openPath(path: string | null): Promise<void>;
   /** Switch to a structured view (idea-log, methods-arsenal, etc.). */
@@ -334,6 +341,34 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           }
           ed.chain().focus().insertTable({ rows, cols, withHeaderRow }).run();
         },
+        insertGitHubMarkdown(markdown: string) {
+          const editor = editorInstanceRef.current;
+          if (!editor) {
+            console.warn(
+              `[pane ${slotIndex}] editor not ready for github insert`,
+            );
+            return;
+          }
+          // Insert each line of the markdown as its own paragraph,
+          // followed by an explicit blank paragraph for breathing
+          // room. The user sees raw markdown briefly; saving and
+          // re-opening parses **bold** / lists / `code` properly via
+          // tiptap-markdown's html:true config. This mirrors how
+          // `::experiment` blocks behave today.
+          const heading = "## Today's GitHub activity";
+          const lines = [heading, "", ...markdown.split("\n"), ""];
+          const nodes = lines.map((line) =>
+            line === ""
+              ? { type: "paragraph" }
+              : {
+                  type: "paragraph",
+                  content: [{ type: "text", text: line }],
+                },
+          );
+          const $from = editor.state.selection.$from;
+          const insertAt = $from.depth === 0 ? $from.pos : $from.after(1);
+          editor.chain().focus().insertContentAt(insertAt, nodes).run();
+        },
         async openPath(path: string | null) {
           // Save dirty state first so we don't lose anything.
           if (selectedPath && dirty && selectedPath !== path) {
@@ -423,7 +458,12 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           position: "relative",
           height: "100%",
           width: "100%",
-          overflow: "auto",
+          // PDF view manages its own internal scroll container so the
+          // in-PDF search bubble can pin to the visible area and so
+          // search-hit navigation only moves the inner scrollbar.
+          // Editor / structured-view paths still want the pane-level
+          // scroll for long bodies.
+          overflow: isPdf ? "hidden" : "auto",
           padding: isPdf ? 0 : "1.5rem 1.5rem",
           boxSizing: "border-box",
           background: "var(--bg)",
@@ -490,6 +530,7 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
             vaultPath={vaultPath}
             filePath={selectedPath}
             onClose={closeStructuredView}
+            isActive={isActive}
           />
         ) : !selectedPath ? (
           <div

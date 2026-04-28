@@ -10,6 +10,7 @@ import { ReviewsMenu, type DestinationChoice } from "./components/ReviewsMenu";
 import { ColorLegend } from "./components/ColorLegend";
 import { ExperimentBlockModal } from "./components/ExperimentBlockModal";
 import { InsertTableModal } from "./components/InsertTableModal";
+import { IntegrationsSettings } from "./components/IntegrationsSettings";
 import { ThemeToggle, useTheme } from "./components/ThemeToggle";
 import {
   NewHierarchyModal,
@@ -192,6 +193,8 @@ function App() {
   );
   const [blockModalOpen, setBlockModalOpen] = useState(false);
   const [tableModalOpen, setTableModalOpen] = useState(false);
+  // Cluster 10 — Integrations settings (currently GitHub-only).
+  const [integrationsOpen, setIntegrationsOpen] = useState(false);
   // Slot picker (used when a search-palette result needs routing in
   // multi-slot layouts).
   const [pendingSlotChoice, setPendingSlotChoice] = useState<{
@@ -385,6 +388,18 @@ function App() {
           });
         } catch (e) {
           console.warn("populate_reading_log failed:", e);
+        }
+        // Cluster 10 — GitHub auto-section. The Rust side is
+        // gated to today's daily note only and to a populated
+        // config; past daily notes and unconfigured users are
+        // no-ops by design.
+        try {
+          await invoke("regenerate_github_section", {
+            vaultPath,
+            filePath: path,
+          });
+        } catch (e) {
+          console.warn("regenerate_github_section failed:", e);
         }
       }
     }
@@ -673,11 +688,41 @@ function App() {
       ) {
         e.preventDefault();
         setTableModalOpen(true);
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key === "G" || e.key === "g")
+      ) {
+        // Cluster 10 — slash-command equivalent. Fetch a fresh
+        // GitHub summary and insert it at the cursor in the active
+        // pane. Mirrors Ctrl+Shift+B (insert experiment block).
+        e.preventDefault();
+        (async () => {
+          try {
+            const summary = await invoke<{
+              markdown: string;
+              last_fetch_iso: string;
+              error: string;
+            }>("fetch_github_summary");
+            const handle = paneRefs.current[activeSlotIdx];
+            if (handle) {
+              handle.insertGitHubMarkdown(summary.markdown);
+            }
+          } catch (err) {
+            console.warn("[cortex] fetch_github_summary failed:", err);
+            setError(`GitHub fetch failed: ${err}`);
+          }
+        })();
+      } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === ",") {
+        // Cluster 10 — open Integrations settings modal.
+        e.preventDefault();
+        setIntegrationsOpen(true);
       } else if (e.key === "Escape") {
         setPaletteOpen(false);
         setHelpOpen(false);
         setHierarchyKind(null);
         setTableModalOpen(false);
+        setIntegrationsOpen(false);
         setPendingSlotChoice(null);
       }
     };
@@ -1117,6 +1162,13 @@ function App() {
                   </button>
                   <ReviewsMenu onPick={pickDestination} />
                   <button
+                    onClick={() => setIntegrationsOpen(true)}
+                    style={baseStyles.changeBtn}
+                    title="Integrations settings (Ctrl+,)"
+                  >
+                    GH
+                  </button>
+                  <button
                     onClick={() => setRefreshKey((k) => k + 1)}
                     style={baseStyles.iconBtn}
                     title="Refresh file tree"
@@ -1277,6 +1329,10 @@ function App() {
           const handle = paneRefs.current[activeSlotIdx];
           if (handle) handle.insertTable(rows, cols, withHeaderRow);
         }}
+      />
+      <IntegrationsSettings
+        isOpen={integrationsOpen}
+        onClose={() => setIntegrationsOpen(false)}
       />
     </div>
   );

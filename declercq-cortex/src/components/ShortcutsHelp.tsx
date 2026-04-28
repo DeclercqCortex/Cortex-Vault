@@ -17,6 +17,8 @@ const ALWAYS: Row[] = [
   { keys: "Ctrl+L", action: "Toggle the colour legend" },
   { keys: "Ctrl+Shift+B", action: "Insert ::experiment block in editor" },
   { keys: "Ctrl+Shift+T", action: "Insert a table at the cursor" },
+  { keys: "Ctrl+Shift+G", action: "Insert today's GitHub summary at cursor" },
+  { keys: "Ctrl+,", action: "Open Integrations settings (GitHub)" },
   { keys: "Click", action: "(Tree) Open file in slot 1 (single/dual layout)" },
   { keys: "Ctrl+Click", action: "(Tree) Open file in slot 2 (dual layout)" },
   { keys: "Drag", action: "(Tree) Drop file into a specific slot (tri/quad)" },
@@ -60,7 +62,6 @@ const PLANNED: Row[] = [
     keys: "Ctrl+Shift+Q",
     action: "Advisor mark ==text== (Cluster 3 follow-up)",
   },
-  { keys: "Ctrl+,", action: "Settings (later)" },
 ];
 
 export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {

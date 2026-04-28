@@ -53,6 +53,30 @@ struct VaultConfig {
     vault_path: Option<String>,
     #[serde(default)]
     last_open_file: Option<String>,
+    /// Cluster 10 — GitHub integration. Optional so existing config.json
+    /// files (pre-Cluster-10) keep loading without migration. Present
+    /// when the user has saved a token through the Integrations modal.
+    #[serde(default)]
+    github: Option<GitHubConfig>,
+}
+
+/// Cluster 10 — persisted GitHub integration settings. Stored inside
+/// `%APPDATA%\declercq-cortex\config.json` alongside the vault path.
+///
+/// **Token storage tradeoff.** The cluster doc's recommendation is OS
+/// keychain in v2; for Phase 3 simplicity v1 stores the token directly
+/// in config.json (file is per-user under %APPDATA% so it inherits
+/// user-only ACLs on Windows by default). Documented in NOTES.md.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct GitHubConfig {
+    /// Personal access token, classic or fine-grained. Needs `repo`
+    /// scope read for the configured repos.
+    #[serde(default)]
+    token: String,
+    /// Repos to watch, "owner/name" format. Order is preserved in the
+    /// daily-note section so the user controls what appears first.
+    #[serde(default)]
+    repos: Vec<String>,
 }
 
 /// Returns the absolute path to config.json, creating the parent directory if
@@ -3853,6 +3877,621 @@ fn insert_under_heading(existing: &str, table: &str) -> String {
 }
 
 // -----------------------------------------------------------------------------
+// Cluster 10 — GitHub integration
+// -----------------------------------------------------------------------------
+//
+// Read-only integration that surfaces recent commits and open PRs from
+// the user's configured repos inside today's daily note. The shape:
+//
+//   1. The user saves a personal access token + a list of "owner/name"
+//      repos via the Integrations Settings modal (Ctrl+,).
+//   2. Opening today's daily note triggers `regenerate_github_section`,
+//      which fetches a fresh summary (cached for 10 min) and splices it
+//      between `<!-- GITHUB-AUTO-START -->` / `<!-- GITHUB-AUTO-END -->`
+//      markers under the `## Today's GitHub activity` heading.
+//   3. Past daily notes are NOT regenerated — they stay frozen as the
+//      day's snapshot.
+//   4. Ctrl+Shift+G inserts a fresh summary at the cursor in any note
+//      (the slash-command equivalent).
+//
+// Caching follows the cluster doc's "on creation + on demand" rule:
+// the summary cache has a 10-minute TTL so opening the daily note
+// repeatedly doesn't hammer the API; the user-login cache lives for
+// the process's lifetime (login doesn't change for a token).
+//
+// Offline degradation: a fetch failure becomes an italicised
+// "_(couldn't fetch GitHub: ...)_" line in the markdown rather than an
+// error popup. The auto-section still renders; the user knows
+// something's wrong but the daily note isn't blocked.
+
+const GITHUB_AUTO_START: &str =
+    "<!-- GITHUB-AUTO-START — derived from your configured GitHub repos; do not edit -->";
+const GITHUB_AUTO_END: &str = "<!-- GITHUB-AUTO-END -->";
+const GITHUB_HEADING: &str = "## Today's GitHub activity";
+const GITHUB_USER_AGENT: &str = "Cortex-Cluster-10";
+const GITHUB_API_VERSION: &str = "application/vnd.github+json";
+const GITHUB_CACHE_TTL_SECS: u64 = 600;
+
+/// In-process cache for the authenticated user's login, keyed by
+/// token fingerprint. Cleared on `set_github_config` when the token
+/// changes and on `clear_github_config`.
+static GITHUB_USER_LOGIN_CACHE: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+/// In-process cache of the last successful summary fetch. 10-minute
+/// TTL; bypassed on token / repos change. Holds a fingerprint of the
+/// config that produced it so a stale cache from before a settings
+/// change isn't reused.
+struct GitHubSummaryCache {
+    fetched_at: SystemTime,
+    config_fingerprint: String,
+    summary: GitHubSummary,
+}
+static GITHUB_SUMMARY_CACHE: Mutex<Option<GitHubSummaryCache>> = Mutex::new(None);
+
+/// Result returned to the frontend (settings modal "Test connection"
+/// button) and used internally by the daily-note splicer.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct GitHubSummary {
+    /// Markdown body to splice between the AUTO-START/AUTO-END
+    /// markers. Always non-empty — even an "unconfigured" or "offline"
+    /// state produces a one-line italicised note.
+    markdown: String,
+    /// ISO8601 timestamp of the most recent successful fetch attempt.
+    /// Empty string when the cache hasn't been warmed yet or every
+    /// attempt has failed.
+    last_fetch_iso: String,
+    /// Empty on success, populated on degraded responses so the
+    /// settings modal can surface a status line without parsing the
+    /// markdown body.
+    error: String,
+}
+
+#[derive(Deserialize)]
+struct GhUser {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct GhCommitItem {
+    sha: String,
+    commit: GhCommitInner,
+}
+
+#[derive(Deserialize)]
+struct GhCommitInner {
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct GhPullItem {
+    number: u64,
+    title: String,
+}
+
+fn github_config_fingerprint(cfg: &GitHubConfig) -> String {
+    // Token's first 8 chars (or all of it if shorter) plus the joined
+    // repo list. Used to invalidate the summary cache on config
+    // changes without leaking the full token into a key.
+    let token_prefix = cfg.token.chars().take(8).collect::<String>();
+    format!("{}|{}", token_prefix, cfg.repos.join(","))
+}
+
+/// ISO8601 UTC timestamp from a unix-seconds value. Hand-rolled with
+/// the same civil-from-days algorithm as `today_iso_date`.
+fn iso_utc_from_unix(secs: u64) -> String {
+    let days_since_epoch = (secs / 86_400) as i64;
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let rem = secs % 86_400;
+    let h = rem / 3600;
+    let mn = (rem / 60) % 60;
+    let s = rem % 60;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, h, mn, s)
+}
+
+fn iso_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    iso_utc_from_unix(secs)
+}
+
+fn iso_24h_ago() -> String {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    iso_utc_from_unix(secs.saturating_sub(86_400))
+}
+
+async fn gh_get_user_login(client: &reqwest::Client, token: &str) -> Result<String, String> {
+    let token_prefix = token.chars().take(8).collect::<String>();
+    if let Ok(g) = GITHUB_USER_LOGIN_CACHE.lock() {
+        if let Some((cached_prefix, cached_login)) = &*g {
+            if cached_prefix == &token_prefix {
+                return Ok(cached_login.clone());
+            }
+        }
+    }
+    let resp = client
+        .get("https://api.github.com/user")
+        .bearer_auth(token)
+        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("Accept", GITHUB_API_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub /user request failed: {}", e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        // 401 = bad token; 403 = rate-limit / scope. Surface the
+        // distinction so the settings modal can guide the user.
+        return Err(format!(
+            "GitHub /user returned HTTP {} — check your token",
+            status.as_u16()
+        ));
+    }
+    let user: GhUser = resp
+        .json()
+        .await
+        .map_err(|e| format!("GitHub /user parse failed: {}", e))?;
+    if let Ok(mut g) = GITHUB_USER_LOGIN_CACHE.lock() {
+        *g = Some((token_prefix, user.login.clone()));
+    }
+    Ok(user.login)
+}
+
+async fn gh_recent_commits(
+    client: &reqwest::Client,
+    token: &str,
+    repo: &str,
+    since_iso: &str,
+) -> Result<Vec<GhCommitItem>, String> {
+    // Cluster 10 doc spec: "Recent commits (last 24 hours, across
+    // selected repos)" — across, not by-author. We deliberately do
+    // NOT filter by author: a personal research repo is single-author
+    // anyway, and a multi-contributor repo is more useful when you
+    // see your collaborators' commits too. PRs DO filter by author
+    // (cluster doc is explicit about that distinction).
+    let url = format!(
+        "https://api.github.com/repos/{}/commits?since={}&per_page=50",
+        repo, since_iso
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("Accept", GITHUB_API_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("commits request for {} failed: {}", repo, e))?;
+    let status = resp.status();
+    if status.as_u16() == 409 {
+        // 409 Conflict from /commits = empty repo. Treat as no
+        // commits rather than an error.
+        return Ok(Vec::new());
+    }
+    if !status.is_success() {
+        return Err(github_repo_error_hint(repo, status.as_u16()));
+    }
+    resp.json()
+        .await
+        .map_err(|e| format!("commits parse for {} failed: {}", repo, e))
+}
+
+/// Translate a GitHub repo-level HTTP error into a user-friendly hint.
+/// 404 in particular is the most-confusable case: GitHub returns it
+/// for both "doesn't exist" AND "exists but token lacks access" so
+/// private-repo holders don't leak repo existence to scoping probes.
+fn github_repo_error_hint(repo: &str, status: u16) -> String {
+    match status {
+        404 => format!(
+            "repo `{}` not visible to this token (HTTP 404 — repo doesn't exist, owner/name typo, or token lacks `repo` scope for private repos / fine-grained access to this repo)",
+            repo
+        ),
+        401 => format!(
+            "token rejected for `{}` (HTTP 401 — token may be expired or revoked)",
+            repo
+        ),
+        403 => format!(
+            "access forbidden for `{}` (HTTP 403 — rate-limited or token lacks the required scope)",
+            repo
+        ),
+        _ => format!("`{}` returned HTTP {}", repo, status),
+    }
+}
+
+async fn gh_open_prs(
+    client: &reqwest::Client,
+    token: &str,
+    repo: &str,
+    author: &str,
+) -> Result<Vec<GhPullItem>, String> {
+    // The /pulls listing includes a `user` field on each PR; we filter
+    // client-side rather than using /search/issues so v1 has fewer
+    // moving parts.
+    let url = format!(
+        "https://api.github.com/repos/{}/pulls?state=open&sort=updated&direction=desc&per_page=30",
+        repo
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("Accept", GITHUB_API_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("PRs request for {} failed: {}", repo, e))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(github_repo_error_hint(repo, status.as_u16()));
+    }
+    // Use a lenient JSON shape so unexpected fields don't break us.
+    let raw: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("PRs parse for {} failed: {}", repo, e))?;
+    let mut out: Vec<GhPullItem> = Vec::new();
+    if let serde_json::Value::Array(items) = raw {
+        for v in items {
+            // Filter by author === current user.
+            let pr_author = v
+                .get("user")
+                .and_then(|u| u.get("login"))
+                .and_then(|l| l.as_str())
+                .unwrap_or("");
+            if pr_author != author {
+                continue;
+            }
+            let number = v.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
+            let title = v
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("(untitled)")
+                .to_string();
+            if number > 0 {
+                out.push(GhPullItem { number, title });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Build the markdown body that goes between the AUTO markers.
+/// Pure formatting — no I/O. Always returns at least a one-line
+/// status so the splice never produces an empty section.
+fn format_github_markdown(
+    repo_results: &[(String, Result<(Vec<GhCommitItem>, Vec<GhPullItem>), String>)],
+) -> String {
+    if repo_results.is_empty() {
+        return "_(no GitHub repos configured — open Integrations settings with Ctrl+, to add some)_".to_string();
+    }
+    let mut out = String::new();
+    let mut any_activity = false;
+    for (repo, result) in repo_results {
+        out.push_str(&format!("**{}**\n", repo));
+        match result {
+            Err(e) => {
+                out.push_str(&format!("- _(couldn't fetch: {})_\n\n", e));
+            }
+            Ok((commits, prs)) => {
+                if commits.is_empty() && prs.is_empty() {
+                    out.push_str("- _(no activity in the last 24h)_\n\n");
+                    continue;
+                }
+                any_activity = true;
+                if !commits.is_empty() {
+                    out.push_str(&format!(
+                        "- {} commit{} in the last 24h:\n",
+                        commits.len(),
+                        if commits.len() == 1 { "" } else { "s" }
+                    ));
+                    for c in commits.iter().take(10) {
+                        let short_sha = c.sha.chars().take(7).collect::<String>();
+                        let first_line = c
+                            .commit
+                            .message
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        out.push_str(&format!("  - `{}` {}\n", short_sha, first_line));
+                    }
+                    if commits.len() > 10 {
+                        out.push_str(&format!("  - _…and {} more_\n", commits.len() - 10));
+                    }
+                }
+                if !prs.is_empty() {
+                    out.push_str(&format!(
+                        "- {} open PR{} authored by you:\n",
+                        prs.len(),
+                        if prs.len() == 1 { "" } else { "s" }
+                    ));
+                    for pr in prs.iter().take(10) {
+                        let title = pr.title.replace('\n', " ");
+                        out.push_str(&format!("  - #{} \"{}\"\n", pr.number, title));
+                    }
+                    if prs.len() > 10 {
+                        out.push_str(&format!("  - _…and {} more_\n", prs.len() - 10));
+                    }
+                }
+                out.push('\n');
+            }
+        }
+    }
+    if !any_activity && !out.is_empty() {
+        out.push_str("_(quiet day across all repos)_\n");
+    }
+    out.trim_end().to_string()
+}
+
+/// Inner async worker that does the actual API calls. Caches results
+/// for 10 minutes keyed on a fingerprint of the (token, repos) pair.
+async fn fetch_github_summary_inner(cfg: GitHubConfig) -> GitHubSummary {
+    if cfg.token.is_empty() {
+        return GitHubSummary {
+            markdown:
+                "_(no GitHub token configured — open Integrations settings with Ctrl+, to connect)_"
+                    .to_string(),
+            last_fetch_iso: String::new(),
+            error: "no token".to_string(),
+        };
+    }
+    let fingerprint = github_config_fingerprint(&cfg);
+    if let Ok(g) = GITHUB_SUMMARY_CACHE.lock() {
+        if let Some(cache) = &*g {
+            if cache.config_fingerprint == fingerprint {
+                if let Ok(age) = SystemTime::now().duration_since(cache.fetched_at) {
+                    if age.as_secs() < GITHUB_CACHE_TTL_SECS {
+                        return cache.summary.clone();
+                    }
+                }
+            }
+        }
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return GitHubSummary {
+                markdown: format!("_(couldn't build HTTP client: {})_", e),
+                last_fetch_iso: String::new(),
+                error: format!("client build failed: {}", e),
+            };
+        }
+    };
+    let login = match gh_get_user_login(&client, &cfg.token).await {
+        Ok(l) => l,
+        Err(e) => {
+            return GitHubSummary {
+                markdown: format!("_(couldn't fetch GitHub: {})_", e),
+                last_fetch_iso: String::new(),
+                error: e,
+            };
+        }
+    };
+    let since = iso_24h_ago();
+    let mut results: Vec<(String, Result<(Vec<GhCommitItem>, Vec<GhPullItem>), String>)> =
+        Vec::new();
+    for repo in &cfg.repos {
+        let trimmed = repo.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let commits = gh_recent_commits(&client, &cfg.token, trimmed, &since).await;
+        let prs = gh_open_prs(&client, &cfg.token, trimmed, &login).await;
+        let combined = match (commits, prs) {
+            (Ok(c), Ok(p)) => Ok((c, p)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        };
+        results.push((trimmed.to_string(), combined));
+    }
+    let markdown = format_github_markdown(&results);
+    let now_iso = iso_now();
+    let summary = GitHubSummary {
+        markdown,
+        last_fetch_iso: now_iso,
+        error: String::new(),
+    };
+    if let Ok(mut g) = GITHUB_SUMMARY_CACHE.lock() {
+        *g = Some(GitHubSummaryCache {
+            fetched_at: SystemTime::now(),
+            config_fingerprint: fingerprint,
+            summary: summary.clone(),
+        });
+    }
+    summary
+}
+
+#[tauri::command]
+fn get_github_config(app: tauri::AppHandle) -> Result<Option<GitHubConfig>, String> {
+    let cfg = read_config(&app)?;
+    Ok(cfg.github)
+}
+
+#[tauri::command]
+fn set_github_config(
+    app: tauri::AppHandle,
+    token: String,
+    repos: Vec<String>,
+) -> Result<(), String> {
+    let mut cfg = read_config(&app)?;
+    let token_changed = cfg
+        .github
+        .as_ref()
+        .map(|g| g.token != token)
+        .unwrap_or(true);
+    let cleaned_repos: Vec<String> = repos
+        .into_iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    cfg.github = Some(GitHubConfig {
+        token,
+        repos: cleaned_repos,
+    });
+    write_config(&app, &cfg)?;
+    if token_changed {
+        if let Ok(mut g) = GITHUB_USER_LOGIN_CACHE.lock() {
+            *g = None;
+        }
+    }
+    if let Ok(mut g) = GITHUB_SUMMARY_CACHE.lock() {
+        *g = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_github_config(app: tauri::AppHandle) -> Result<(), String> {
+    let mut cfg = read_config(&app)?;
+    cfg.github = None;
+    write_config(&app, &cfg)?;
+    if let Ok(mut g) = GITHUB_USER_LOGIN_CACHE.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = GITHUB_SUMMARY_CACHE.lock() {
+        *g = None;
+    }
+    Ok(())
+}
+
+/// Force a fresh fetch (bypasses the 10-min cache). Used by the
+/// settings modal's "Test connection" button.
+#[tauri::command]
+async fn fetch_github_summary_now(app: tauri::AppHandle) -> Result<GitHubSummary, String> {
+    if let Ok(mut g) = GITHUB_SUMMARY_CACHE.lock() {
+        *g = None;
+    }
+    let cfg = read_config(&app)?.github.unwrap_or_default();
+    Ok(fetch_github_summary_inner(cfg).await)
+}
+
+/// Fetch (cache-respecting). Used by Ctrl+Shift+G insert-at-cursor and
+/// by `regenerate_github_section` for daily-note auto-population.
+#[tauri::command]
+async fn fetch_github_summary(app: tauri::AppHandle) -> Result<GitHubSummary, String> {
+    let cfg = read_config(&app)?.github.unwrap_or_default();
+    Ok(fetch_github_summary_inner(cfg).await)
+}
+
+/// Helper: stick the markers + body directly under
+/// "## Today's GitHub activity", or append a fresh section at EOF.
+/// Mirrors `insert_under_heading` for Cluster 8's reagents table.
+fn insert_github_under_heading(existing: &str, body: &str) -> String {
+    if let Some(idx) = existing.find(GITHUB_HEADING) {
+        let after_heading = &existing[idx + GITHUB_HEADING.len()..];
+        let line_end = after_heading.find('\n').unwrap_or(after_heading.len());
+        let head_end = idx + GITHUB_HEADING.len() + line_end;
+        let head = &existing[..head_end];
+        let tail = &existing[head_end..];
+        // Limit our auto-section's reach to the next H2 so we don't
+        // own anything below.
+        let next_h2 = tail
+            .find("\n## ")
+            .map(|i| i + 1)
+            .unwrap_or_else(|| tail.len());
+        let after_section = &tail[next_h2..];
+        format!(
+            "{head}\n\n{start}\n{body}\n{end}\n{after_section}",
+            head = head,
+            start = GITHUB_AUTO_START,
+            body = body,
+            end = GITHUB_AUTO_END,
+            after_section = after_section,
+        )
+    } else {
+        format!(
+            "{existing}\n\n{heading}\n\n{start}\n{body}\n{end}\n",
+            existing = existing.trim_end(),
+            heading = GITHUB_HEADING,
+            start = GITHUB_AUTO_START,
+            body = body,
+            end = GITHUB_AUTO_END,
+        )
+    }
+}
+
+/// Splice a fresh GitHub summary into the given file (typically
+/// today's daily note). Three cases mirroring `regenerate_method_reagents`:
+///   a. Both markers present — replace between them.
+///   b. Markers missing but heading exists — insert markers under it.
+///   c. Heading missing entirely — append a fresh section at EOF.
+///
+/// Idempotent: the file is only re-written when the computed content
+/// differs from disk, avoiding spurious git commits.
+///
+/// Only operates on today's daily note (matched by basename ===
+/// "<today_iso>.md"). Past daily notes stay frozen as the day's
+/// snapshot.
+#[tauri::command]
+async fn regenerate_github_section(
+    app: tauri::AppHandle,
+    vault_path: String,
+    file_path: String,
+) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+    let basename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let today_basename = format!("{}.md", today_iso_date());
+    if basename != today_basename {
+        // Past daily note — leave it alone.
+        return Ok(());
+    }
+    let cfg = read_config(&app)?.github.unwrap_or_default();
+    if cfg.token.is_empty() || cfg.repos.is_empty() {
+        // Don't touch the file if the user hasn't configured anything.
+        // The "no token" / "no repos" hint only appears when the user
+        // explicitly asks for a summary (via Ctrl+Shift+G or the
+        // settings modal); it shouldn't auto-inject into the daily
+        // note.
+        return Ok(());
+    }
+    let existing = match fs::read_to_string(&file_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let summary = fetch_github_summary_inner(cfg).await;
+    let new_content = if let (Some(start_idx), Some(end_idx)) = (
+        existing.find(GITHUB_AUTO_START),
+        existing.find(GITHUB_AUTO_END),
+    ) {
+        if end_idx > start_idx {
+            let head = &existing[..start_idx + GITHUB_AUTO_START.len()];
+            let tail = &existing[end_idx..];
+            format!(
+                "{head}\n{body}\n{tail}",
+                head = head,
+                body = summary.markdown,
+                tail = tail
+            )
+        } else {
+            insert_github_under_heading(&existing, &summary.markdown)
+        }
+    } else {
+        insert_github_under_heading(&existing, &summary.markdown)
+    };
+    if new_content != existing {
+        fs::write(&file_path, new_content).map_err(|e| e.to_string())?;
+        index_single_file(vault_path, file_path)?;
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // App entry
 // -----------------------------------------------------------------------------
 
@@ -3899,6 +4538,12 @@ pub fn run() {
             create_method,
             create_protocol,
             regenerate_method_reagents,
+            get_github_config,
+            set_github_config,
+            clear_github_config,
+            fetch_github_summary,
+            fetch_github_summary_now,
+            regenerate_github_section,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

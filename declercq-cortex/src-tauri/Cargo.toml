@@ -32,4 +32,9 @@ walkdir = "2"
 # system PDF library dependency. Some PDFs (encrypted, image-only) extract
 # nothing — we treat that as "not searchable" rather than fatal.
 pdf-extract = "0.7"
+# Cluster 10: HTTP client for the GitHub integration. rustls-tls keeps us
+# off the system OpenSSL on Linux/Windows and lets the integration build
+# in any CI/dev environment without a system crypto library. `json` brings
+# in serde_json wiring for deserialising API responses.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 

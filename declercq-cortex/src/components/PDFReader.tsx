@@ -113,6 +113,12 @@ interface PDFReaderProps {
   vaultPath: string;
   filePath: string;
   onClose: () => void;
+  /**
+   * True when the host TabPane is the active slot. Window-level
+   * keydown listeners (Ctrl+K) gate on this so a press doesn't toggle
+   * every mounted PDFReader at once when multiple slots have PDFs.
+   */
+  isActive?: boolean;
 }
 
 const ZOOM_MIN = 0.5;
@@ -304,7 +310,12 @@ function makeRangeForOffset(
   return range;
 }
 
-export function PDFReader({ vaultPath, filePath, onClose }: PDFReaderProps) {
+export function PDFReader({
+  vaultPath,
+  filePath,
+  onClose,
+  isActive = true,
+}: PDFReaderProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
@@ -868,10 +879,16 @@ export function PDFReader({ vaultPath, filePath, onClose }: PDFReaderProps) {
   }, []);
 
   // Ctrl/Cmd+K toggles the search bubble. App.tsx skips its global
-  // palette while activeView === "pdf-reader", so this listener is the
-  // sole owner of Ctrl+K when the reader is mounted.
+  // palette while the ACTIVE slot's view is "pdf-reader", so this
+  // listener is the sole owner of Ctrl+K when the reader is mounted
+  // *in the active slot*. Multiple PDFReader instances may be mounted
+  // simultaneously (multi-tab layout) — the `isActive` gate ensures
+  // only the active slot's reader reacts. The Escape and F3 / Ctrl+G
+  // hit-navigation paths are also gated so an inactive PDF's bubble
+  // doesn't intercept those when another slot is in focus.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (!isActive) return;
       if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setSearchOpen((s) => !s);
@@ -891,7 +908,7 @@ export function PDFReader({ vaultPath, filePath, onClose }: PDFReaderProps) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchOpen, searchHits.length, currentHitIdx]);
+  }, [isActive, searchOpen, searchHits.length, currentHitIdx]);
 
   // Focus the search input as soon as the bubble opens, AND select the
   // existing query so a fresh keystroke replaces it. searchQuery state
@@ -1203,6 +1220,15 @@ export function PDFReader({ vaultPath, filePath, onClose }: PDFReaderProps) {
 
   // ----- Render -------------------------------------------------------------
 
+  // Cluster 6 v1.6 — PDFReader owns its own scroll container. The wrap
+  // is a non-scrolling flex column (header + scrollable pages). Search
+  // bubble + annotation panels live as siblings of the scroll area
+  // inside the wrap, so they pin to the visible viewport instead of
+  // scrolling away with the pages. TabPane's paneRoot stops scrolling
+  // for PDF view (it switches to overflow: hidden) so only the inner
+  // page scrollbar shows — fixes the "outer scrollbar moves when
+  // clicking a search hit" report.
+
   return (
     <div style={styles.wrap}>
       <header style={styles.header}>
@@ -1339,15 +1365,17 @@ export function PDFReader({ vaultPath, filePath, onClose }: PDFReaderProps) {
         )}
       </header>
 
-      <div
-        ref={containerRef}
-        className={
-          pageLayout === "two"
-            ? "pdf-pages pdf-pages-two"
-            : "pdf-pages pdf-pages-single"
-        }
-        style={styles.pages}
-      />
+      <div style={styles.scrollArea}>
+        <div
+          ref={containerRef}
+          className={
+            pageLayout === "two"
+              ? "pdf-pages pdf-pages-two"
+              : "pdf-pages pdf-pages-single"
+          }
+          style={styles.pages}
+        />
+      </div>
 
       {selectionBubble && (
         <div
@@ -1888,15 +1916,37 @@ const styles: Record<string, React.CSSProperties> = {
   // position: absolute) to the PDF reader's bounding box, so it
   // pins to the top-right of *its own tab* in multi-tab layouts
   // instead of escaping to the window-level top-right.
-  wrap: { maxWidth: "1100px", margin: "0 auto", position: "relative" },
+  //
+  // v1.6: wrap is now a flex column with overflow: hidden. The
+  // header is a non-shrinking child at the top; the pages live in
+  // a scrollable child (`scrollArea`) below; absolute-positioned
+  // overlays (search bubble) anchor to the wrap so they pin to
+  // the visible area instead of scrolling away with the pages.
+  wrap: {
+    maxWidth: "1100px",
+    margin: "0 auto",
+    position: "relative",
+    height: "100%",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+  },
   header: {
     paddingBottom: "0.75rem",
     marginBottom: "1rem",
     borderBottom: "1px solid var(--border)",
-    position: "sticky",
-    top: 0,
     background: "var(--bg)",
     zIndex: 2,
+    flex: "0 0 auto",
+  },
+  // The PDFReader's own scroll container (added in v1.6). Keeps
+  // marker.scrollIntoView() targeting this container instead of
+  // bubbling up to TabPane's paneRoot — that's what made the
+  // "outer scrollbar moves on search hit" bug visible.
+  scrollArea: {
+    flex: "1 1 auto",
+    overflowY: "auto",
+    position: "relative",
   },
   titleRow: {
     display: "flex",
@@ -2169,11 +2219,20 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 6,
     overflow: "hidden",
   },
-  // ---- in-PDF search bubble (Cluster 6 v1.3) ----
-  // `position: absolute` (not fixed) anchors to the PDF reader's
-  // wrap (position: relative) so in multi-tab the bubble lives in
-  // the top-right of its own tab, not the top-right of the
-  // window. `top: 12px` puts it just under the sticky toolbar.
+  // ---- in-PDF search bubble ----
+  // `position: absolute` anchors to the PDF reader's wrap (which is
+  // position: relative AND overflow: hidden). The wrap doesn't scroll
+  // — the inner scrollArea does — so the bubble pins to the top-right
+  // of the visible PDF tab and doesn't scroll away as the user moves
+  // through pages. v1.6 fix.
+  //
+  // `top: 12px` overlays the toolbar's right edge by design; the
+  // bubble is wide enough that pushing it below the header would
+  // require either a header-height observer or a hardcoded offset
+  // that breaks if the header content wraps (e.g., long PDF
+  // filename). Overlaying with z-index 1250 > header z-index 2 is
+  // the simpler choice; the user can dismiss the bubble with Esc
+  // if they need the toolbar back.
   searchBubble: {
     position: "absolute",
     top: "12px",

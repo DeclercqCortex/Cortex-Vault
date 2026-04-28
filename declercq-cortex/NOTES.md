@@ -1212,3 +1212,202 @@ close/switch/open functionality continues to work per-pane.
 - **The active-slot indicator is subtle.** A 2px accent
   outline plus the top-bar label. If users miss which slot is
   active, the indicator can be made bolder later.
+
+---
+
+## Phase 3 — Cluster 10 v1.0 — GitHub integration
+
+The first read-only integration. Calendar and Overleaf are deliberately
+out of scope for this cluster — the cluster doc is explicit about
+"build only the integration whose trigger has fired."
+
+### What landed
+
+- **`VaultConfig.github: Option<GitHubConfig>`** with `#[serde(default)]`
+  on the new field so existing pre-Cluster-10 `config.json` files load
+  without migration. The token + repos list live alongside `vault_path`
+  in `%APPDATA%\declercq-cortex\config.json`. Same schema-additivity
+  rule as Phase 1 Week 1's "stuff `last_open_file` in early to avoid
+  migration."
+- **`reqwest = { version = "0.12", default-features = false, features
+  = ["rustls-tls", "json"] }`** as the only new Rust dep. rustls keeps
+  Cortex off OpenSSL on Linux/Windows so dev / CI builds don't need a
+  system crypto library.
+- **Six new Tauri commands**:
+  - `get_github_config` — for the modal's initial load.
+  - `set_github_config` / `clear_github_config` — modal save / disconnect.
+  - `fetch_github_summary` (cache-respecting) — used by the Ctrl+Shift+G
+    insert-at-cursor flow and by `regenerate_github_section` so the
+    cache is honoured uniformly.
+  - `fetch_github_summary_now` (cache-bypassing) — used by the modal's
+    Test connection button so the user always gets a fresh probe.
+  - `regenerate_github_section` — splices today's daily note via the
+    same auto-marker pattern Cluster 8 v2 introduced for Methods.
+- **`IntegrationsSettings.tsx`** modal: token field with show/hide,
+  per-repo rows (add/remove), Save / Disconnect / Test connection /
+  Close actions, inline test-result panel that shows the markdown
+  preview and the last-fetch ISO timestamp (or the error string on
+  failure). Reachable via Ctrl+, or the new "GH" sidebar button.
+- **`Ctrl+Shift+G`** keyboard shortcut: fetches a fresh summary
+  (cache-respecting) and inserts a "## Today's GitHub activity"
+  heading + body at the cursor in the active pane. Mirrors
+  Ctrl+Shift+B's experiment-block flow exactly.
+- **Auto-populate today's daily note** via a new branch in
+  `App.selectFileInSlot` — opening anything under `02-Daily Log/`
+  invokes `regenerate_github_section`, which is itself gated to the
+  current ISO date so past daily notes stay frozen.
+- **`ShortcutsHelp.tsx`** updated: Ctrl+, and Ctrl+Shift+G land in
+  the "Always active" section; the "Settings (later)" placeholder
+  in "Coming later" is removed.
+
+### Architectural choices
+
+- **Section-scoped HTML markers (`<!-- GITHUB-AUTO-START -->`,
+  `<!-- GITHUB-AUTO-END -->`).** Same shape Cluster 8 v2 uses for the
+  Reagents/Parts table inside a Method file: Cortex owns the region
+  between the markers, the user owns everything else. Three insertion
+  branches: both markers present → splice between them; markers
+  missing but `## Today's GitHub activity` heading exists → insert
+  markers under the heading; heading missing entirely → append a
+  fresh section at EOF. `insert_github_under_heading` is a copy-and-
+  adjust of `insert_under_heading`.
+- **Idempotent regen.** The file is rewritten only when the computed
+  content differs from disk, so opening today's daily note twice in
+  10 minutes doesn't burn a git commit. `populate_reading_log` and
+  `regenerate_method_reagents` already follow this pattern.
+- **Today-only auto-populate.** `regenerate_github_section`
+  short-circuits when the basename ≠ `<today_iso>.md`. Past daily
+  notes stay as the day's snapshot — opening yesterday's note with
+  GitHub configured does NOT overwrite the section that was current
+  yesterday. The cluster doc's "_(no PDF annotations dated…)_"
+  precedent told me freezing past daily content is the right default.
+- **Two caches, both in-process, both invalidated on config change.**
+  - `GITHUB_USER_LOGIN_CACHE`: `(token_prefix, login)` tuple keyed on
+    the first 8 chars of the token. The login doesn't change for a
+    given token, so a forever-in-process cache is correct;
+    invalidation only happens when the token actually changes.
+  - `GITHUB_SUMMARY_CACHE`: 10-minute TTL keyed on a fingerprint of
+    `(token_prefix, joined_repos)`. The fingerprint avoids serving a
+    stale cache after a settings change without leaking the full
+    token into a key. `Mutex<Option<...>>` in `static` (Rust 1.63+
+    const Mutex::new); explicit `lock().ok().and_then(...)` so a
+    poisoned mutex degrades to a fresh fetch instead of crashing.
+- **Token storage in config.json, not OS keychain.** Cluster doc's
+  explicit Phase 3 v1 trade-off: OS keychain integration is reserved
+  for v2. The config file lives under `%APPDATA%\declercq-cortex\`
+  which Windows ACLs to user-only by default. Acceptable for a
+  single-user personal tool; flagged below as a v2 candidate if the
+  user ever shares the vault folder.
+- **PR filter is client-side.** `/repos/{owner}/{repo}/pulls?state=open`
+  returns every open PR; we keep only those whose `user.login` matches
+  the authenticated user. The alternative (`/search/issues?q=…`)
+  would be one round-trip total but adds a secondary parsing surface
+  and a different rate-limit bucket. Per-repo iteration is one extra
+  request per repo; cheap at the scale a single user works at.
+- **Lenient PR JSON parsing.** Open PRs are parsed via
+  `serde_json::Value` rather than a typed struct so an unexpected
+  GitHub API field doesn't crash the deserialiser. Each PR's `number`
+  and `title` are pulled defensively with `.and_then(|v| v.as_…())`
+  and a sentinel filter (skip PRs with `number == 0`). Commits use
+  the typed `GhCommitItem` because the shape is more stable.
+- **Empty repo (HTTP 409 from /commits)** is treated as "no commits",
+  not an error. GitHub returns a 409 specifically for this case;
+  surfacing it as an error would create misleading "couldn't fetch"
+  rows for empty repos that are otherwise fine.
+- **Client-side timeout of 15 seconds.** `reqwest::Client::builder().timeout(...)`.
+  Long enough to absorb a slow hop, short enough that opening a daily
+  note never waits forever for a network that's actually down.
+- **Markdown insertion mirrors `::experiment` precedent.** The
+  Ctrl+Shift+G handler builds an array of TipTap paragraph nodes,
+  not a parsed-and-rendered markdown blob. The user sees raw
+  `**repo**` syntax briefly; tiptap-markdown's `html: true` parser
+  renders it fully on save+reload. This is the same UX trade-off as
+  experiment blocks; consistent enough that we don't need a new
+  pattern for "insert formatted markdown."
+
+### Files touched
+
+- `src-tauri/Cargo.toml` — added `reqwest` (rustls + json features).
+- `src-tauri/src/lib.rs` —
+  - `VaultConfig.github: Option<GitHubConfig>` (new struct, both
+    serde-defaulted).
+  - Marker constants `GITHUB_AUTO_START` / `GITHUB_AUTO_END`,
+    heading constant `GITHUB_HEADING`, user-agent + accept headers,
+    `GITHUB_CACHE_TTL_SECS`.
+  - Static caches: `GITHUB_USER_LOGIN_CACHE`,
+    `GITHUB_SUMMARY_CACHE` (with `GitHubSummaryCache` envelope).
+  - `GitHubSummary` (serde-friendly response struct returned to the
+    frontend).
+  - `GhUser`, `GhCommitItem`, `GhCommitInner`, `GhPullItem` —
+    deserialisers for the GitHub responses we read.
+  - Helpers: `github_config_fingerprint`, `iso_utc_from_unix`,
+    `iso_now`, `iso_24h_ago`.
+  - Async helpers: `gh_get_user_login`, `gh_recent_commits`,
+    `gh_open_prs` (the last uses `serde_json::Value` for lenience).
+  - Pure formatter: `format_github_markdown`.
+  - Inner orchestrator: `fetch_github_summary_inner` — handles cache
+    lookup, client construction, login fetch, per-repo fan-out,
+    formatting, and cache write.
+  - `insert_github_under_heading` (sibling of `insert_under_heading`).
+  - Six Tauri commands (see "What landed").
+  - `invoke_handler` registers all six.
+- `src/components/IntegrationsSettings.tsx` — new modal.
+- `src/components/TabPane.tsx` —
+  - `TabPaneHandle` gains `insertGitHubMarkdown(markdown: string)`.
+  - Implementation in `useImperativeHandle` (mirrors
+    `insertExperimentBlock`'s shape).
+- `src/components/ShortcutsHelp.tsx` — Ctrl+, and Ctrl+Shift+G in
+  ALWAYS; "Settings (later)" removed from PLANNED.
+- `src/App.tsx` —
+  - Import `IntegrationsSettings`.
+  - `integrationsOpen` state.
+  - Ctrl+, and Ctrl+Shift+G keyboard handlers (the latter dispatches
+    to `paneRefs.current[activeSlotIdx].insertGitHubMarkdown`).
+  - `selectFileInSlot` daily-log branch invokes
+    `regenerate_github_section` after `populate_reading_log`.
+  - Sidebar "GH" button next to ReviewsMenu.
+  - `<IntegrationsSettings>` rendered alongside the other modals.
+- `verify-cluster-10.ps1` — new.
+- `phase_2_overview.md` — Cluster 10 status flipped to "GitHub
+  shipped (v1.0); GCal + Overleaf deferred."
+
+### Known rough edges
+
+- **Calendar + Overleaf are not built.** The cluster doc explicitly
+  says to build only the integration whose trigger has fired. The
+  GitHub trigger ("you alt-tab to GitHub multiple times a day while
+  writing daily notes") was the user's pick; Calendar / Overleaf
+  triggers haven't fired in the trial journal.
+- **Token in config.json.** Per-user file ACLs on Windows protect
+  this from other users on the same machine, but the token is on
+  disk in plaintext. v2 candidate: `tauri-plugin-stronghold` or the
+  Windows Credential Manager. Until then, document this in the
+  modal's hint text so the user knows.
+- **No rate-limit handling.** GitHub's REST API is 5000 reqs/hour
+  authenticated; with N repos and the 10-min cache, the worst case
+  is ~6 × N reqs/hour per user — well below the limit. Add 429
+  handling if a user reports it.
+- **No refresh-token logic** because GitHub PATs don't expire on a
+  schedule — they're long-lived until revoked. The 401 path tells
+  the user to check their token in the modal's error string.
+- **Markdown-as-text in the inserted block.** Ctrl+Shift+G inserts
+  raw markdown (`**repo**`, `- ` prefixes) which renders only after
+  save+reload. The `::experiment` block has the same UX. If this
+  becomes friction (it didn't for experiment blocks), the path is
+  to convert the markdown to HTML in JS via a minimal converter and
+  call `editor.commands.insertContent(html)`.
+- **Empty/non-existent repos render as italic error rows.** "_(couldn't
+  fetch: HTTP 404)_" is honest but ugly. A nicer UX would prune these
+  silently after a single 404 with a "remove?" hint in the modal.
+  Defer until it bites.
+- **No "PR last updated" timestamp.** The summary just shows
+  `#42 "title"`. `updated_at` is parsed but unused — easy to add
+  back if the user asks.
+- **Iso timestamps are UTC.** The "last fetch" line in the modal
+  shows e.g. `2026-04-28T14:32:00Z`. Local-time formatting is a
+  small UX win deferred to v1.1.
+- **Mutex poisoning on a panicking caller** would silently bypass
+  the cache (next fetch runs, then fails to write because the
+  mutex is poisoned). This is acceptable degradation — the user
+  gets a slow but correct fetch every call until the process
+  restarts.
