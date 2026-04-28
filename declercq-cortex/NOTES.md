@@ -717,3 +717,337 @@ typing.
   language switching. Not Cortex's problem to solve, but if a user
   with a Chinese/Japanese IME reports the chord stops working,
   that's the cause.
+
+---
+
+## Phase 3 — Cluster 6 — PDF Reader (full cluster, iterative ship)
+
+The cluster doc estimated 8-12 days at low confidence. This was
+shipped in one session as nine cohesive passes; the doc's "minimal
+version" path was rejected in favour of building the full surface so
+the marks-table and reading-log integrations are present from day
+one. Passes are described below in the order they landed.
+
+### Pass 1 — render anything
+
+- New Tauri command `read_binary_file(path) -> Vec<u8>`. Tauri 2
+  serialises this as a JS Number[] over IPC, which the frontend
+  wraps with `new Uint8Array(...)` before handing to PDF.js. The
+  Number[] form has ~5x byte overhead compared to native binary,
+  acceptable for v1; documented as a pivot to `convertFileSrc` if
+  long-PDF performance bites.
+- New dep: `pdfjs-dist@^4.10.38`. Worker URL wired via Vite's
+  `import "...pdf.worker.min.mjs?url"` pattern so the bundler emits
+  the worker as a hashed asset and Tauri's webview can resolve it.
+- New component `PDFReader.tsx` renders every page into its own
+  canvas at `cssScale * devicePixelRatio` resolution and CSS-scales
+  back. Crisp on HiDPI without doubling the layout.
+- `App.tsx` extended: `ActiveView` += `"pdf-reader"`; `selectFile`
+  detects `.pdf` and routes there instead of the markdown editor.
+- `index_single_file` short-circuits on `.pdf` until Pass 6/7
+  replace it with proper PDF indexing.
+
+### Pass 2 — toolbar
+
+- Sticky header with page navigation (prev/next arrows + a
+  click-to-edit page input that gotos on Enter or blur), a zoom
+  group (-, percent-as-button-resets, +, fit-width), and a counter
+  of "X annotations" (set by Pass 5).
+- Page-tracking via `IntersectionObserver` plus a `MutationObserver`
+  that re-attaches it when canvases get re-rendered at a new zoom.
+  Observed at thresholds [0.1, 0.5, 0.9] and the page with the
+  highest visible ratio wins.
+- Re-render pipeline split: bytes are loaded once in a path-keyed
+  effect; zoom changes trigger a separate render-only effect that
+  reuses the in-memory `pdfDoc`. Avoids re-fetching bytes every time
+  the user adjusts zoom.
+- Fit-width measures the first canvas's CSS width, divides by the
+  current zoom to recover the natural-at-1.0 width, and chooses a
+  zoom that makes that width fit the scroll container minus 24px.
+
+### Pass 3 — sidecar JSON I/O
+
+- New Tauri commands `read_pdf_annotations(pdf_path)` and
+  `write_pdf_annotations(pdf_path, sidecar)`.
+- Sidecar lives at `<pdf>.annotations.json` next to the PDF, JSON
+  pretty-printed for git-friendly diffs.
+- Schema mirrors the cluster doc:
+  `version`, `pdf_path`, `annotations[{ id, kind, page, rects[],
+  text, note, created_at, resolved }]`. Coords are in PDF points,
+  top-left origin (the frontend converts to/from screen coords).
+- Reading a non-existent sidecar returns an empty `AnnotationSidecar`
+  rather than erroring — that's the normal first-encounter state.
+
+### Passes 4 + 5 — annotation creation, rendering, editing
+
+- Per page, three stacked layers inside one wrapper div:
+  1. `<canvas>` — the bitmap render
+  2. `pdf-text-layer` — PDF.js's invisible-but-selectable spans,
+     which give us native text selection for free
+  3. `pdf-annotation-overlay` — coloured `<div>`s, one per
+     annotation rect, with `pointer-events: auto` on each rect and
+     `pointer-events: none` on the layer so clicks fall through
+     to the canvas/text layer except where rects are
+- Selection -> floating colour bubble: `selectionchange` listener
+  computes the selection's `getClientRects()`, offsets by the page
+  wrapper's bounding rect, divides by zoom to get PDF coords, and
+  shows the bubble above the first rect. Captured to a ref so the
+  React re-render that hides the bubble doesn't lose the data
+  before the click handler runs.
+- The bubble's `onMouseDown` calls `preventDefault` so clicking a
+  swatch doesn't clear the selection. Same trick on annotation
+  rects so clicking an existing annotation doesn't invalidate the
+  text selection mid-flow.
+- Annotation IDs are `ann-YYYY-MM-DD-N` where N is a per-vault
+  monotonic counter (length of annotations array + 1). Predictable
+  for git diffs.
+- Side panel: jump-to-page link, blockquote-formatted highlighted
+  text, colour-swatch row (current outlined), note textarea
+  (writes on blur), resolved checkbox (toggles overlay opacity),
+  delete button.
+- Every mutation persists the whole sidecar via
+  `write_pdf_annotations`, then triggers `index_single_file` so
+  Pass 6's marks integration stays consistent. Race-free because
+  the sidecar is the single source of truth and mutations are
+  serialised through React state.
+
+### Pass 6 — marks-table integration
+
+- `index_single_file`'s top-of-function PDF check now branches into
+  `index_pdf_file`, which:
+  1. Wipes existing rows for the path from notes/metadata/marks
+  2. Sets title from filename stem (no H1 to extract from PDFs)
+  3. Calls `extract_pdf_text` (Pass 7) — non-fatal on failure
+  4. Inserts into FTS5 `notes` with the title and extracted body
+  5. Reads sidecar; for each annotation, inserts a row into the
+     `marks` table with `source_path = pdf_path`,
+     `kind = annotation.kind`, `text`, `context` (text + note),
+     `line_number = page` (reused field — Cluster 3 destinations
+     prefix it with "L" so a page-7 highlight shows "L7"; cosmetic
+     but honest enough)
+- Net effect: PDF highlights flow uniformly into all the existing
+  Cluster 3 destination views (weekly review, Anti-Hype,
+  citations-to-use, etc.) alongside the corresponding daily-note
+  highlights. The "Cortex is one research surface" claim from the
+  cluster doc is now real.
+
+### Pass 7 — PDF text extraction for FTS5
+
+- New crate dep `pdf-extract = "0.7"`. Pure-Rust, no system PDF
+  library required.
+- `extract_pdf_text(file_path) -> Option<String>`. Returns `None`
+  on:
+  - `pdf-extract` errors (encrypted, malformed)
+  - empty extracted text (image-only/scanned PDFs)
+  - PANICS in dependency code (we wrap in `catch_unwind` because
+    `pdf-extract` has been observed to panic on rare malformed
+    inputs and we don't want one bad paper to take the indexer
+    down)
+- The body is fed into FTS5 via the existing `notes` table, so the
+  command palette searches PDF text alongside markdown.
+- No caching yet: every reindex re-extracts. Acceptable on small
+  vaults; a `<vault>/.research-hub/pdf-cache/<hash>.txt` cache is
+  ready to add when extraction time becomes a measurable
+  bottleneck.
+
+### Pass 8 — `::reading DATE ::end` reading-log block
+
+- Mirrors Cluster 4's `::experiment` pattern but simpler — no
+  database table, no auto-creation. Just a body rewriter.
+- New Tauri command `populate_reading_log(vault_path, daily_note)`:
+  reads the file, walks lines for `::reading DATE` headers, finds
+  the matching `::end`, replaces the inner content with a markdown
+  list of every PDF annotation across the vault whose `created_at`
+  starts with `DATE`. Sorted by PDF then page for stable output.
+- Source of truth: walks `*.annotations.json` sidecars rather than
+  the marks table, because the marks table's `created_at` is the
+  indexing time (drifts) while the sidecar's is the actual user-
+  creation time.
+- Hooked into App's `selectFile`: when opening anything under
+  `02-Daily Log/`, the populator runs. Idempotent — no-op when no
+  blocks are present, and a no-op when the computed content already
+  matches disk (no spurious git commits).
+- Empty result for a date is rendered as
+  `_(no PDF annotations on this date — yet)_` so the block is still
+  visually present.
+
+### Architectural choices worth flagging
+
+- **PDF.js, not PDFium.** Cluster doc explicitly endorses this for
+  the prototype; PDF.js's text layer gives us native selection for
+  free, which would require its own selection-layer implementation
+  with PDFium. Performance may be a problem on long PDFs (>200
+  pages); pivot to PDFium documented but deferred until measured.
+- **PDFs are walked into the SQLite index alongside markdown.** No
+  separate "pdf_index" table. Title, FTS5 body, and the marks rows
+  all share the schema with markdown notes, which means every
+  existing query (palette search, backlinks-by-text, mark-queue
+  views) just works.
+- **No `convertFileSrc` asset protocol — yet.** Bytes go over the
+  Tauri IPC bridge as Vec<u8>. Faster path documented but not
+  needed for sub-10MB papers.
+- **Sidecars are git-tracked.** No special handling required; the
+  vault's existing git repo backs them up alongside the PDFs.
+  Renaming or deleting a PDF leaves the sidecar orphaned (we don't
+  track that yet) — flagged below.
+- **Reading log walks the FS, not the index.** Robust against
+  drift; cheap on small vaults; will be revisited if a vault has
+  >100 PDFs and the daily-log open feels slow.
+
+### Files touched
+
+- `package.json` — added `pdfjs-dist@^4.10.38`
+- `src-tauri/Cargo.toml` — added `pdf-extract = "0.7"`
+- `src-tauri/src/lib.rs`:
+  - new `read_binary_file` command
+  - new `AnnotationRect`, `PdfAnnotation`, `AnnotationSidecar`
+    types
+  - new `read_pdf_annotations` and `write_pdf_annotations`
+    commands
+  - new `index_pdf_file` plumbed through `index_single_file`'s
+    top-level extension check
+  - new `extract_pdf_text` helper (`pdf-extract` crate, with
+    `catch_unwind` panic guard)
+  - new `populate_reading_log_for`, `process_reading_blocks`
+    helpers
+  - new `populate_reading_log` Tauri command
+  - all four registered in `invoke_handler`
+- `src/components/PDFReader.tsx` — new component (canvas + text
+  layer + annotation overlay + toolbar + selection bubble + side
+  panel)
+- `src/index.css` — new `.pdf-text-layer` and friends so the text
+  layer aligns with the canvas and selections render with the
+  Cortex blue
+- `src/App.tsx` — `ActiveView` += `"pdf-reader"`, `.pdf` route in
+  `selectFile`, `selectedPath` effect early-exit on PDFs, `02-Daily
+  Log/` open hook for `populate_reading_log`, `<PDFReader>` render
+  branch
+- `verify-cluster-6.ps1` — new
+- `phase_2_overview.md` — Cluster 6 status updated
+
+### Known rough edges
+
+- **Bytes-over-IPC for large PDFs.** A 30-MB book's worth of bytes
+  goes through Tauri's IPC as a JS Number[]. This works but is
+  perceptibly slow (several seconds). Pivot to `convertFileSrc`
+  ready when needed.
+- **`pdf-extract` quality.** Plain text extraction. Tables come out
+  as space-separated runs. Math/equations are unreliable. Scanned
+  PDFs return nothing. The cluster doc explicitly accepts this for
+  v1.
+- **Sidecar orphans on PDF rename/delete.** If you rename
+  `paper.pdf` to `paper-v2.pdf` outside Cortex, the sidecar at
+  `paper.pdf.annotations.json` is left behind and a fresh
+  `paper-v2.pdf.annotations.json` would be created on next
+  annotation. Documented in cluster doc's open questions; deferred.
+- **No `::reading` block ProseMirror decoration.** The block
+  markers (`::reading DATE` / `::end`) render as plain text in the
+  TipTap editor. Cluster 4's `::experiment` blocks have a
+  decoration that styles them as a green strip; we deliberately
+  did not mirror that for `::reading` to keep this cluster
+  shippable. Add later if visual noise becomes friction.
+- **Bubble + side-panel coexistence.** It's possible to have both
+  visible at once if the user creates an annotation, then drag-
+  selects again before clicking elsewhere. Not strictly a bug — the
+  bubble offers "create another", the panel shows the most-recent
+  selected — but a future polish pass might dismiss one when the
+  other appears.
+- **No within-PDF Ctrl+F yet.** PDF.js can do this, but wiring the
+  match-highlighting layer is its own afternoon's work and was
+  deferred. Workaround: command palette already searches across
+  the FTS5 index for the PDF's body.
+- **Annotation rect colour is RGBA-coded inline,** not via the
+  CSS variables Cluster 2 uses. Easy to refactor when the colour
+  semantics drift; for now hard-coded RGBA values match the
+  Mark System palette.
+
+### v1.1 — bug fixes + UX additions (post-ship)
+
+User-reported issues from the first real-world session:
+
+- **Every annotation/zoom action scrolled to top and back.** Cause:
+  `renderAllPages` cleared `container.innerHTML` and rebuilt every
+  page on every state change, including pure annotation mutations.
+  Fix: split the lifecycle so the page wrapper divs are created
+  once, the canvas+text-layer is re-rendered only on zoom, and the
+  annotation overlay div is replaced independently when the
+  sidecar mutates. Three separate functions
+  (`setupWrappers`, `renderPageContent`, `updatePageOverlay`)
+  with three separate `useEffect` triggers.
+- **Highlight rectangles bleeding across columns / appearing
+  multi-layered for a single highlight.** Cause: `getClientRects()`
+  returns several overlapping/nested rects per Range — sometimes a
+  full-line rect plus per-character rects, sometimes per-line plus
+  per-span. Fix: dedup pass that sorts the raw rects by area
+  descending and drops any rect fully contained within an already-
+  kept rect (1px epsilon). Single-action highlights now render as
+  one solid region. Multi-highlight stacking still darkens, which
+  the user explicitly wanted preserved.
+- **Plain click on a highlight popped the editor panel.** Annoying
+  while reading. Fix: click handler requires `e.ctrlKey ||
+  e.metaKey` to open the panel; plain clicks are no-ops. Tooltip
+  on each highlight reads "Ctrl+Click to edit · &lt;text&gt;" so
+  the affordance is discoverable.
+- **No way to see all annotations at once.** Fix: the toolbar's
+  "X annotations" counter is now a button. Clicking it flips the
+  side panel into list mode (sorted by page), each row showing
+  colour swatch, page number, the highlighted text, and any note
+  / linked-notes. Clicking a row jumps to that page and re-opens
+  the single-annotation panel. The single-panel header now has a
+  ☰ button to switch back to list mode.
+- **Annotations had no way to link out to notes.** Fix: each
+  annotation grew a `linked_notes: string[]` field (default empty
+  on existing sidecars via `#[serde(default)]` on the Rust struct,
+  defensive normalisation on the JS side). Side panel exposes
+  current links as removable chips and a "+ Link to note…" button
+  that opens a popup over `list_all_notes`; type-to-search,
+  Enter-to-pick-first, click-to-pick. Already-linked notes are
+  shown disabled in the list. Stored as the wikilink target only
+  (the title) — no path resolution at write time, so renames
+  Just Work via the existing wikilink-resolution machinery in the
+  editor.
+
+Pass 7 (PDF text in FTS5) didn't actually work in the first
+release because `rebuild_index` was filtered to `.md` only. The
+PDF branch in `index_single_file` would only fire when the user
+opened a PDF (which calls `index_single_file` directly through
+`persistSidecar`), never during the full-vault rebuild. Fixed by
+loosening the extension filter in `rebuild_index` to also accept
+`.pdf` (case-insensitive).
+
+Pass 8 (`::reading DATE ::end`) silently produced empty output
+when the user wrote anything that wasn't a YYYY-MM-DD prefix
+(e.g., a PDF title in angle brackets). Three improvements:
+
+- Empty argument or `today` → today's annotations
+- YYYY-MM-DD prefix → that date's annotations
+- Anything else → treated as a PDF stem, case-insensitive
+  substring match against PDF filenames; lists *all* annotations
+  from that PDF regardless of date
+- Empty result message tells the user which filter produced it
+  (`(no PDF annotations dated 2026-04-28 — yet)` vs
+  `(no PDF annotations matching `Hydrogels` — yet)`).
+
+`today_iso_date()` is hand-rolled via Howard Hinnant's
+civil-from-days algorithm to avoid pulling in `chrono`. Local-vs-
+UTC drift around midnight is inherited from `SystemTime::now`;
+documented as accepted.
+
+### Files touched (v1.1)
+
+- `src-tauri/src/lib.rs`:
+  - `rebuild_index` — now walks `.pdf` alongside `.md`
+  - new `looks_like_iso_date`, `today_iso_date`, `parse_reading_arg`
+    helpers
+  - `populate_reading_log_for` — accepts date / "today" / pdf-stem
+  - `PdfAnnotation` — gained `linked_notes: Vec<String>` with
+    `#[serde(default)]` for backwards-compat
+- `src/components/PDFReader.tsx` — refactored:
+  - `setupWrappers` (one-time) / `renderPageContent` (zoom) /
+    `updatePageOverlay` (sidecar) split
+  - selection rect dedup
+  - Ctrl+Click for the editing panel
+  - clickable annotation count → `panelMode = "list"`
+  - new `AnnotationListPanel`, `LinkNotePopup` components inside
+    the same file (kept co-located with the React state they
+    drive)

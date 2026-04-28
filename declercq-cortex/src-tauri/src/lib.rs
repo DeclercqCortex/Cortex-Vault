@@ -159,6 +159,564 @@ fn read_markdown_file(path: String) -> Result<String, String> {
     fs::read_to_string(&p).map_err(|e| format!("Failed to read file: {}", e))
 }
 
+/// Cluster 6: binary file read for PDF rendering. Returns the raw bytes as a
+/// `Vec<u8>` which Tauri serialises across the IPC boundary as a JS Number[];
+/// the frontend wraps it with `new Uint8Array(arr)` and hands it to PDF.js
+/// via `pdfjsLib.getDocument({ data: ... })`.
+///
+/// The Number[] form is wasteful for large files (~5x size on the wire) but
+/// correct. If long PDFs become a performance problem, switch to Tauri's
+/// asset protocol (`convertFileSrc`) and let PDF.js fetch over HTTP. Deferred
+/// until measured to be necessary.
+#[tauri::command]
+fn read_binary_file(path: String) -> Result<Vec<u8>, String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {}", p.display()));
+    }
+    fs::read(&p).map_err(|e| format!("Failed to read file: {}", e))
+}
+
+// =============================================================================
+// Cluster 6 — Annotation sidecars
+// =============================================================================
+//
+// For each PDF at `<vault>/path/to/paper.pdf`, annotations live alongside it
+// at `<vault>/path/to/paper.pdf.annotations.json`. Format (matches the spec
+// in cluster_06_pdf_reader.md):
+//
+//   {
+//     "version": 1,
+//     "pdf_path": "paper.pdf",
+//     "annotations": [
+//       {
+//         "id": "ann-2026-04-28-1",
+//         "kind": "yellow",
+//         "page": 7,
+//         "rects": [{"x": 142.3, "y": 521.7, "w": 230.5, "h": 14.2}],
+//         "text": "the highlighted quote here",
+//         "note": "optional written note",
+//         "created_at": "2026-04-28T14:23:00Z",
+//         "resolved": false
+//       }
+//     ]
+//   }
+//
+// Coordinates are in PDF point space, top-left origin (note: PDFs natively
+// use bottom-left, but we convert at write time so JSON consumers can stay
+// sane). The frontend converts back when rendering.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AnnotationRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PdfAnnotation {
+    pub id: String,
+    /// One of: yellow, green, pink, blue, orange, red, purple
+    pub kind: String,
+    pub page: i64,
+    pub rects: Vec<AnnotationRect>,
+    pub text: String,
+    #[serde(default)]
+    pub note: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub resolved: bool,
+    /// Wikilink targets the user has attached to this annotation. Stored
+    /// as plain strings ("Note title" or "filename"); resolution happens
+    /// in the editor via existing wikilink machinery. Default-empty on
+    /// older sidecars.
+    #[serde(default)]
+    pub linked_notes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AnnotationSidecar {
+    pub version: i64,
+    pub pdf_path: String,
+    pub annotations: Vec<PdfAnnotation>,
+}
+
+fn sidecar_path_for(pdf_path: &str) -> PathBuf {
+    let mut p = PathBuf::from(pdf_path).into_os_string();
+    p.push(".annotations.json");
+    PathBuf::from(p)
+}
+
+/// Read the sidecar for the given PDF. Returns an empty sidecar (with the
+/// pdf_path filled in) if the file does not yet exist — that's the normal
+/// state for a freshly-encountered PDF. Errors surface only for genuine
+/// I/O or parse failures.
+#[tauri::command]
+fn read_pdf_annotations(pdf_path: String) -> Result<AnnotationSidecar, String> {
+    let sidecar = sidecar_path_for(&pdf_path);
+    if !sidecar.exists() {
+        return Ok(AnnotationSidecar {
+            version: 1,
+            pdf_path: PathBuf::from(&pdf_path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| pdf_path.clone()),
+            annotations: Vec::new(),
+        });
+    }
+    let raw = fs::read_to_string(&sidecar).map_err(|e| {
+        format!(
+            "Failed to read sidecar at {}: {}",
+            sidecar.to_string_lossy(),
+            e
+        )
+    })?;
+    serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "Sidecar at {} is malformed: {}",
+            sidecar.to_string_lossy(),
+            e
+        )
+    })
+}
+
+/// Overwrite the sidecar with the given content. Pretty-prints so the file
+/// is diff-friendly under git. Empty annotations vec is allowed (and writes
+/// the file rather than deleting — keeps the file as a tracked git object).
+#[tauri::command]
+fn write_pdf_annotations(pdf_path: String, sidecar: AnnotationSidecar) -> Result<(), String> {
+    let target = sidecar_path_for(&pdf_path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent {:?} for sidecar: {}", parent, e))?;
+    }
+    let body = serde_json::to_string_pretty(&sidecar)
+        .map_err(|e| format!("Failed to serialise sidecar: {}", e))?;
+    fs::write(&target, body).map_err(|e| format!("Failed to write sidecar {:?}: {}", target, e))?;
+    Ok(())
+}
+
+/// Cluster 6 / Pass 7: server-side PDF text extraction. Returns the
+/// extracted text on success, or `None` on any failure (encrypted PDF,
+/// image-only/scanned PDF, malformed file, library panic). The caller
+/// treats `None` as "not searchable" — non-fatal.
+///
+/// `pdf-extract` can panic on some malformed PDFs in dependency code; we
+/// guard with `catch_unwind` so a single bad paper can't take the whole
+/// indexer down.
+fn extract_pdf_text(file_path: &str) -> Option<String> {
+    let path = PathBuf::from(file_path);
+    let result = std::panic::catch_unwind(|| pdf_extract::extract_text(&path));
+    match result {
+        Ok(Ok(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Ok(Err(e)) => {
+            eprintln!("[cortex] pdf-extract failed for {}: {}", file_path, e);
+            None
+        }
+        Err(_) => {
+            eprintln!(
+                "[cortex] pdf-extract PANICKED for {}; indexed without text",
+                file_path
+            );
+            None
+        }
+    }
+}
+
+/// Index a PDF into the same SQLite tables the markdown pipeline uses, so
+/// PDF annotations flow into Cluster 3 destination views (weekly review,
+/// Anti-Hype, etc.) and PDF text becomes searchable from the command
+/// palette.
+///
+/// What happens, in order:
+///   1. Drop existing rows for this path from notes / metadata / marks.
+///   2. Compute a title from the file stem (PDFs have no H1 to extract).
+///   3. Try to extract text via the `pdf-extract` crate (Pass 7). If it
+///      fails (encrypted, scanned, malformed), we still index the file
+///      with empty body so Pass 6's mark-population still happens.
+///   4. Read the sidecar JSON and write one mark row per annotation.
+fn index_pdf_file(vault_path: &str, file_path: &str) -> Result<(), String> {
+    let conn = open_or_init_db(vault_path)?;
+
+    // Wipe stale entries.
+    conn.execute("DELETE FROM notes WHERE path = ?1", params![file_path])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM metadata WHERE path = ?1", params![file_path])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM links WHERE source = ?1", params![file_path])
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM marks WHERE source_path = ?1",
+        params![file_path],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let title = PathBuf::from(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("PDF")
+        .to_string();
+
+    // Pass 7: extract text. extract_pdf_text returns "" on failure rather
+    // than propagating, because a non-extractable PDF is not a fatal error.
+    let body = extract_pdf_text(file_path).unwrap_or_default();
+
+    // Insert into FTS5 + metadata.
+    conn.execute(
+        "INSERT INTO notes (path, title, body) VALUES (?1, ?2, ?3)",
+        params![file_path, &title, &body],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let modified = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata (path, frontmatter, modified) VALUES (?1, ?2, ?3)",
+        params![file_path, "{}", modified],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Pass 6: read sidecar, populate marks table.
+    let sidecar = read_pdf_annotations(file_path.to_string()).unwrap_or(AnnotationSidecar {
+        version: 1,
+        pdf_path: file_path.to_string(),
+        annotations: Vec::new(),
+    });
+
+    let now_secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    for ann in sidecar.annotations.iter() {
+        // The marks table reuses `line_number` for PDF annotations as the
+        // page number. Cluster 3 destination views display whatever's in
+        // line_number with an "L" prefix; we accept "L7" being shown for
+        // a page-7 annotation. Cosmetic; revisit if confusing in practice.
+        let context = if ann.note.is_empty() {
+            ann.text.clone()
+        } else {
+            format!("{} — {}", ann.text, ann.note)
+        };
+        conn.execute(
+            "INSERT INTO marks
+             (source_path, kind, text, context, line_number, resolved, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                file_path,
+                &ann.kind,
+                &ann.text,
+                &context,
+                ann.page,
+                if ann.resolved { 1 } else { 0 },
+                now_secs,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Cluster 6 v1.2: each annotation's linked notes write a row
+        // into the `links` table so the linked note's existing
+        // BacklinksPanel surfaces this PDF as a backlink. Targets are
+        // stored as the user wrote them (typically the note title);
+        // the resolver in get_backlinks already does case-insensitive
+        // title-or-filename matching.
+        for target in &ann.linked_notes {
+            let trimmed = target.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO links (source, target) VALUES (?1, ?2)",
+                params![file_path, trimmed],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Cluster 6 / Pass 8 — Reading log block populator
+// =============================================================================
+//
+// Daily notes can contain `::reading 2026-04-28 ::end` blocks that get
+// regenerated to a list of all PDF annotations created on that date.
+// Mirrors the experiment-block pattern from Cluster 4.
+//
+// Implementation chooses to walk the vault for sidecar files (rather than
+// query the marks table) because:
+//   1. The sidecar's annotation `created_at` is the actual user-creation
+//      time; the marks table's `created_at` is the indexing time, which
+//      can drift by hours.
+//   2. We don't depend on indexing having run before this populator does.
+//   3. Walk + JSON parse is fast on a vault with <100 PDFs.
+
+const SIDECAR_SUFFIX: &str = ".annotations.json";
+
+/// True when `s` looks like a YYYY-MM-DD prefix (10 chars with dashes
+/// at the right places, all-digits otherwise). Strict so "Assembly..."
+/// or "today" don't accidentally pass.
+fn looks_like_iso_date(s: &str) -> bool {
+    if s.len() < 10 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[..4].iter().all(|c| c.is_ascii_digit())
+        && bytes[5..7].iter().all(|c| c.is_ascii_digit())
+        && bytes[8..10].iter().all(|c| c.is_ascii_digit())
+}
+
+/// Returns today's date in local time as YYYY-MM-DD. Avoids a chrono
+/// dependency by hand-formatting from std::time. Local-vs-UTC drift is
+/// inherited from SystemTime::now (which is UTC); for now we accept the
+/// possible 1-day offset around midnight.
+fn today_iso_date() -> String {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days_since_epoch = (secs / 86_400) as i64;
+    // Civil-from-days, public-domain algorithm by Howard Hinnant.
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Match modes for the `::reading <arg> ::end` block.
+///   - Date: filter by created_at prefix
+///   - Pdf:  filter by source PDF stem (case-insensitive substring)
+///   - Today: shorthand for today's date
+enum ReadingFilter {
+    Date(String),
+    Pdf(String),
+    Today,
+}
+
+/// Parse the argument that follows `::reading `. Trims angle brackets,
+/// quotes, whitespace, and the HTML entities that `tiptap-markdown`
+/// emits when the user types literal `<text>` in the editor (its
+/// html-true round-trip escapes those to `&lt;text&gt;` on save).
+fn parse_reading_arg(raw: &str) -> ReadingFilter {
+    let cleaned = raw
+        .trim()
+        // Strip HTML entities first — the editor's markdown serializer
+        // turns user-typed `<` / `>` into `&lt;` / `&gt;` on save, so by
+        // the time we read the file the literal trim_matches passes
+        // below would not see angle brackets at all.
+        .replace("&lt;", "")
+        .replace("&gt;", "")
+        .replace("&quot;", "")
+        .replace("&amp;", "&")
+        .trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("today") {
+        ReadingFilter::Today
+    } else if looks_like_iso_date(&cleaned) {
+        ReadingFilter::Date(cleaned[..10].to_string())
+    } else {
+        ReadingFilter::Pdf(cleaned)
+    }
+}
+
+/// Format a Markdown list of all annotations across the vault matching
+/// `arg`. Argument can be a YYYY-MM-DD date, "today", a PDF stem (with
+/// or without surrounding angle brackets/quotes), or empty (= today).
+fn populate_reading_log_for(vault_path: &str, arg: &str) -> String {
+    let filter = parse_reading_arg(arg);
+    let today = today_iso_date();
+    let date_prefix = match &filter {
+        ReadingFilter::Date(d) => d.clone(),
+        ReadingFilter::Today => today.clone(),
+        ReadingFilter::Pdf(_) => String::new(),
+    };
+
+    let mut entries: Vec<(String, PdfAnnotation)> = Vec::new();
+
+    for entry in WalkDir::new(vault_path)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(name.starts_with('.') || name == "node_modules")
+        })
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path_str = entry.path().to_string_lossy().to_string();
+        if !path_str.ends_with(SIDECAR_SUFFIX) {
+            continue;
+        }
+        let raw = match fs::read_to_string(entry.path()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let sidecar: AnnotationSidecar = match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let pdf_path = path_str[..path_str.len().saturating_sub(SIDECAR_SUFFIX.len())].to_string();
+
+        // Pre-test the PDF stem once if filtering by PDF; cheap.
+        let pdf_stem = PathBuf::from(&pdf_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        let pdf_matches = match &filter {
+            ReadingFilter::Pdf(needle) => pdf_stem.contains(&needle.to_lowercase()),
+            _ => false,
+        };
+
+        for ann in sidecar.annotations {
+            let keep = match &filter {
+                ReadingFilter::Date(_) | ReadingFilter::Today => {
+                    ann.created_at.starts_with(&date_prefix)
+                }
+                ReadingFilter::Pdf(_) => pdf_matches,
+            };
+            if keep {
+                entries.push((pdf_path.clone(), ann));
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return match &filter {
+            ReadingFilter::Date(d) => {
+                format!("_(no PDF annotations dated {} — yet)_", d)
+            }
+            ReadingFilter::Today => format!("_(no PDF annotations dated {} — yet)_", today),
+            ReadingFilter::Pdf(needle) => {
+                format!("_(no PDF annotations matching `{}` — yet)_", needle)
+            }
+        };
+    }
+
+    // Sort by PDF then by page number for stable output.
+    entries.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.page.cmp(&b.1.page))
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
+
+    let mut out = String::new();
+    for (pdf_path, ann) in entries.iter() {
+        let stem = PathBuf::from(pdf_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| pdf_path.clone());
+        let snippet = ann.text.replace('\n', " ");
+        let note_part = if ann.note.is_empty() {
+            String::new()
+        } else {
+            format!(" — _{}_", ann.note.replace('\n', " "))
+        };
+        out.push_str(&format!(
+            "- **[[{stem}]]** (p. {page}, {kind}): {snippet}{note}\n",
+            stem = stem,
+            page = ann.page,
+            kind = ann.kind,
+            snippet = snippet,
+            note = note_part
+        ));
+    }
+    out
+}
+
+/// Walk the body of a daily note. For each `::reading DATE ::end` block
+/// found, replace the inner content with the populated annotation list.
+/// Pass-through for any other content. Returns the rewritten body.
+fn process_reading_blocks(body: &str, vault_path: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("::reading ") {
+            // Header line — keep as-is, capture the date.
+            let date_iso = rest.trim().to_string();
+            out.push_str(line);
+            out.push('\n');
+
+            // Find the matching ::end.
+            let mut j = i + 1;
+            while j < lines.len() && !lines[j].trim_start().starts_with("::end") {
+                j += 1;
+            }
+            // Replace body with populated content.
+            let populated = populate_reading_log_for(vault_path, &date_iso);
+            out.push_str(populated.trim_end());
+            out.push('\n');
+
+            if j < lines.len() {
+                out.push_str(lines[j]);
+                out.push('\n');
+                i = j + 1;
+            } else {
+                out.push_str("::end\n");
+                i = j;
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+            i += 1;
+        }
+    }
+    // Preserve trailing newline state — body.ends_with('\n') tells us.
+    if !body.ends_with('\n') {
+        // Strip the synthetic trailing newline we added on the last line.
+        if out.ends_with('\n') {
+            out.pop();
+        }
+    }
+    out
+}
+
+/// Populate any `::reading DATE ::end` blocks in the given daily note.
+/// Idempotent — a no-op if no blocks are present, and a no-op when the
+/// computed content matches what's already on disk (saves git commits).
+#[tauri::command]
+fn populate_reading_log(vault_path: String, daily_note_path: String) -> Result<(), String> {
+    let raw = match fs::read_to_string(&daily_note_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let new = process_reading_blocks(&raw, &vault_path);
+    if new != raw {
+        fs::write(&daily_note_path, new).map_err(|e| e.to_string())?;
+        index_single_file(vault_path, daily_note_path)?;
+    }
+    Ok(())
+}
+
 /// Write a markdown file, replacing any existing contents atomically enough
 /// for our needs (std::fs::write → OS-level write-truncate; good enough for
 /// a single-user local app). Creates parent directories if missing, which
@@ -843,6 +1401,17 @@ fn extract_wikilinks(body: &str) -> Vec<String> {
 
 #[tauri::command]
 fn index_single_file(vault_path: String, file_path: String) -> Result<(), String> {
+    // Cluster 6: PDFs take a different indexing path — extracted text feeds
+    // FTS5, sidecar JSON contributes annotations to the marks table.
+    if PathBuf::from(&file_path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+    {
+        return index_pdf_file(&vault_path, &file_path);
+    }
+
     let conn = open_or_init_db(&vault_path)?;
     let body = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
 
@@ -929,13 +1498,21 @@ fn rebuild_index(vault_path: String) -> Result<usize, String> {
         })
         .filter_map(|e| e.ok())
     {
-        if entry.file_type().is_file()
-            && entry.path().extension().and_then(|s| s.to_str()) == Some("md")
-        {
-            let path_str = entry.path().to_string_lossy().to_string();
-            index_single_file(vault_path.clone(), path_str.clone())?;
-            walked.insert(path_str);
-            count += 1;
+        // Cluster 6 fix: include PDFs alongside markdown so PDF text is
+        // walked into FTS5 and PDF annotations flow into the marks table
+        // even when the user hasn't opened the PDF in this session.
+        if entry.file_type().is_file() {
+            let ext = entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("md") | Some("pdf")) {
+                let path_str = entry.path().to_string_lossy().to_string();
+                index_single_file(vault_path.clone(), path_str.clone())?;
+                walked.insert(path_str);
+                count += 1;
+            }
         }
     }
 
@@ -973,57 +1550,118 @@ fn rebuild_index(vault_path: String) -> Result<usize, String> {
     Ok(count)
 }
 
+/// Cluster 6 v1.2: convert a "kind" filter — "md" / "pdf" / anything-else
+/// — into a SQL LIKE pattern. None / "all" keeps everything.
+fn path_like_for_kind(kind: Option<&str>) -> Option<&'static str> {
+    match kind {
+        Some("md") => Some("%.md"),
+        Some("pdf") => Some("%.pdf"),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 fn search_notes(
     vault_path: String,
     query: String,
     limit: usize,
+    kind: Option<String>,
 ) -> Result<Vec<SearchResult>, String> {
     let conn = open_or_init_db(&vault_path)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, title, snippet(notes, 2, '<<', '>>', '…', 20) AS snippet
-             FROM notes
-             WHERE notes MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
-        )
-        .map_err(|e| e.to_string())?;
+    let kind_pattern = path_like_for_kind(kind.as_deref());
 
-    let rows = stmt
-        .query_map(params![&query, limit as i64], |row| {
-            Ok(SearchResult {
-                path: row.get(0)?,
-                title: row.get(1)?,
-                snippet: row.get(2)?,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-
+    // Two SQL templates: with and without the path-LIKE filter. SQLite
+    // doesn't allow optional WHERE clauses without dynamic SQL, so this
+    // is the simplest correct option.
     let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
+    if let Some(pat) = kind_pattern {
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title, snippet(notes, 2, '<<', '>>', '…', 20) AS snippet
+                 FROM notes
+                 WHERE notes MATCH ?1 AND path LIKE ?2
+                 ORDER BY rank
+                 LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![&query, pat, limit as i64], |row| {
+                Ok(SearchResult {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title, snippet(notes, 2, '<<', '>>', '…', 20) AS snippet
+                 FROM notes
+                 WHERE notes MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![&query, limit as i64], |row| {
+                Ok(SearchResult {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
     }
     Ok(out)
 }
 
 #[tauri::command]
-fn list_all_notes(vault_path: String) -> Result<Vec<NoteListItem>, String> {
+fn list_all_notes(vault_path: String, kind: Option<String>) -> Result<Vec<NoteListItem>, String> {
     let conn = open_or_init_db(&vault_path)?;
-    let mut stmt = conn
-        .prepare("SELECT path, title FROM notes ORDER BY title COLLATE NOCASE")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(NoteListItem {
-                path: row.get(0)?,
-                title: row.get(1)?,
-            })
-        })
-        .map_err(|e| e.to_string())?;
+    let kind_pattern = path_like_for_kind(kind.as_deref());
+
     let mut out = Vec::new();
-    for r in rows {
-        out.push(r.map_err(|e| e.to_string())?);
+    if let Some(pat) = kind_pattern {
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, title FROM notes
+                 WHERE path LIKE ?1
+                 ORDER BY title COLLATE NOCASE",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![pat], |row| {
+                Ok(NoteListItem {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+    } else {
+        let mut stmt = conn
+            .prepare("SELECT path, title FROM notes ORDER BY title COLLATE NOCASE")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(NoteListItem {
+                    path: row.get(0)?,
+                    title: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
     }
     Ok(out)
 }
@@ -3232,6 +3870,10 @@ pub fn run() {
             read_vault_tree,
             start_vault_watcher,
             read_markdown_file,
+            read_binary_file,
+            read_pdf_annotations,
+            write_pdf_annotations,
+            populate_reading_log,
             write_markdown_file,
             git_auto_commit,
             ensure_daily_log,

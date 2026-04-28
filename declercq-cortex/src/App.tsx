@@ -14,6 +14,7 @@ import { MarkQueueView } from "./components/MarkQueueView";
 import { IdeaLog } from "./components/IdeaLog";
 import { MethodsArsenal } from "./components/MethodsArsenal";
 import { ProtocolsLog } from "./components/ProtocolsLog";
+import { PDFReader } from "./components/PDFReader";
 import { ReviewsMenu, type DestinationChoice } from "./components/ReviewsMenu";
 import { ColorLegend } from "./components/ColorLegend";
 import { ExperimentBlockModal } from "./components/ExperimentBlockModal";
@@ -132,13 +133,16 @@ function App() {
   // 'idea-log'         — Cluster 8 structured view over type:idea notes
   // 'methods-arsenal'  — Cluster 8 structured view over type:method notes
   // 'protocols-log'    — Cluster 8 catalogue over type:protocol notes
+  // 'pdf-reader'       — Cluster 6 PDF viewer (selected when a .pdf file
+  //                      is clicked in the file tree)
   type ActiveView =
     | "editor"
     | "queue-yellow"
     | "queue-green"
     | "idea-log"
     | "methods-arsenal"
-    | "protocols-log";
+    | "protocols-log"
+    | "pdf-reader";
   const [activeView, setActiveView] = useState<ActiveView>("editor");
 
   // --- color legend ----------------------------------------------------
@@ -167,6 +171,30 @@ function App() {
   // Drives a visual highlight on the sidebar so the user can see which
   // keymap is currently live (sidebar shortcuts vs editor text shortcuts).
   const [activeMode, setActiveMode] = useState<"editor" | "sidebar">("editor");
+
+  // --- collapsible sidebar ---------------------------------------------
+  // Persisted to localStorage so the user's pref survives a restart.
+  // Available in every view, not just the PDF reader — the toggle
+  // chevron stays visible at the top of the sidebar even when collapsed,
+  // so there's always a way to bring it back without a keyboard shortcut.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("cortex:sidebar-collapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+  function toggleSidebar() {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("cortex:sidebar-collapsed", String(next));
+      } catch {
+        // ignore — same SecurityError caveat as elsewhere
+      }
+      return next;
+    });
+  }
   // We hold the TipTap editor instance so we can insert the block
   // scaffold at the cursor when the modal confirms.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -266,6 +294,17 @@ function App() {
       setFileBody("");
       setEditedBody("");
       setDirty(false);
+      return;
+    }
+    // Cluster 6: PDFs render via PDFReader, not the markdown pipeline. The
+    // markdown editor state is reset so a stale body from a previously
+    // open .md doesn't show under the PDF reader if the user toggles back.
+    if (/\.pdf$/i.test(selectedPath)) {
+      setFrontmatter({});
+      setFileBody("");
+      setEditedBody("");
+      setDirty(false);
+      setLoadingFile(false);
       return;
     }
     setLoadingFile(true);
@@ -372,6 +411,16 @@ function App() {
     if (selectedPath && dirty && selectedPath !== path) {
       await saveCurrentFile();
     }
+
+    // Cluster 6: PDFs route to the PDFReader view instead of the markdown
+    // editor. We set selectedPath so the file tree highlights stay in sync,
+    // but the editor's read_markdown_file pipeline is skipped.
+    if (path && /\.pdf$/i.test(path)) {
+      setSelectedPath(path);
+      setActiveView("pdf-reader");
+      return;
+    }
+
     setActiveView("editor");
 
     if (path && vaultPath) {
@@ -405,6 +454,21 @@ function App() {
           });
         } catch (e) {
           console.warn("regenerate_method_reagents failed:", e);
+        }
+      }
+
+      // Cluster 6 / Pass 8: if opening a daily-log file, populate any
+      // ::reading DATE ::end blocks from PDF annotation sidecars. The
+      // command is idempotent — no-op for daily logs without blocks.
+      const dailyLogPrefix = `${vaultPath}${sep}02-Daily Log${sep}`;
+      if (path.startsWith(dailyLogPrefix)) {
+        try {
+          await invoke("populate_reading_log", {
+            vaultPath,
+            dailyNotePath: path,
+          });
+        } catch (e) {
+          console.warn("populate_reading_log failed:", e);
         }
       }
     }
@@ -700,6 +764,9 @@ function App() {
         e.preventDefault();
         openTodayDailyLog();
       } else if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        // Cluster 6 v1.3: in PDF reader, Ctrl+K opens the in-pane PDF
+        // search bubble (handled inside PDFReader). Don't intercept here.
+        if (activeView === "pdf-reader") return;
         e.preventDefault();
         setPaletteOpen(true);
       } else if ((e.ctrlKey || e.metaKey) && e.key === "/") {
@@ -787,7 +854,7 @@ function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPath, dirty, editedBody, frontmatter, vaultPath]);
+  }, [selectedPath, dirty, editedBody, frontmatter, vaultPath, activeView]);
 
   // Autosave 5 minutes after last edit.
   useEffect(() => {
@@ -1062,154 +1129,191 @@ function App() {
       <aside
         style={{
           ...baseStyles.sidebar,
-          // Subtle accent border + slight tint when sidebar mode is active,
-          // so the user can see which keymap is live. Editor mode reverts
-          // to the default 1px neutral border-right.
+          // Width swap on collapse. We narrow to a thin strip (~32px)
+          // rather than a full-zero width so the toggle chevron stays
+          // visible — there's always a way back without a shortcut.
+          width: sidebarCollapsed ? "32px" : "300px",
+          minWidth: sidebarCollapsed ? "32px" : "260px",
+          // Sidebar-mode banner: accent border when sidebar shortcuts are
+          // the active keymap. Suppressed while the PDF reader holds the
+          // main pane — the PDF reader has its own Ctrl+K (in-pane
+          // search) and showing the "sidebar mode" banner alongside that
+          // is misleading. Also suppressed while collapsed (no point
+          // signalling sidebar mode when the sidebar isn't really there).
           borderRight:
-            activeMode === "sidebar"
+            activeMode === "sidebar" &&
+            activeView !== "pdf-reader" &&
+            !sidebarCollapsed
               ? "2px solid var(--accent)"
               : "1px solid var(--border)",
           boxShadow:
-            activeMode === "sidebar" ? "inset -1px 0 0 var(--accent)" : "none",
+            activeMode === "sidebar" &&
+            activeView !== "pdf-reader" &&
+            !sidebarCollapsed
+              ? "inset -1px 0 0 var(--accent)"
+              : "none",
         }}
       >
-        <header style={baseStyles.sidebarHeader}>
-          <div style={baseStyles.sidebarTitleRow}>
-            <strong style={baseStyles.sidebarTitle}>Cortex</strong>
-            <div style={baseStyles.sidebarActions}>
-              <button
-                onClick={openTodayDailyLog}
-                style={baseStyles.changeBtn}
-                title="Open today's daily log (Ctrl+D)"
-              >
-                Today
-              </button>
-              <button
-                onClick={() => setPaletteOpen(true)}
-                style={baseStyles.changeBtn}
-                title="Search notes (Ctrl+K)"
-              >
-                Search
-              </button>
-              <button
-                onClick={() => setHierarchyKind("note")}
-                style={baseStyles.changeBtn}
-                title="New note (Ctrl+N)"
-              >
-                + Note
-              </button>
-              <button
-                onClick={() => setHierarchyKind("idea")}
-                style={baseStyles.changeBtn}
-                title="New idea (saved in 04-Ideas/)"
-              >
-                + Idea
-              </button>
-              <button
-                onClick={() => setActiveView("idea-log")}
-                style={baseStyles.changeBtn}
-                title="Open Idea Log"
-              >
-                Ideas
-              </button>
-              <button
-                onClick={() => setHierarchyKind("method")}
-                style={baseStyles.changeBtn}
-                title="New method (saved in 05-Methods/)"
-              >
-                + Method
-              </button>
-              <button
-                onClick={() => setActiveView("methods-arsenal")}
-                style={baseStyles.changeBtn}
-                title="Open Methods Arsenal"
-              >
-                Methods
-              </button>
-              <button
-                onClick={() => setHierarchyKind("protocol")}
-                style={baseStyles.changeBtn}
-                title="New protocol (saved in 06-Protocols/)"
-              >
-                + Protocol
-              </button>
-              <button
-                onClick={() => setActiveView("protocols-log")}
-                style={baseStyles.changeBtn}
-                title="Open Protocols Log"
-              >
-                Protocols
-              </button>
-              <button
-                onClick={() => setHierarchyKind("project")}
-                style={baseStyles.changeBtn}
-                title="New project (Ctrl+Shift+P)"
-              >
-                + Proj
-              </button>
-              <button
-                onClick={() => setHierarchyKind("experiment")}
-                style={baseStyles.changeBtn}
-                title="New experiment (Ctrl+Shift+E)"
-              >
-                + Exp
-              </button>
-              <button
-                onClick={() => setHierarchyKind("iteration")}
-                style={baseStyles.changeBtn}
-                title="New iteration (Ctrl+Shift+I)"
-              >
-                + Iter
-              </button>
-              <button
-                onClick={() => setBlockModalOpen(true)}
-                style={baseStyles.changeBtn}
-                title="Insert experiment block (Ctrl+Shift+B)"
-              >
-                + Block
-              </button>
-              <ReviewsMenu onPick={pickDestination} />
-              <button
-                onClick={() => setRefreshKey((k) => k + 1)}
-                style={baseStyles.iconBtn}
-                title="Refresh file tree"
-                aria-label="Refresh file tree"
-              >
-                ↻
-              </button>
-              <button
-                onClick={pickVault}
-                style={baseStyles.changeBtn}
-                title="Choose a different vault"
-              >
-                Change…
-              </button>
+        {sidebarCollapsed ? (
+          <div style={baseStyles.sidebarCollapsedStrip}>
+            <button
+              onClick={toggleSidebar}
+              style={baseStyles.sidebarToggleBtn}
+              title="Expand sidebar"
+              aria-label="Expand sidebar"
+            >
+              ▶
+            </button>
+          </div>
+        ) : (
+          <>
+            <header style={baseStyles.sidebarHeader}>
+              <div style={baseStyles.sidebarTitleRow}>
+                <button
+                  onClick={toggleSidebar}
+                  style={baseStyles.sidebarToggleBtn}
+                  title="Collapse sidebar"
+                  aria-label="Collapse sidebar"
+                >
+                  ◀
+                </button>
+                <strong style={baseStyles.sidebarTitle}>Cortex</strong>
+                <div style={baseStyles.sidebarActions}>
+                  <button
+                    onClick={openTodayDailyLog}
+                    style={baseStyles.changeBtn}
+                    title="Open today's daily log (Ctrl+D)"
+                  >
+                    Today
+                  </button>
+                  <button
+                    onClick={() => setPaletteOpen(true)}
+                    style={baseStyles.changeBtn}
+                    title="Search notes (Ctrl+K)"
+                  >
+                    Search
+                  </button>
+                  <button
+                    onClick={() => setHierarchyKind("note")}
+                    style={baseStyles.changeBtn}
+                    title="New note (Ctrl+N)"
+                  >
+                    + Note
+                  </button>
+                  <button
+                    onClick={() => setHierarchyKind("idea")}
+                    style={baseStyles.changeBtn}
+                    title="New idea (saved in 04-Ideas/)"
+                  >
+                    + Idea
+                  </button>
+                  <button
+                    onClick={() => setActiveView("idea-log")}
+                    style={baseStyles.changeBtn}
+                    title="Open Idea Log"
+                  >
+                    Ideas
+                  </button>
+                  <button
+                    onClick={() => setHierarchyKind("method")}
+                    style={baseStyles.changeBtn}
+                    title="New method (saved in 05-Methods/)"
+                  >
+                    + Method
+                  </button>
+                  <button
+                    onClick={() => setActiveView("methods-arsenal")}
+                    style={baseStyles.changeBtn}
+                    title="Open Methods Arsenal"
+                  >
+                    Methods
+                  </button>
+                  <button
+                    onClick={() => setHierarchyKind("protocol")}
+                    style={baseStyles.changeBtn}
+                    title="New protocol (saved in 06-Protocols/)"
+                  >
+                    + Protocol
+                  </button>
+                  <button
+                    onClick={() => setActiveView("protocols-log")}
+                    style={baseStyles.changeBtn}
+                    title="Open Protocols Log"
+                  >
+                    Protocols
+                  </button>
+                  <button
+                    onClick={() => setHierarchyKind("project")}
+                    style={baseStyles.changeBtn}
+                    title="New project (Ctrl+Shift+P)"
+                  >
+                    + Proj
+                  </button>
+                  <button
+                    onClick={() => setHierarchyKind("experiment")}
+                    style={baseStyles.changeBtn}
+                    title="New experiment (Ctrl+Shift+E)"
+                  >
+                    + Exp
+                  </button>
+                  <button
+                    onClick={() => setHierarchyKind("iteration")}
+                    style={baseStyles.changeBtn}
+                    title="New iteration (Ctrl+Shift+I)"
+                  >
+                    + Iter
+                  </button>
+                  <button
+                    onClick={() => setBlockModalOpen(true)}
+                    style={baseStyles.changeBtn}
+                    title="Insert experiment block (Ctrl+Shift+B)"
+                  >
+                    + Block
+                  </button>
+                  <ReviewsMenu onPick={pickDestination} />
+                  <button
+                    onClick={() => setRefreshKey((k) => k + 1)}
+                    style={baseStyles.iconBtn}
+                    title="Refresh file tree"
+                    aria-label="Refresh file tree"
+                  >
+                    ↻
+                  </button>
+                  <button
+                    onClick={pickVault}
+                    style={baseStyles.changeBtn}
+                    title="Choose a different vault"
+                  >
+                    Change…
+                  </button>
+                </div>
+              </div>
+              <div style={baseStyles.sidebarPath} title={vaultPath}>
+                {vaultPath}
+              </div>
+            </header>
+            <div style={baseStyles.sidebarBody}>
+              <FileTree
+                vaultPath={vaultPath}
+                onSelectFile={selectFile}
+                selectedPath={selectedPath}
+                refreshKey={refreshKey}
+              />
             </div>
-          </div>
-          <div style={baseStyles.sidebarPath} title={vaultPath}>
-            {vaultPath}
-          </div>
-        </header>
-        <div style={baseStyles.sidebarBody}>
-          <FileTree
-            vaultPath={vaultPath}
-            onSelectFile={selectFile}
-            selectedPath={selectedPath}
-            refreshKey={refreshKey}
-          />
-        </div>
-        <footer style={baseStyles.sidebarFooter}>
-          <button
-            onClick={() => setHelpOpen(true)}
-            style={baseStyles.iconBtn}
-            title="Keyboard shortcuts (Ctrl+/)"
-            aria-label="Keyboard shortcuts"
-          >
-            ?
-          </button>
-          <div style={{ flex: 1 }} />
-          <ThemeToggle theme={theme} setTheme={setTheme} />
-        </footer>
+            <footer style={baseStyles.sidebarFooter}>
+              <button
+                onClick={() => setHelpOpen(true)}
+                style={baseStyles.iconBtn}
+                title="Keyboard shortcuts (Ctrl+/)"
+                aria-label="Keyboard shortcuts"
+              >
+                ?
+              </button>
+              <div style={{ flex: 1 }} />
+              <ThemeToggle theme={theme} setTheme={setTheme} />
+            </footer>
+          </>
+        )}
       </aside>
 
       <main style={baseStyles.mainPane}>
@@ -1258,6 +1362,12 @@ function App() {
             onOpenFile={selectFile}
             onClose={() => setActiveView("editor")}
             onNewProtocol={() => setHierarchyKind("protocol")}
+          />
+        ) : activeView === "pdf-reader" && selectedPath ? (
+          <PDFReader
+            vaultPath={vaultPath}
+            filePath={selectedPath}
+            onClose={() => setActiveView("editor")}
           />
         ) : !selectedPath ? (
           <div style={baseStyles.muted}>
@@ -1402,12 +1512,37 @@ const baseStyles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
   },
   sidebar: {
+    // Width / minWidth are overridden inline based on collapse state.
+    // Keeping them here as fallback defaults for the expanded case.
     width: "300px",
     minWidth: "260px",
     borderRight: "1px solid var(--border)",
     background: "var(--bg-deep)",
     display: "flex",
     flexDirection: "column",
+    transition: "width 120ms ease, min-width 120ms ease",
+  },
+  sidebarCollapsedStrip: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    paddingTop: "0.5rem",
+    height: "100%",
+  },
+  sidebarToggleBtn: {
+    width: "22px",
+    height: "22px",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "0.7rem",
+    lineHeight: 1,
+    cursor: "pointer",
+    background: "transparent",
+    color: "var(--text-2)",
+    border: "1px solid var(--border-2)",
+    borderRadius: "4px",
+    padding: 0,
   },
   sidebarHeader: {
     padding: "0.75rem 0.85rem",

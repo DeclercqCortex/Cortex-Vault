@@ -133,7 +133,7 @@ Skim the whole map first. Don't commit to an order until you've read all eleven 
 
 ---
 
-### Cluster 6: PDF reader
+### Cluster 6: PDF reader ✅ shipped
 **One-liner:** Open PDFs inside Cortex, annotate them with the same color marks, write notes that auto-feed into the daily note.
 
 **Dependencies:** Cluster 2 (for color marks consistency). Technically you could build a PDF reader without marks, but if you're going to read PDFs *and* you have the Mark System, the colors should match.
@@ -251,7 +251,7 @@ If a cluster takes 4+ days, split it. Phase 2+ is not Phase 1; momentum is not t
 | `cluster_03_mark_system_destinations.md` | Mark System destinations | 3rd (with 2) | ✅ shipped |
 | `cluster_04_experiment_routing.md` | `::experiment` blocks | 5th | ✅ shipped |
 | `cluster_05_color_legend_overlay.md` | Color legend | 4th | ✅ shipped |
-| `cluster_06_pdf_reader.md` | PDF reader | Phase 3, on demand | — |
+| `cluster_06_pdf_reader.md` | PDF reader | Phase 3, on demand | ✅ shipped |
 | `cluster_07_concept_graph.md` | Concept graph | Phase 3, on demand | — |
 | `cluster_08_structured_views.md` | Idea Log, Methods, Roadmap | Phase 3, in flight (Idea Log + Methods) | 🔨 building |
 | `cluster_09_strong_inference_gate.md` | Strong Inference gate | (was 6th) | ✗ dropped |

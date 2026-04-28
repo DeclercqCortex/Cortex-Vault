@@ -21,10 +21,21 @@ interface CommandPaletteProps {
  *  - Empty query → list_all_notes (alphabetical by title), capped at 50.
  *  - Non-empty query → search_notes (FTS5), top 30 by rank, with snippet.
  *
+ * Two tabs filter the underlying queries server-side via the `kind`
+ * argument on both Tauri commands:
+ *    - "all"  — markdown notes + PDFs (default)
+ *    - "md"   — only `.md` files
+ *    - "pdf"  — only `.pdf` files
+ *  Server-side filtering matters because the FTS5 LIMIT cuts off at 30,
+ *  and a vault with 200+ files in each kind would otherwise lose results
+ *  behind that cap. Switching tabs re-runs the query.
+ *
  * The snippet uses `<<` and `>>` delimiters which we replace with <mark>
  * for highlighting. Because that involves dangerouslySetInnerHTML, we
  * never inject anything but server-controlled snippets.
  */
+type PaletteKind = "all" | "md" | "pdf";
+
 export function CommandPalette({
   vaultPath,
   isOpen,
@@ -35,6 +46,7 @@ export function CommandPalette({
   const [results, setResults] = useState<Result[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [searching, setSearching] = useState(false);
+  const [kind, setKind] = useState<PaletteKind>("all");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Reset when opening; focus input.
@@ -43,6 +55,7 @@ export function CommandPalette({
       setQuery("");
       setResults([]);
       setSelectedIdx(0);
+      setKind("all");
       return;
     }
     // Defer focus to the next tick so the input has mounted.
@@ -58,12 +71,16 @@ export function CommandPalette({
     setSearching(true);
 
     const trimmed = query.trim();
+    const kindArg = kind === "all" ? null : kind;
 
     let cancelled = false;
     const handle = async () => {
       try {
         if (trimmed.length === 0) {
-          const all = await invoke<Result[]>("list_all_notes", { vaultPath });
+          const all = await invoke<Result[]>("list_all_notes", {
+            vaultPath,
+            kind: kindArg,
+          });
           if (!cancelled) {
             setResults(all.slice(0, 50));
             setSelectedIdx(0);
@@ -76,6 +93,7 @@ export function CommandPalette({
             vaultPath,
             query: ftsQuery,
             limit: 30,
+            kind: kindArg,
           });
           if (!cancelled) {
             setResults(found);
@@ -93,7 +111,7 @@ export function CommandPalette({
     return () => {
       cancelled = true;
     };
-  }, [query, isOpen, vaultPath]);
+  }, [query, isOpen, vaultPath, kind]);
 
   function handleKey(e: React.KeyboardEvent) {
     if (e.key === "Escape") {
@@ -116,16 +134,48 @@ export function CommandPalette({
 
   if (!isOpen) return null;
 
+  const placeholder =
+    kind === "pdf"
+      ? "Search PDFs…"
+      : kind === "md"
+        ? "Search notes…"
+        : "Search notes & PDFs…";
+
   return (
     <div style={styles.scrim} onClick={onClose}>
       <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.tabRow} role="tablist" aria-label="Search scope">
+          {(["all", "md", "pdf"] as const).map((k) => {
+            const label = k === "all" ? "All" : k === "md" ? "Notes" : "PDFs";
+            const active = kind === k;
+            return (
+              <button
+                key={k}
+                role="tab"
+                aria-selected={active}
+                onClick={() => {
+                  setKind(k);
+                  // Send focus back to the search input after click — the
+                  // user is mid-search, the tab is just a filter.
+                  setTimeout(() => inputRef.current?.focus(), 0);
+                }}
+                style={{
+                  ...styles.tab,
+                  ...(active ? styles.tabActive : null),
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
         <input
           ref={inputRef}
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKey}
-          placeholder="Search notes…"
+          placeholder={placeholder}
           style={styles.input}
         />
         <div style={styles.results}>
@@ -263,5 +313,29 @@ const styles: Record<string, React.CSSProperties> = {
     borderTop: "1px solid var(--border)",
     fontSize: "0.7rem",
     color: "var(--text-muted)",
+  },
+  tabRow: {
+    display: "flex",
+    gap: "2px",
+    padding: "6px 8px 0",
+    borderBottom: "1px solid var(--border)",
+    background: "var(--bg-deep)",
+  },
+  tab: {
+    padding: "6px 14px",
+    fontSize: "0.78rem",
+    cursor: "pointer",
+    background: "transparent",
+    color: "var(--text-2)",
+    border: "1px solid transparent",
+    borderRadius: "4px 4px 0 0",
+    borderBottom: "none",
+    marginBottom: "-1px",
+  },
+  tabActive: {
+    background: "var(--bg-elev)",
+    color: "var(--text)",
+    border: "1px solid var(--border)",
+    borderBottom: "1px solid var(--bg-elev)",
   },
 };

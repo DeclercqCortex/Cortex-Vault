@@ -447,3 +447,88 @@ mark.mark-purple {
 .prose .selectedCell {
   background: var(--bg-elev, var(--bg-deep)) !important;
 }
+
+/* PDF reader page-layout containers. The wrappers themselves no longer
+ * carry inline margins; the container handles centering and gap so we
+ * can swap between single-column stacking and two-column grid without
+ * fighting margin: auto vs. CSS Grid track behaviour. */
+.pdf-pages-single {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.pdf-pages-two {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  justify-content: center;
+  column-gap: 12px;
+  row-gap: 12px;
+}
+
+/* -----------------------------------------------------------------------
+ * PDF reader (Cluster 6) — text layer
+ * -----------------------------------------------------------------------
+ * PDF.js renders an absolute-positioned grid of <span> elements that align
+ * pixel-perfectly with the visible text on the canvas. The spans must be
+ * invisible (so the canvas shows through) but selectable, so we use very
+ * low opacity rather than `display: none` or `visibility: hidden`.
+ *
+ * The selection colour is what users see when they drag-select; we tint it
+ * blue with low alpha so highlighted regions are visible but readable.
+ */
+.pdf-text-layer {
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  user-select: text;
+  pointer-events: auto;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+}
+.pdf-text-layer span,
+.pdf-text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+.pdf-text-layer ::selection {
+  background: rgba(66, 165, 245, 0.35);
+}
+/* PDF.js v4 emits these helper elements; keep them invisible. */
+.pdf-text-layer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0 0;
+  z-index: -1;
+  cursor: default;
+  user-select: none;
+}
+
+/* Annotation rect cursors mirror the wikilink convention: plain hover
+ * is silent (default arrow), Ctrl+hover shows the hand-pointer + an
+ * accent outline because that combination is what actually triggers
+ * the edit panel on click.
+ *
+ * The whole annotation group lights up together (every sibling rect
+ * with the same data-annotation-id), not just the rect under the
+ * cursor — PDFReader toggles `.ann-hover` on all peers via JS to make
+ * this work for multi-line highlights.
+ *
+ * Baseline cursor is `default` (the arrow), not the text cursor that
+ * would otherwise be inherited from the .pdf-text-layer behind it.
+ */
+.pdf-annotation-overlay > div {
+  cursor: default;
+}
+body.cortex-mod-pressed .pdf-annotation-overlay > div.ann-hover {
+  cursor: pointer;
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}

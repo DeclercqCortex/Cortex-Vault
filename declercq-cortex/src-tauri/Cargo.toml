@@ -27,4 +27,9 @@ rusqlite = { version = "0.31", features = ["bundled-full"] }
 git2 = "0.18"
 notify = "6"
 walkdir = "2"
+# Cluster 6: server-side PDF text extraction so PDFs are searchable from
+# the command palette via the existing FTS5 index. Pure-Rust crate, no
+# system PDF library dependency. Some PDFs (encrypted, image-only) extract
+# nothing — we treat that as "not searchable" rather than fatal.
+pdf-extract = "0.7"
 
