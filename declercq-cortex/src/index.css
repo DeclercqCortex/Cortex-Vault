@@ -451,12 +451,25 @@ mark.mark-purple {
 /* PDF reader page-layout containers. The wrappers themselves no longer
  * carry inline margins; the container handles centering and gap so we
  * can swap between single-column stacking and two-column grid without
- * fighting margin: auto vs. CSS Grid track behaviour. */
+ * fighting margin: auto vs. CSS Grid track behaviour.
+ *
+ * `min-width: max-content` is the fix for the "zoomed-in PDF bleeds off
+ * the left edge with no horizontal scroll" bug. Without it, the
+ * container's width is bounded by its parent and `align-items: center`
+ * pushes overflowing children equally to both sides — but the parent's
+ * scroll range only goes from 0 to the right edge, so the left bleed
+ * is unreachable. With `min-width: max-content` the container expands
+ * to fit its widest child; once it exceeds the parent the parent's
+ * own `overflow: auto` provides bidirectional scroll, and the centring
+ * is naturally suppressed (children fill the container). When the
+ * widest child fits the parent the container shrinks back and centring
+ * works as before. */
 .pdf-pages-single {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
+  min-width: max-content;
 }
 .pdf-pages-two {
   display: grid;
@@ -464,6 +477,7 @@ mark.mark-purple {
   justify-content: center;
   column-gap: 12px;
   row-gap: 12px;
+  min-width: max-content;
 }
 
 /* -----------------------------------------------------------------------

@@ -4,17 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FileTree } from "./components/FileTree";
-import { Editor } from "./components/Editor";
-import { FrontmatterPanel } from "./components/FrontmatterPanel";
-import { BacklinksPanel } from "./components/BacklinksPanel";
 import { CommandPalette } from "./components/CommandPalette";
-import { RelatedHierarchyPanel } from "./components/RelatedHierarchyPanel";
 import { ShortcutsHelp } from "./components/ShortcutsHelp";
-import { MarkQueueView } from "./components/MarkQueueView";
-import { IdeaLog } from "./components/IdeaLog";
-import { MethodsArsenal } from "./components/MethodsArsenal";
-import { ProtocolsLog } from "./components/ProtocolsLog";
-import { PDFReader } from "./components/PDFReader";
 import { ReviewsMenu, type DestinationChoice } from "./components/ReviewsMenu";
 import { ColorLegend } from "./components/ColorLegend";
 import { ExperimentBlockModal } from "./components/ExperimentBlockModal";
@@ -24,7 +15,19 @@ import {
   NewHierarchyModal,
   type HierarchyKind,
 } from "./components/NewHierarchyModal";
-import { parseFrontmatter, serializeFrontmatter } from "./utils/frontmatter";
+import { serializeFrontmatter } from "./utils/frontmatter";
+import {
+  TabPane,
+  type TabPaneHandle,
+  type ActiveView,
+} from "./components/TabPane";
+import {
+  LayoutPicker,
+  slotCountForLayout,
+  type LayoutMode,
+} from "./components/LayoutPicker";
+import { LayoutGrid } from "./components/LayoutGrid";
+import { SlotPicker } from "./components/SlotPicker";
 
 /** Local YYYY-MM-DD — uses the user's timezone, never UTC. */
 function todayLocal(): string {
@@ -41,17 +44,12 @@ function stripMarkTags(s: string): string {
 }
 
 /**
- * True when keyboard focus is somewhere inside the TipTap editor.
+ * True when keyboard focus is somewhere inside any TipTap editor.
  *
  * Used to gate the App-level hierarchy shortcuts (Ctrl+N, Ctrl+Shift+P/E/I)
- * so they don't fire while the user is typing. The editor binds its own
- * keymap to its DOM root via ProseMirror — when focus is in there, the
- * editor's shortcuts (text alignment Ctrl+Shift+L/E/R, marks, bold/italic,
- * etc.) win because ProseMirror's keymap plugin handles them locally.
- *
- * `.ProseMirror` is the class TipTap puts on the editable root.
+ * so they don't fire while the user is typing.
  */
-function isEditorFocused(): boolean {
+function isAnyEditorFocused(): boolean {
   const ae = document.activeElement;
   if (!ae) return false;
   return !!(ae as Element).closest?.(".ProseMirror");
@@ -69,31 +67,7 @@ const PERSISTENT_FILE_BASENAMES = new Set<string>([
   "Concept Inbox.md",
 ]);
 
-// Cortex — local-first research notebook
-//
-// Phase 1, Week 1:
-//   Day 1: vault picker + persistent config
-//   Day 2: file tree sidebar
-//   Day 3: expansion state + refresh button
-//   Day 4: filesystem watcher
-//
-// Phase 1, Week 2:
-//   Day 1–2: TipTap editor (read then editable)
-//   Day 3:   save-to-disk (Ctrl+S + 5min autosave)
-//   Day 4:   frontmatter parse / panel / round-trip
-//   Day 5:   git auto-commit (30s debounce) + last-open file restore
-//
-// Phase 1, Week 3:
-//   Day 1: daily log (Ctrl+D)
-//   Day 2: SQLite FTS5 index
-//   Day 3: wikilinks (plain text + Ctrl+Click follow + auto-create)
-//   Day 4: backlinks panel
-//   Day 5: command palette (Ctrl+K)
-
-// 5 minutes after last keystroke → autosave.
-const AUTOSAVE_MS = 5 * 60 * 1000;
-// 30 seconds after last save → git commit.
-const COMMIT_MS = 30_000;
+const MAX_SLOTS = 4;
 
 interface NoteListItem {
   path: string;
@@ -101,24 +75,114 @@ interface NoteListItem {
 }
 
 function App() {
-  // --- vault + selection ------------------------------------------------
+  // --- vault + global state -------------------------------------------
   const [vaultPath, setVaultPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  // Bumped every time we re-index something — backlinks panel re-fetches.
   const [indexVersion, setIndexVersion] = useState(0);
 
-  // --- file editing state ----------------------------------------------
-  const [frontmatter, setFrontmatter] = useState<Record<string, unknown>>({});
-  const [fileBody, setFileBody] = useState<string>("");
-  const [editedBody, setEditedBody] = useState<string>("");
-  const [dirty, setDirty] = useState(false);
-  const [loadingFile, setLoadingFile] = useState(false);
+  // --- multi-slot state ------------------------------------------------
+  // We keep MAX_SLOTS pane components mounted always, hidden by the
+  // grid layout when not active. This means each pane retains its own
+  // state when the user switches layouts (e.g., from quad → dual the
+  // slots that survive keep their open files).
+  const paneRefs = useRef<(TabPaneHandle | null)[]>(
+    Array.from({ length: MAX_SLOTS }, () => null),
+  );
+  const [slotPaths, setSlotPaths] = useState<(string | null)[]>(
+    Array.from({ length: MAX_SLOTS }, () => null),
+  );
+  const [slotViews, setSlotViews] = useState<ActiveView[]>(
+    Array.from({ length: MAX_SLOTS }, () => "editor" as ActiveView),
+  );
+  const [slotDirty, setSlotDirty] = useState<boolean[]>(
+    Array.from({ length: MAX_SLOTS }, () => false),
+  );
+  const [activeSlotIdx, setActiveSlotIdx] = useState(0);
+  // Ref mirror of activeSlotIdx for handlers that need the latest
+  // value synchronously (e.g., FileTree click immediately after a
+  // pane click — React may not have committed the state update by
+  // the time the click handler reads it). `activatePane` updates
+  // both the ref and the state in one call.
+  const activeSlotIdxRef = useRef(0);
+  function activatePane(idx: number) {
+    activeSlotIdxRef.current = idx;
+    setActiveSlotIdx(idx);
+  }
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>(() => {
+    try {
+      const v = localStorage.getItem("cortex:layout-mode");
+      if (
+        v === "single" ||
+        v === "dual" ||
+        v === "tri-bottom" ||
+        v === "tri-top" ||
+        v === "quad"
+      ) {
+        return v;
+      }
+    } catch {
+      // ignore SecurityError in some sandboxed contexts
+    }
+    return "single";
+  });
+  const [colFrac, setColFrac] = useState<number>(() => {
+    try {
+      const v = parseFloat(
+        localStorage.getItem("cortex:layout-col-frac") ?? "",
+      );
+      if (Number.isFinite(v) && v > 0.1 && v < 0.9) return v;
+    } catch {
+      // ignore
+    }
+    return 0.5;
+  });
+  const [rowFrac, setRowFrac] = useState<number>(() => {
+    try {
+      const v = parseFloat(
+        localStorage.getItem("cortex:layout-row-frac") ?? "",
+      );
+      if (Number.isFinite(v) && v > 0.1 && v < 0.9) return v;
+    } catch {
+      // ignore
+    }
+    return 0.5;
+  });
 
-  // --- timers ----------------------------------------------------------
-  const commitTimerRef = useRef<number | null>(null);
+  // Persist layout preferences.
+  useEffect(() => {
+    try {
+      localStorage.setItem("cortex:layout-mode", layoutMode);
+    } catch {
+      // ignore
+    }
+  }, [layoutMode]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("cortex:layout-col-frac", String(colFrac));
+    } catch {
+      // ignore
+    }
+  }, [colFrac]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("cortex:layout-row-frac", String(rowFrac));
+    } catch {
+      // ignore
+    }
+  }, [rowFrac]);
+
+  const slotCount = slotCountForLayout(layoutMode);
+
+  // If the user shrinks the layout to a smaller slot count and the
+  // active index falls off the new range, snap back into range.
+  useEffect(() => {
+    if (activeSlotIdx >= slotCount) {
+      activatePane(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slotCount, activeSlotIdx]);
 
   // --- modals ----------------------------------------------------------
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -126,30 +190,15 @@ function App() {
   const [hierarchyKind, setHierarchyKind] = useState<HierarchyKind | null>(
     null,
   );
-
-  // --- main pane mode --------------------------------------------------
-  // 'editor'           — normal Editor view of selectedPath
-  // 'queue-yellow' / 'queue-green' — virtual destination view
-  // 'idea-log'         — Cluster 8 structured view over type:idea notes
-  // 'methods-arsenal'  — Cluster 8 structured view over type:method notes
-  // 'protocols-log'    — Cluster 8 catalogue over type:protocol notes
-  // 'pdf-reader'       — Cluster 6 PDF viewer (selected when a .pdf file
-  //                      is clicked in the file tree)
-  type ActiveView =
-    | "editor"
-    | "queue-yellow"
-    | "queue-green"
-    | "idea-log"
-    | "methods-arsenal"
-    | "protocols-log"
-    | "pdf-reader";
-  const [activeView, setActiveView] = useState<ActiveView>("editor");
+  const [blockModalOpen, setBlockModalOpen] = useState(false);
+  const [tableModalOpen, setTableModalOpen] = useState(false);
+  // Slot picker (used when a search-palette result needs routing in
+  // multi-slot layouts).
+  const [pendingSlotChoice, setPendingSlotChoice] = useState<{
+    path: string;
+  } | null>(null);
 
   // --- color legend ----------------------------------------------------
-  // Session-only dismiss: each launch starts with the legend visible.
-  // localStorage holds a one-time "I've seen it; don't auto-show on the
-  // very first launch" flag in case we want it later, but for now we
-  // just default to visible.
   const [legendVisible, setLegendVisible] = useState<boolean>(() => {
     try {
       return localStorage.getItem("cortex:legend-hidden") !== "true";
@@ -158,25 +207,10 @@ function App() {
     }
   });
 
-  // --- experiment block modal (Cluster 4) ------------------------------
-  const [blockModalOpen, setBlockModalOpen] = useState(false);
-
-  // --- insert-table modal (Cluster 8 v2.1.2) ---------------------------
-  // Reachable via Ctrl+Shift+T or the editor's right-click "Insert table…".
-  // Submit -> editor.chain().focus().insertTable({rows, cols, withHeaderRow}).run()
-  const [tableModalOpen, setTableModalOpen] = useState(false);
-
-  // --- focus-mode indicator (Cluster 8 v2.1.4) -------------------------
-  // 'editor' when typing in a note; 'sidebar' when focus is anywhere else.
-  // Drives a visual highlight on the sidebar so the user can see which
-  // keymap is currently live (sidebar shortcuts vs editor text shortcuts).
+  // --- focus-mode indicator (keymap signaling) -------------------------
   const [activeMode, setActiveMode] = useState<"editor" | "sidebar">("editor");
 
   // --- collapsible sidebar ---------------------------------------------
-  // Persisted to localStorage so the user's pref survives a restart.
-  // Available in every view, not just the PDF reader — the toggle
-  // chevron stays visible at the top of the sidebar even when collapsed,
-  // so there's always a way to bring it back without a keyboard shortcut.
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem("cortex:sidebar-collapsed") === "true";
@@ -190,15 +224,11 @@ function App() {
       try {
         localStorage.setItem("cortex:sidebar-collapsed", String(next));
       } catch {
-        // ignore — same SecurityError caveat as elsewhere
+        // ignore
       }
       return next;
     });
   }
-  // We hold the TipTap editor instance so we can insert the block
-  // scaffold at the cursor when the modal confirms.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const editorInstanceRef = useRef<any | null>(null);
 
   // --- theme -----------------------------------------------------------
   const { theme, setTheme } = useTheme();
@@ -219,25 +249,44 @@ function App() {
       });
   }, []);
 
-  // Restore last-open file when vault resolves.
+  // Restore last-open file when vault resolves — into slot 0 of whatever
+  // layout the user had on last close.
   useEffect(() => {
     if (!vaultPath) return;
     invoke<string | null>("load_last_open")
       .then((p) => {
-        if (p) setSelectedPath(p);
+        if (!p) return;
+        // Pane refs may not be attached yet on the very first render;
+        // guard and retry on the next animation frame. Cap attempts so
+        // a missing pane doesn't lock the loop.
+        let attempts = 0;
+        const tryOpen = () => {
+          attempts += 1;
+          const handle = paneRefs.current[0];
+          if (handle) {
+            handle.openPath(p);
+          } else if (attempts < 20) {
+            requestAnimationFrame(tryOpen);
+          } else {
+            console.warn(
+              "[cortex] gave up on last-open restore — slot 0 never mounted",
+            );
+          }
+        };
+        tryOpen();
       })
       .catch((e) => console.warn("load_last_open failed:", e));
   }, [vaultPath]);
 
+  // Save the active slot's path as last-open whenever it changes.
   useEffect(() => {
     if (!vaultPath) return;
-    invoke("save_last_open", { filePath: selectedPath }).catch((e) =>
-      console.warn("save_last_open failed:", e),
-    );
-  }, [selectedPath, vaultPath]);
+    invoke("save_last_open", {
+      filePath: slotPaths[activeSlotIdx] ?? null,
+    }).catch((e) => console.warn("save_last_open failed:", e));
+  }, [slotPaths, activeSlotIdx, vaultPath]);
 
-  // Build the search index when vault loads. May take a few seconds for
-  // large vaults; the user-visible app is fine in the meantime.
+  // Build the search index when vault loads.
   useEffect(() => {
     if (!vaultPath) return;
     invoke<number>("rebuild_index", { vaultPath })
@@ -250,14 +299,6 @@ function App() {
 
   // -------------------------------------------------------------------------
   // Filesystem watcher
-  //
-  // On every external change we:
-  //   1. Bump refreshKey so the FileTree re-fetches.
-  //   2. Schedule a debounced rebuild_index. After it completes, bump
-  //      indexVersion so backlinks / related-hierarchy / mark queues /
-  //      persistent-file regeneration all re-fetch with fresh data.
-  // The 1.5-second debounce keeps a `git pull` storm from thrashing the
-  // index while still being fast enough to feel live.
   // -------------------------------------------------------------------------
   const reindexTimerRef = useRef<number | null>(null);
   useEffect(() => {
@@ -267,7 +308,6 @@ function App() {
     );
     const unlistenPromise = listen("vault-changed", () => {
       setRefreshKey((k) => k + 1);
-      // Debounced reindex.
       if (reindexTimerRef.current !== null) {
         window.clearTimeout(reindexTimerRef.current);
       }
@@ -286,146 +326,30 @@ function App() {
   }, [vaultPath]);
 
   // -------------------------------------------------------------------------
-  // Load the selected file
+  // Open a file in a target slot. This is the multi-slot replacement
+  // for the old single-pane `selectFile`. Cross-cutting regen
+  // (persistent destinations, method reagents, daily-log reading
+  // populator) runs once per open-call before we delegate to the
+  // pane's openPath.
+  //
+  // Routing rules for the `slotIndex` parameter:
+  //   - explicit number → use that slot
+  //   - undefined + single layout → slot 0
+  //   - undefined + dual + ctrlOnClick === true → slot 1
+  //   - undefined + dual + ctrlOnClick === false → slot 0
+  //   - undefined + tri/quad → return false (caller should ask the user)
+  //
+  // The "open in active slot" default is reserved for in-pane events
+  // (backlinks, related, queue/log views).
   // -------------------------------------------------------------------------
-  useEffect(() => {
-    if (!selectedPath) {
-      setFrontmatter({});
-      setFileBody("");
-      setEditedBody("");
-      setDirty(false);
-      return;
-    }
-    // Cluster 6: PDFs render via PDFReader, not the markdown pipeline. The
-    // markdown editor state is reset so a stale body from a previously
-    // open .md doesn't show under the PDF reader if the user toggles back.
-    if (/\.pdf$/i.test(selectedPath)) {
-      setFrontmatter({});
-      setFileBody("");
-      setEditedBody("");
-      setDirty(false);
-      setLoadingFile(false);
-      return;
-    }
-    setLoadingFile(true);
-    invoke<string>("read_markdown_file", { path: selectedPath })
-      .then((raw) => {
-        const { frontmatter, body } = parseFrontmatter(raw);
-        setFrontmatter(frontmatter);
-        setFileBody(body);
-        setEditedBody(body);
-        setDirty(false);
-        setLoadingFile(false);
-      })
-      .catch((e) => {
-        console.error("read_markdown_file failed:", e);
-        setError(`Could not open file: ${e}`);
-        setFileBody("");
-        setEditedBody("");
-        setLoadingFile(false);
-      });
-  }, [selectedPath]);
+  async function selectFileInSlot(
+    path: string | null,
+    slotIndex: number,
+  ): Promise<void> {
+    // PDF: skip persistent-regen / methods-regen / daily-log paths.
+    // (PDFs aren't markdown, so none of those passes apply.)
 
-  // -------------------------------------------------------------------------
-  // Saving
-  // -------------------------------------------------------------------------
-  async function saveCurrentFile(): Promise<boolean> {
-    if (!selectedPath || !dirty) return false;
-    const raw = serializeFrontmatter(frontmatter, editedBody);
-    try {
-      await invoke("write_markdown_file", {
-        path: selectedPath,
-        content: raw,
-      });
-      setFileBody(editedBody);
-      setDirty(false);
-
-      // Refresh the search/link index for this file so the next backlink
-      // lookup or palette query reflects the latest body.
-      if (vaultPath) {
-        invoke("index_single_file", {
-          vaultPath,
-          filePath: selectedPath,
-        })
-          .then(() => setIndexVersion((v) => v + 1))
-          .catch((e) => console.warn("index_single_file failed:", e));
-
-        // Cluster 4: route any `::experiment ... ::end` blocks to the
-        // appropriate iteration files. Best-effort; warnings (e.g.,
-        // experiment not found) surface in the console for now. Pass
-        // today's date so the Rust side can stamp any iteration it
-        // auto-creates.
-        invoke<{ routed: number; warnings: string[] }>(
-          "route_experiment_blocks",
-          {
-            vaultPath,
-            dailyNotePath: selectedPath,
-            dateIso: todayLocal(),
-          },
-        )
-          .then((res) => {
-            // Always log so we can diagnose silent zero-routing.
-            console.info(
-              `[cortex] experiment routing: routed=${res.routed}, warnings=${res.warnings.length}`,
-            );
-            if (res.warnings.length > 0) {
-              console.warn("[cortex] experiment-block warnings:", res.warnings);
-              setError(res.warnings[0]);
-            }
-          })
-          .catch((e) =>
-            console.warn("[cortex] route_experiment_blocks failed:", e),
-          );
-      }
-
-      scheduleCommit();
-      return true;
-    } catch (e) {
-      console.error("write_markdown_file failed:", e);
-      setError(`Save failed: ${e}`);
-      return false;
-    }
-  }
-
-  function scheduleCommit() {
-    if (!vaultPath || !selectedPath) return;
-    if (commitTimerRef.current !== null) {
-      window.clearTimeout(commitTimerRef.current);
-    }
-    const pathAtSchedule = selectedPath;
-    const vaultAtSchedule = vaultPath;
-    commitTimerRef.current = window.setTimeout(() => {
-      invoke("git_auto_commit", {
-        vaultPath: vaultAtSchedule,
-        filePath: pathAtSchedule,
-      }).catch((e) => console.warn("git_auto_commit failed:", e));
-    }, COMMIT_MS);
-  }
-
-  // -------------------------------------------------------------------------
-  // File switching — save current file first. Also intercepts persistent
-  // destination files (Cluster 3) so their auto section gets regenerated
-  // before we read.
-  // -------------------------------------------------------------------------
-  async function selectFile(path: string | null) {
-    if (selectedPath && dirty && selectedPath !== path) {
-      await saveCurrentFile();
-    }
-
-    // Cluster 6: PDFs route to the PDFReader view instead of the markdown
-    // editor. We set selectedPath so the file tree highlights stay in sync,
-    // but the editor's read_markdown_file pipeline is skipped.
-    if (path && /\.pdf$/i.test(path)) {
-      setSelectedPath(path);
-      setActiveView("pdf-reader");
-      return;
-    }
-
-    setActiveView("editor");
-
-    if (path && vaultPath) {
-      // Detect a persistent destination file at the vault root and
-      // regenerate before opening.
+    if (path && vaultPath && !/\.pdf$/i.test(path)) {
       const sep = path.includes("\\") ? "\\" : "/";
       const basename = path.split(sep).pop() ?? "";
       const isAtVaultRoot =
@@ -441,10 +365,6 @@ function App() {
           console.warn("regenerate_persistent_file failed:", e);
         }
       }
-
-      // Cluster 8: if opening a Method file, regenerate its
-      // Reagents/Parts table from the protocols listed in its body.
-      // Cheap and idempotent; no-op for files outside 05-Methods/.
       const methodsPrefix = `${vaultPath}${sep}05-Methods${sep}`;
       if (path.startsWith(methodsPrefix)) {
         try {
@@ -456,10 +376,6 @@ function App() {
           console.warn("regenerate_method_reagents failed:", e);
         }
       }
-
-      // Cluster 6 / Pass 8: if opening a daily-log file, populate any
-      // ::reading DATE ::end blocks from PDF annotation sidecars. The
-      // command is idempotent — no-op for daily logs without blocks.
       const dailyLogPrefix = `${vaultPath}${sep}02-Daily Log${sep}`;
       if (path.startsWith(dailyLogPrefix)) {
         try {
@@ -473,87 +389,60 @@ function App() {
       }
     }
 
-    setSelectedPath(path);
+    const handle = paneRefs.current[slotIndex];
+    if (!handle) {
+      console.warn(`[cortex] slot ${slotIndex} not mounted yet`);
+      return;
+    }
+    await handle.openPath(path);
+    activatePane(slotIndex);
   }
 
   /**
-   * Cluster 4: insert an `::experiment NAME / iter-N` … `::end` block
-   * at the document level, just after whatever block (paragraph,
-   * heading, blockquote, list item, …) currently contains the cursor.
+   * File-tree click router.
+   *   - Plain click → currently active slot (the one the user last
+   *     clicked into / focused).
+   *   - Ctrl/Cmd+Click → next slot in slot order, wrapping. In dual
+   *     this gives the "open in the other tab" behaviour the user
+   *     asked for; in tri/quad it cycles, which is a useful
+   *     keyboardless way to fan out a paper / note across slots.
+   *   - Drag-and-drop on a specific slot remains the explicit
+   *     "open here" affordance.
    *
-   * Why "after the top-level ancestor" instead of "at the cursor":
-   *   ProseMirror's insertContent puts new nodes inside the cursor's
-   *   parent. If the parent is a blockquote (e.g., the user has the
-   *   cursor on a `> quoted line` they wrote earlier), the four
-   *   paragraphs we insert end up nested inside that blockquote — and
-   *   tiptap-markdown then serializes the entire thing as a blockquote,
-   *   which the Rust parser then has to special-case.
-   *
-   *   By inserting at `$from.after(1)` (the doc-level position just
-   *   after the depth-1 ancestor of the cursor), we guarantee the four
-   *   new paragraphs are direct children of the doc — never inheriting
-   *   any wrapper structure.
-   *
-   * Cursor lands inside the second empty paragraph between header and
-   * closer, so the user can immediately start typing block content.
+   * Read activeSlotIdxRef.current (not the state) so the routing
+   * uses the freshest active index even if the click fires before
+   * React has committed the activate state update.
    */
-  function insertExperimentBlock(experimentName: string, iterNumber: number) {
-    const editor = editorInstanceRef.current;
-    if (!editor) {
-      console.warn("editor not ready for block insert");
+  function handleTreeClick(path: string, ctrlClick: boolean) {
+    if (slotCount === 1) {
+      selectFileInSlot(path, 0);
       return;
     }
-
-    const header = `::experiment ${experimentName} / iter-${iterNumber}`;
-    const closer = "::end";
-
-    // Compute a doc-level position to insert at. depth=0 means the
-    // selection is in the doc root itself (rare); depth>=1 means we're
-    // inside at least one ancestor block.
-    const $from = editor.state.selection.$from;
-    const insertAt = $from.depth === 0 ? $from.pos : $from.after(1);
-
-    editor
-      .chain()
-      .focus()
-      .insertContentAt(insertAt, [
-        { type: "paragraph", content: [{ type: "text", text: header }] },
-        { type: "paragraph" },
-        { type: "paragraph" },
-        { type: "paragraph", content: [{ type: "text", text: closer }] },
-      ])
-      .run();
-
-    // Position arithmetic for landing the cursor inside the second
-    // empty paragraph (P3):
-    //   insertAt          → outside P1, before open
-    //   +1                → inside P1, before text
-    //   +header.length    → inside P1, after text
-    //   +1                → outside P1
-    //   +1                → inside P2 (empty)
-    //   +1                → outside P2
-    //   +1                → inside P3  ← target
-    const cursorTarget = insertAt + header.length + 5;
-    editor.chain().setTextSelection(cursorTarget).run();
+    const active = Math.min(activeSlotIdxRef.current, slotCount - 1);
+    const target = ctrlClick ? (active + 1) % slotCount : active;
+    selectFileInSlot(path, target);
   }
 
-  /** Handler for the ReviewsMenu — routes destinations to either a
-   *  virtual queue view or a regenerated persistent file. */
+  /** Handler for the ReviewsMenu — routes destinations to a queue view
+   *  (in the active slot) or a regenerated persistent file (also in the
+   *  active slot). */
   async function pickDestination(choice: DestinationChoice) {
     if (!vaultPath) return;
     if (choice.kind === "queue") {
-      setActiveView(
-        choice.queueKind === "yellow" ? "queue-yellow" : "queue-green",
-      );
+      const handle = paneRefs.current[activeSlotIdx];
+      if (handle) {
+        handle.setActiveView(
+          choice.queueKind === "yellow" ? "queue-yellow" : "queue-green",
+        );
+      }
       return;
     }
-    // Persistent: ensure exists + regenerate, then open as a file.
     try {
       const path = await invoke<string>("ensure_persistent_file", {
         vaultPath,
         kind: choice.persistentKind,
       });
-      await selectFile(path);
+      await selectFileInSlot(path, activeSlotIdx);
       setRefreshKey((k) => k + 1);
     } catch (e) {
       console.error("ensure_persistent_file failed:", e);
@@ -562,20 +451,12 @@ function App() {
   }
 
   // -------------------------------------------------------------------------
-  // Daily log (Ctrl+D)
-  //
-  // Cluster 3: before creating today's daily note (if it doesn't exist
-  // yet), pull all unresolved + un-injected pink marks. Format them as
-  // a "Carried over from earlier" section. After successful creation,
-  // stamp those marks as injected so they don't recur tomorrow.
+  // Daily log (Ctrl+D) — opens in the active slot.
   // -------------------------------------------------------------------------
   async function openTodayDailyLog() {
     if (!vaultPath) return;
     const today = todayLocal();
     try {
-      // Probe for pink marks that should carry over. Empty string means
-      // the file already exists (we'll skip injection) or there's
-      // nothing to carry — both fine.
       let carryOverMd: string | null = null;
       let pinkIds: number[] = [];
       try {
@@ -605,20 +486,9 @@ function App() {
         dateIso: today,
         carryOverMd,
       });
-      await selectFile(path);
+      await selectFileInSlot(path, activeSlotIdx);
       setRefreshKey((k) => k + 1);
 
-      // Stamp the marks as injected. We do this regardless of whether
-      // the file was actually new — if the file already existed,
-      // ensure_daily_log silently ignored carry_over, so the user just
-      // sees the existing daily note. The marks would still be valid
-      // candidates tomorrow, but the doc says "consumed once injected
-      // anywhere"; we honor that by stamping them only when the file
-      // didn't exist. Practically: the daily-log creation is gated by
-      // file-existence on the Rust side, but we don't know that here.
-      // For simplicity, only stamp if there were any to begin with —
-      // and accept that re-running today won't double-inject anyway
-      // (because pinkIds will be empty next time since they're stamped).
       if (pinkIds.length > 0) {
         invoke("mark_marks_injected", {
           vaultPath,
@@ -632,28 +502,16 @@ function App() {
   }
 
   // -------------------------------------------------------------------------
-  // Wikilinks
+  // Wikilinks — opens target file in the active slot (the pane that
+  // initiated the click).
   // -------------------------------------------------------------------------
-  //
-  // Resolution order (most specific first):
-  //   1. Exact filename match — `[[2026-04-25]]` finds `2026-04-25.md`
-  //      anywhere in the vault. This is what makes daily-log links work
-  //      (their H1 is "2026-04-25 — Friday", not just the date).
-  //   2. Case-insensitive H1 title match.
-  // If neither hits, we *ask* (Tauri's native confirm — window.confirm
-  // can be unreliable in WebView2) and on yes, create the note in the
-  // VAULT ROOT (not the current dir, which makes a mess if you're
-  // editing inside 02-Daily Log).
-  // Critically, if a file already exists at the target path, we just
-  // open it instead of writing — never overwrite with a fresh template.
-  async function openWikilink(target: string) {
+  async function openWikilinkInActive(target: string) {
     if (!vaultPath) return;
     try {
       const all = await invoke<NoteListItem[]>("list_all_notes", {
         vaultPath,
       });
 
-      // 1. Filename match (basename without `.md`).
       const sep = vaultPath.includes("\\") ? "\\" : "/";
       const targetLower = target.toLowerCase();
       const fileMatch = all.find((n) => {
@@ -662,25 +520,22 @@ function App() {
         return stem.toLowerCase() === targetLower;
       });
       if (fileMatch) {
-        await selectFile(fileMatch.path);
+        await selectFileInSlot(fileMatch.path, activeSlotIdx);
         return;
       }
 
-      // 2. H1 title match.
       const titleMatch = all.find((n) => n.title.toLowerCase() === targetLower);
       if (titleMatch) {
-        await selectFile(titleMatch.path);
+        await selectFileInSlot(titleMatch.path, activeSlotIdx);
         return;
       }
 
-      // Not found — ask via the Tauri dialog plugin.
       const ok = await confirm(
         `No note titled "${target}" exists. Create one in the vault root?`,
         { title: "Create note?", kind: "info" },
       );
       if (!ok) return;
 
-      // Build target path. Sanitise filename (Windows-illegal chars).
       const safeName = target
         .replace(/[\\/:*?"<>|]/g, "-")
         .replace(/\s+/g, " ")
@@ -691,8 +546,6 @@ function App() {
       }
       const newPath = `${vaultPath}${sep}${safeName}.md`;
 
-      // Safety net: if a file is somehow already at that path (maybe
-      // it has a different H1 than its filename), just open it.
       const existsAlready = await invoke<string | null>("read_markdown_file", {
         path: newPath,
       }).then(
@@ -700,7 +553,7 @@ function App() {
         () => false,
       );
       if (existsAlready) {
-        await selectFile(newPath);
+        await selectFileInSlot(newPath, activeSlotIdx);
         return;
       }
 
@@ -709,8 +562,6 @@ function App() {
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/(^-|-$)/g, "");
-      // Quote the date so YAML doesn't auto-parse it as a Date object
-      // (which would render as "...T00:00:00.000Z" in the panel).
       const template = `---\nid: note-${today}-${idSlug}\ntype: note\ndate: "${today}"\n---\n\n# ${target}\n\n`;
 
       await invoke("write_markdown_file", {
@@ -722,7 +573,7 @@ function App() {
         filePath: newPath,
       });
       setIndexVersion((v) => v + 1);
-      await selectFile(newPath);
+      await selectFileInSlot(newPath, activeSlotIdx);
       setRefreshKey((k) => k + 1);
     } catch (e) {
       console.error("openWikilink failed:", e);
@@ -731,42 +582,28 @@ function App() {
   }
 
   // -------------------------------------------------------------------------
-  // Identifiers for the currently-open note (used for backlinks lookup).
-  //   - currentTitle:    H1 of the body (e.g., "Cortex — Project Notes")
-  //   - currentFilename: basename without `.md` (e.g., "NOTES")
-  // We pass both because wikilinks can point at either form.
-  // -------------------------------------------------------------------------
-  function basename(path: string): string {
-    const sep = path.includes("\\") ? "\\" : "/";
-    const name = path.split(sep).pop() ?? path;
-    return name.endsWith(".md") ? name.slice(0, -3) : name;
-  }
-  function deriveCurrentTitle(): string {
-    if (!selectedPath) return "";
-    for (const line of fileBody.split("\n")) {
-      const t = line.trim();
-      if (t.startsWith("# ")) return t.slice(2).trim();
-    }
-    return basename(selectedPath);
-  }
-  const currentTitle = deriveCurrentTitle();
-  const currentFilename = selectedPath ? basename(selectedPath) : "";
-
-  // -------------------------------------------------------------------------
   // Keyboard shortcuts
   // -------------------------------------------------------------------------
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
         e.preventDefault();
-        saveCurrentFile();
+        const handle = paneRefs.current[activeSlotIdx];
+        if (handle) handle.saveIfDirty();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "r") {
+        // Ctrl+R: reload only the active slot's open file from disk.
+        // Browsers normally use this to reload the whole page; we
+        // intercept so the user can refresh just one pane.
+        e.preventDefault();
+        const handle = paneRefs.current[activeSlotIdx];
+        if (handle) handle.reload();
       } else if ((e.ctrlKey || e.metaKey) && e.key === "d") {
         e.preventDefault();
         openTodayDailyLog();
       } else if ((e.ctrlKey || e.metaKey) && e.key === "k") {
-        // Cluster 6 v1.3: in PDF reader, Ctrl+K opens the in-pane PDF
-        // search bubble (handled inside PDFReader). Don't intercept here.
-        if (activeView === "pdf-reader") return;
+        // PDF reader's Ctrl+K is in-pane search — only suppress if the
+        // ACTIVE slot is a pdf-reader.
+        if (slotViews[activeSlotIdx] === "pdf-reader") return;
         e.preventDefault();
         setPaletteOpen(true);
       } else if ((e.ctrlKey || e.metaKey) && e.key === "/") {
@@ -786,7 +623,7 @@ function App() {
               next ? "false" : "true",
             );
           } catch {
-            // ignore — see Week 1 notes on localStorage SecurityError
+            // ignore
           }
           return next;
         });
@@ -794,7 +631,7 @@ function App() {
         (e.ctrlKey || e.metaKey) &&
         !e.shiftKey &&
         (e.key === "n" || e.key === "N") &&
-        !isEditorFocused()
+        !isAnyEditorFocused()
       ) {
         e.preventDefault();
         setHierarchyKind("note");
@@ -802,7 +639,7 @@ function App() {
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
         (e.key === "P" || e.key === "p") &&
-        !isEditorFocused()
+        !isAnyEditorFocused()
       ) {
         e.preventDefault();
         setHierarchyKind("project");
@@ -810,21 +647,15 @@ function App() {
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
         (e.key === "E" || e.key === "e") &&
-        !isEditorFocused()
+        !isAnyEditorFocused()
       ) {
-        // Cluster 8 v2.1.3: Ctrl+Shift+E is "new experiment" only when
-        // the editor isn't focused. When the editor IS focused, TipTap's
-        // TextAlign keymap takes the same chord and aligns the current
-        // paragraph centred. Same gating for the rest of the hierarchy
-        // shortcuts (note/project/iteration) so the editor's typing
-        // experience never silently triggers a hierarchy modal.
         e.preventDefault();
         setHierarchyKind("experiment");
       } else if (
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
         (e.key === "I" || e.key === "i") &&
-        !isEditorFocused()
+        !isAnyEditorFocused()
       ) {
         e.preventDefault();
         setHierarchyKind("iteration");
@@ -843,106 +674,68 @@ function App() {
         e.preventDefault();
         setTableModalOpen(true);
       } else if (e.key === "Escape") {
-        // Centralised escape — modals also handle their own, but this
-        // covers the case where focus is somewhere outside them.
         setPaletteOpen(false);
         setHelpOpen(false);
         setHierarchyKind(null);
         setTableModalOpen(false);
+        setPendingSlotChoice(null);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPath, dirty, editedBody, frontmatter, vaultPath, activeView]);
+  }, [activeSlotIdx, slotViews, vaultPath]);
 
-  // Autosave 5 minutes after last edit.
-  useEffect(() => {
-    if (!dirty) return;
-    const t = window.setTimeout(() => {
-      saveCurrentFile();
-    }, AUTOSAVE_MS);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, editedBody]);
-
-  // Save dirty work before the window closes. Critical because autosave
-  // is on a 5-minute timer — without this, hitting the X button could
-  // throw away the last few minutes of typing.
-  //
-  // Two things matter here:
-  //   1. preventDefault() must be called SYNCHRONOUSLY in the handler.
-  //      Tauri checks the prevented flag the moment the listener returns;
-  //      an `async` handler returns a Promise immediately and Tauri's
-  //      behaviour becomes undefined (in some Tauri 2 builds the window
-  //      gets stuck non-closeable).
-  //   2. We register the listener exactly ONCE. If we put state in the
-  //      effect's deps, every keystroke re-registers and we accumulate
-  //      stale handlers. We use refs to access the latest state instead.
+  // Save dirty work across ALL panes before the window closes.
   const closingRef = useRef(false);
-  const closeStateRef = useRef({
-    dirty,
-    editedBody,
-    frontmatter,
-    selectedPath,
-  });
-  // Keep the ref current.
-  closeStateRef.current = {
-    dirty,
-    editedBody,
-    frontmatter,
-    selectedPath,
-  };
-
   useEffect(() => {
     const win = getCurrentWindow();
     console.info("[cortex] registering close handler");
     const unlistenPromise = win.onCloseRequested((event) => {
-      const s = closeStateRef.current;
-      console.info(
-        "[cortex] close requested. closing=" +
-          closingRef.current +
-          ", dirty=" +
-          s.dirty +
-          ", selectedPath=" +
-          s.selectedPath,
-      );
-
-      // Second pass: we just called win.destroy() ourselves after saving.
-      // Let it through.
       if (closingRef.current) {
         console.info("[cortex] second pass — letting close proceed");
         return;
       }
 
-      if (!s.dirty || !s.selectedPath) {
-        console.info("[cortex] no dirty work — close proceeds");
+      // Collect dirty snapshots from every mounted pane.
+      const snapshots: {
+        selectedPath: string | null;
+        frontmatter: Record<string, unknown>;
+        editedBody: string;
+      }[] = [];
+      for (const handle of paneRefs.current) {
+        if (!handle) continue;
+        if (!handle.getDirty()) continue;
+        snapshots.push(handle.getDirtySnapshot());
+      }
+
+      if (snapshots.length === 0) {
+        console.info("[cortex] no dirty panes — close proceeds");
         return;
       }
 
-      // SYNCHRONOUS preventDefault, then kick off the save in an IIFE
-      // so the listener returns immediately. preventDefault MUST happen
-      // before the listener returns; Tauri checks the prevented flag at
-      // that moment.
-      console.info("[cortex] dirty — preventDefault, saving, then closing");
+      console.info(
+        `[cortex] ${snapshots.length} dirty panes — preventDefault, saving, then closing`,
+      );
       event.preventDefault();
       (async () => {
-        try {
-          const raw = serializeFrontmatter(s.frontmatter, s.editedBody);
-          await invoke("write_markdown_file", {
-            path: s.selectedPath,
-            content: raw,
-          });
-          console.info("[cortex] save done");
-        } catch (e) {
-          console.warn("[cortex] save before close failed:", e);
-          // Best-effort — close anyway. Better to risk a few seconds of
-          // text than a permanently undismissable window.
+        for (const s of snapshots) {
+          if (!s.selectedPath) continue;
+          try {
+            const raw = serializeFrontmatter(s.frontmatter, s.editedBody);
+            await invoke("write_markdown_file", {
+              path: s.selectedPath,
+              content: raw,
+            });
+            console.info(`[cortex] save done: ${s.selectedPath}`);
+          } catch (e) {
+            console.warn(
+              `[cortex] save before close failed for ${s.selectedPath}:`,
+              e,
+            );
+          }
         }
         closingRef.current = true;
-        // destroy() forcibly closes without re-firing onCloseRequested.
-        // (close() would re-fire it; the closingRef would short-circuit,
-        //  but destroy is the cleaner force-close path.)
         try {
           await win.destroy();
         } catch (e) {
@@ -959,40 +752,33 @@ function App() {
     };
   }, []);
 
-  // Save dirty work when the user steps away — alt-tab, minimize, lock screen,
-  // close the laptop lid, system sleep. The 5-minute autosave is too long a
-  // window to risk; these reactive triggers cover the gap.
+  // Save dirty work across all panes when the window blurs / hides.
   useEffect(() => {
     let unlistenFocus: (() => void) | null = null;
 
-    const trySave = () => {
-      const s = closeStateRef.current;
-      if (!s.dirty || !s.selectedPath) return;
-      const raw = serializeFrontmatter(s.frontmatter, s.editedBody);
-      // Fire-and-forget. We don't care about the result here — if it fails,
-      // a subsequent Ctrl+S or save-on-close will retry.
-      invoke("write_markdown_file", {
-        path: s.selectedPath,
-        content: raw,
-      })
-        .then(() => {
-          // We can't easily flip the React `dirty` flag from outside the
-          // component lifecycle without scheduling a render, so we leave
-          // it. The next render or Ctrl+S will re-sync.
-        })
-        .catch((e) => console.warn("[cortex] focus-save failed:", e));
+    const trySaveAll = () => {
+      for (const handle of paneRefs.current) {
+        if (!handle) continue;
+        if (!handle.getDirty()) continue;
+        const s = handle.getDirtySnapshot();
+        if (!s.selectedPath) continue;
+        const raw = serializeFrontmatter(s.frontmatter, s.editedBody);
+        invoke("write_markdown_file", {
+          path: s.selectedPath,
+          content: raw,
+        }).catch((e) => console.warn("[cortex] focus-save failed:", e));
+      }
     };
 
     const onVisibility = () => {
-      if (document.hidden) trySave();
+      if (document.hidden) trySaveAll();
     };
     document.addEventListener("visibilitychange", onVisibility);
 
-    // Tauri window focus event — fires on alt-tab, lid close, etc.
     const win = getCurrentWindow();
     win
       .onFocusChanged(({ payload: focused }) => {
-        if (!focused) trySave();
+        if (!focused) trySaveAll();
       })
       .then((unlisten) => {
         unlistenFocus = unlisten;
@@ -1005,19 +791,7 @@ function App() {
     };
   }, []);
 
-  // Cluster 8 v2.1.4: keep `activeMode` in sync with focus.
-  //
-  // First attempt used `document.activeElement` inside a mousedown
-  // listener, which raced: mousedown fires BEFORE focus moves, so the
-  // active element was still the editor at the moment the listener ran,
-  // and clicks on non-focusable sidebar elements (file-tree rows, divs)
-  // never triggered a follow-up focusin to correct it. About half the
-  // sidebar clicks therefore stayed in "editor" mode visually.
-  //
-  // Fix: read the EVENT TARGET, not activeElement. The target is the
-  // element the user actually clicked / focused, no matter how the
-  // browser has scheduled the focus transition. `target.closest(...)`
-  // tells us whether the click landed inside the editor.
+  // Track which keymap is live (sidebar vs editor) for the visual banner.
   useEffect(() => {
     const updateFromEvent = (e: Event) => {
       const t = e.target as Element | null;
@@ -1027,17 +801,14 @@ function App() {
     };
     document.addEventListener("focusin", updateFromEvent);
     document.addEventListener("mousedown", updateFromEvent);
-    // Initial paint: we have no event yet, so fall back to activeElement.
-    // The race only matters once user input is in flight.
-    setActiveMode(isEditorFocused() ? "editor" : "sidebar");
+    setActiveMode(isAnyEditorFocused() ? "editor" : "sidebar");
     return () => {
       document.removeEventListener("focusin", updateFromEvent);
       document.removeEventListener("mousedown", updateFromEvent);
     };
   }, []);
 
-  // Toggle a body class while Ctrl/Meta is held — used by index.css to
-  // give wikilinks a pointer cursor and stronger underline on hover.
+  // Toggle a body class while Ctrl/Meta is held — used by index.css.
   useEffect(() => {
     const cls = "cortex-mod-pressed";
     const onDown = (e: KeyboardEvent) => {
@@ -1050,10 +821,7 @@ function App() {
         document.body.classList.remove(cls);
       }
     };
-    // Window blur drops modifier state in the OS but we don't get a
-    // keyup — clear defensively.
     const onBlur = () => document.body.classList.remove(cls);
-
     window.addEventListener("keydown", onDown);
     window.addEventListener("keyup", onUp);
     window.addEventListener("blur", onBlur);
@@ -1070,7 +838,10 @@ function App() {
   // -------------------------------------------------------------------------
   async function pickVault() {
     setError(null);
-    if (dirty) await saveCurrentFile();
+    // Save any dirty panes before swapping vaults.
+    for (const handle of paneRefs.current) {
+      if (handle && handle.getDirty()) await handle.saveIfDirty();
+    }
     try {
       const selected = await open({
         directory: true,
@@ -1080,7 +851,10 @@ function App() {
       if (typeof selected === "string") {
         await invoke("save_vault_config", { vaultPath: selected });
         setVaultPath(selected);
-        setSelectedPath(null);
+        // Clear panes — old paths point at the previous vault.
+        for (const handle of paneRefs.current) {
+          if (handle) await handle.openPath(null);
+        }
       }
     } catch (err) {
       console.error("pickVault failed:", err);
@@ -1124,22 +898,84 @@ function App() {
     );
   }
 
+  // The active slot's view drives whether the sidebar accent banner shows.
+  const activeView = slotViews[activeSlotIdx];
+
+  // Render ALL MAX_SLOTS pane components every time, regardless of
+  // layout. Visible ones go into the LayoutGrid; the rest are kept
+  // mounted in a hidden div so their state, refs, and pending saves
+  // survive layout swaps. This is what makes the close handler safe
+  // even after a quad → single shrink: paneRefs are still populated
+  // for every dirty pane.
+  const panes: React.ReactNode[] = [];
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    panes.push(
+      <PaneWrapper
+        key={i}
+        slotIndex={i}
+        onDropPath={(path) => selectFileInSlot(path, i)}
+      >
+        <TabPane
+          ref={(h) => {
+            paneRefs.current[i] = h;
+          }}
+          slotIndex={i}
+          vaultPath={vaultPath}
+          indexVersion={indexVersion}
+          isActive={activeSlotIdx === i && slotCount > 1}
+          bumpIndex={() => setIndexVersion((v) => v + 1)}
+          setError={(msg) => setError(msg)}
+          onActivate={() => activatePane(i)}
+          onPathChange={(p) =>
+            setSlotPaths((prev) => {
+              const next = prev.slice();
+              next[i] = p;
+              return next;
+            })
+          }
+          onActiveViewChange={(v) =>
+            setSlotViews((prev) => {
+              const next = prev.slice();
+              next[i] = v;
+              return next;
+            })
+          }
+          onDirtyChange={(d) =>
+            setSlotDirty((prev) => {
+              const next = prev.slice();
+              next[i] = d;
+              return next;
+            })
+          }
+          onFollowWikilink={(target) => {
+            // Wikilink originated from this pane → make it active and
+            // resolve from there.
+            activatePane(i);
+            openWikilinkInActive(target);
+          }}
+          onRequestInsertTable={() => {
+            activatePane(i);
+            setTableModalOpen(true);
+          }}
+          onOpenFileInPane={async (path, slotIndex) => {
+            await selectFileInSlot(path, slotIndex);
+          }}
+        />
+      </PaneWrapper>,
+    );
+  }
+
+  // The set of paths we want highlighted in the file tree (any slot
+  // showing a file). Pass the active one as the primary.
+  const treeHighlight = slotPaths[activeSlotIdx] ?? null;
+
   return (
     <div style={baseStyles.appShell}>
       <aside
         style={{
           ...baseStyles.sidebar,
-          // Width swap on collapse. We narrow to a thin strip (~32px)
-          // rather than a full-zero width so the toggle chevron stays
-          // visible — there's always a way back without a shortcut.
           width: sidebarCollapsed ? "32px" : "300px",
           minWidth: sidebarCollapsed ? "32px" : "260px",
-          // Sidebar-mode banner: accent border when sidebar shortcuts are
-          // the active keymap. Suppressed while the PDF reader holds the
-          // main pane — the PDF reader has its own Ctrl+K (in-pane
-          // search) and showing the "sidebar mode" banner alongside that
-          // is misleading. Also suppressed while collapsed (no point
-          // signalling sidebar mode when the sidebar isn't really there).
           borderRight:
             activeMode === "sidebar" &&
             activeView !== "pdf-reader" &&
@@ -1208,9 +1044,12 @@ function App() {
                     + Idea
                   </button>
                   <button
-                    onClick={() => setActiveView("idea-log")}
+                    onClick={() => {
+                      const handle = paneRefs.current[activeSlotIdx];
+                      if (handle) handle.setActiveView("idea-log");
+                    }}
                     style={baseStyles.changeBtn}
-                    title="Open Idea Log"
+                    title="Open Idea Log (active slot)"
                   >
                     Ideas
                   </button>
@@ -1222,9 +1061,12 @@ function App() {
                     + Method
                   </button>
                   <button
-                    onClick={() => setActiveView("methods-arsenal")}
+                    onClick={() => {
+                      const handle = paneRefs.current[activeSlotIdx];
+                      if (handle) handle.setActiveView("methods-arsenal");
+                    }}
                     style={baseStyles.changeBtn}
-                    title="Open Methods Arsenal"
+                    title="Open Methods Arsenal (active slot)"
                   >
                     Methods
                   </button>
@@ -1236,9 +1078,12 @@ function App() {
                     + Protocol
                   </button>
                   <button
-                    onClick={() => setActiveView("protocols-log")}
+                    onClick={() => {
+                      const handle = paneRefs.current[activeSlotIdx];
+                      if (handle) handle.setActiveView("protocols-log");
+                    }}
                     style={baseStyles.changeBtn}
-                    title="Open Protocols Log"
+                    title="Open Protocols Log (active slot)"
                   >
                     Protocols
                   </button>
@@ -1295,8 +1140,10 @@ function App() {
             <div style={baseStyles.sidebarBody}>
               <FileTree
                 vaultPath={vaultPath}
-                onSelectFile={selectFile}
-                selectedPath={selectedPath}
+                onSelectFile={(p, opts) =>
+                  handleTreeClick(p, !!opts?.ctrlClick)
+                }
+                selectedPath={treeHighlight}
                 refreshKey={refreshKey}
               />
             </div>
@@ -1316,127 +1163,77 @@ function App() {
         )}
       </aside>
 
-      <main style={baseStyles.mainPane}>
-        {activeView === "queue-yellow" ? (
-          <MarkQueueView
-            vaultPath={vaultPath}
-            kind="yellow"
-            ageDays={7}
-            title="Weekly review"
-            blurb="Yellow-marked content from the last 7 days, grouped by source note. Strike through (Ctrl+Shift+X) items inside the source to mark them resolved."
-            refreshKey={indexVersion}
-            onOpenFile={selectFile}
-            onClose={() => setActiveView("editor")}
-          />
-        ) : activeView === "queue-green" ? (
-          <MarkQueueView
-            vaultPath={vaultPath}
-            kind="green"
-            ageDays={30}
-            title="Monthly review"
-            blurb="Green-marked content from the last 30 days, grouped by source note."
-            refreshKey={indexVersion}
-            onOpenFile={selectFile}
-            onClose={() => setActiveView("editor")}
-          />
-        ) : activeView === "idea-log" ? (
-          <IdeaLog
-            vaultPath={vaultPath}
-            refreshKey={indexVersion}
-            onOpenFile={selectFile}
-            onClose={() => setActiveView("editor")}
-            onNewIdea={() => setHierarchyKind("idea")}
-          />
-        ) : activeView === "methods-arsenal" ? (
-          <MethodsArsenal
-            vaultPath={vaultPath}
-            refreshKey={indexVersion}
-            onOpenFile={selectFile}
-            onClose={() => setActiveView("editor")}
-            onNewMethod={() => setHierarchyKind("method")}
-          />
-        ) : activeView === "protocols-log" ? (
-          <ProtocolsLog
-            vaultPath={vaultPath}
-            refreshKey={indexVersion}
-            onOpenFile={selectFile}
-            onClose={() => setActiveView("editor")}
-            onNewProtocol={() => setHierarchyKind("protocol")}
-          />
-        ) : activeView === "pdf-reader" && selectedPath ? (
-          <PDFReader
-            vaultPath={vaultPath}
-            filePath={selectedPath}
-            onClose={() => setActiveView("editor")}
-          />
-        ) : !selectedPath ? (
-          <div style={baseStyles.muted}>
-            Click a file in the sidebar, press Ctrl+D for today's log, or Ctrl+K
-            to search.
+      {/* Main pane area: top bar with layout picker, then layout grid. */}
+      <div style={baseStyles.mainCol}>
+        <div style={baseStyles.mainTopBar}>
+          <div style={{ flex: 1 }} />
+          <span style={baseStyles.activeSlotLabel}>
+            {slotCount > 1 ? `Active: slot ${activeSlotIdx + 1}` : ""}
+          </span>
+          <LayoutPicker mode={layoutMode} onChange={setLayoutMode} />
+        </div>
+
+        <div style={baseStyles.gridArea}>
+          <LayoutGrid
+            mode={layoutMode}
+            colFrac={colFrac}
+            rowFrac={rowFrac}
+            onColFracChange={setColFrac}
+            onRowFracChange={setRowFrac}
+          >
+            {panes.slice(0, slotCount)}
+          </LayoutGrid>
+          {/* Hidden mount-keeper: panes beyond the current layout's
+              slot count stay mounted here so their state survives a
+              layout shrink (and the close handler still sees dirty
+              work in any pane). */}
+          <div style={baseStyles.hiddenPaneStash} aria-hidden="true">
+            {panes.slice(slotCount)}
           </div>
-        ) : loadingFile ? (
-          <div style={baseStyles.muted}>Loading file…</div>
-        ) : (
-          <div style={baseStyles.editorWrap}>
-            <div style={baseStyles.fileHeader}>
-              <code style={baseStyles.filePath}>{selectedPath}</code>
-              <span style={baseStyles.saveStatus}>
-                {dirty ? (
-                  <span style={baseStyles.unsaved}>● unsaved</span>
-                ) : (
-                  <span style={baseStyles.saved}>saved</span>
-                )}
-              </span>
-            </div>
-            <FrontmatterPanel frontmatter={frontmatter} />
-            <Editor
-              content={fileBody}
-              onChange={(md) => {
-                setEditedBody(md);
-                setDirty(md !== fileBody);
-              }}
-              onFollowWikilink={openWikilink}
-              onEditorReady={(e) => {
-                editorInstanceRef.current = e;
-              }}
-              onRequestInsertTable={() => setTableModalOpen(true)}
-            />
-            <RelatedHierarchyPanel
-              vaultPath={vaultPath}
-              currentPath={selectedPath}
-              refreshKey={indexVersion}
-              onOpenFile={selectFile}
-            />
-            <BacklinksPanel
-              vaultPath={vaultPath}
-              currentTitle={currentTitle}
-              currentFilename={currentFilename}
-              refreshKey={indexVersion}
-              onOpenFile={selectFile}
-            />
-          </div>
-        )}
+        </div>
+
         {error && (
-          <p style={baseStyles.errorText}>
-            {error}
-            <button
-              onClick={() => setError(null)}
-              style={{ ...baseStyles.changeBtn, marginLeft: "0.75rem" }}
-            >
-              dismiss
-            </button>
-          </p>
+          <div style={baseStyles.errorBanner}>
+            <p style={baseStyles.errorText}>
+              {error}
+              <button
+                onClick={() => setError(null)}
+                style={{ ...baseStyles.changeBtn, marginLeft: "0.75rem" }}
+              >
+                dismiss
+              </button>
+            </p>
+          </div>
         )}
-      </main>
+      </div>
 
       <CommandPalette
         vaultPath={vaultPath}
         isOpen={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onOpenFile={(p) => {
-          selectFile(p);
           setPaletteOpen(false);
+          // Multi-slot: ask the user which slot to open in. Single
+          // slot: just route directly.
+          if (slotCount > 1) {
+            setPendingSlotChoice({ path: p });
+          } else {
+            selectFileInSlot(p, 0);
+          }
         }}
+      />
+      <SlotPicker
+        isOpen={!!pendingSlotChoice}
+        layout={layoutMode}
+        slotPaths={slotPaths.slice(0, slotCount)}
+        pendingPath={pendingSlotChoice?.path ?? null}
+        onPick={(slotIndex) => {
+          if (pendingSlotChoice) {
+            selectFileInSlot(pendingSlotChoice.path, slotIndex);
+          }
+          setPendingSlotChoice(null);
+        }}
+        onClose={() => setPendingSlotChoice(null)}
       />
       <ShortcutsHelp isOpen={helpOpen} onClose={() => setHelpOpen(false)} />
       <ColorLegend
@@ -1457,8 +1254,8 @@ function App() {
         onClose={() => setHierarchyKind(null)}
         onCreated={(path) => {
           setHierarchyKind(null);
-          // Navigate to the new file and refresh the tree so it appears.
-          selectFile(path);
+          // New file → open in active slot.
+          selectFileInSlot(path, activeSlotIdx);
           setRefreshKey((k) => k + 1);
         }}
       />
@@ -1468,7 +1265,8 @@ function App() {
         onClose={() => setBlockModalOpen(false)}
         onConfirm={(name, iter) => {
           setBlockModalOpen(false);
-          insertExperimentBlock(name, iter);
+          const handle = paneRefs.current[activeSlotIdx];
+          if (handle) handle.insertExperimentBlock(name, iter);
         }}
       />
       <InsertTableModal
@@ -1476,14 +1274,80 @@ function App() {
         onClose={() => setTableModalOpen(false)}
         onConfirm={(rows, cols, withHeaderRow) => {
           setTableModalOpen(false);
-          const ed = editorInstanceRef.current;
-          if (!ed) {
-            console.warn("editor not ready for table insert");
-            return;
-          }
-          ed.chain().focus().insertTable({ rows, cols, withHeaderRow }).run();
+          const handle = paneRefs.current[activeSlotIdx];
+          if (handle) handle.insertTable(rows, cols, withHeaderRow);
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * Wraps a TabPane with drag-and-drop file routing. Tri/quad layouts
+ * use this as the primary way to drop a file into a non-active slot.
+ *
+ * IMPORTANT: handlers are CAPTURE phase — TipTap (ProseMirror) attaches
+ * its own bubble-phase drop listener inside the editor and would
+ * otherwise consume the event and try to insert the dragged data as
+ * text. Capture phase fires before any descendant's bubble handler,
+ * and `stopPropagation()` plus `preventDefault()` together stop the
+ * drop from reaching ProseMirror at all.
+ */
+function PaneWrapper({
+  slotIndex,
+  onDropPath,
+  children,
+}: {
+  slotIndex: number;
+  onDropPath: (path: string) => void;
+  children: React.ReactNode;
+}) {
+  const [isOver, setIsOver] = useState(false);
+  return (
+    <div
+      style={{
+        position: "relative",
+        height: "100%",
+        width: "100%",
+        outline: isOver ? "2px dashed var(--accent)" : "none",
+        outlineOffset: "-3px",
+      }}
+      onDragEnterCapture={(e) => {
+        if (e.dataTransfer.types.includes("text/cortex-path")) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!isOver) setIsOver(true);
+        }
+      }}
+      onDragOverCapture={(e) => {
+        if (e.dataTransfer.types.includes("text/cortex-path")) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = "copy";
+          if (!isOver) setIsOver(true);
+        }
+      }}
+      onDragLeaveCapture={(e) => {
+        // Only clear when leaving this wrapper's bounds, not when
+        // moving between its descendants.
+        const wrapper = e.currentTarget as HTMLDivElement;
+        const related = e.relatedTarget as Node | null;
+        if (!related || !wrapper.contains(related)) {
+          setIsOver(false);
+        }
+      }}
+      onDropCapture={(e) => {
+        const path = e.dataTransfer.getData("text/cortex-path");
+        setIsOver(false);
+        if (path) {
+          e.preventDefault();
+          e.stopPropagation();
+          onDropPath(path);
+        }
+      }}
+      data-slot-index={slotIndex}
+    >
+      {children}
     </div>
   );
 }
@@ -1512,8 +1376,6 @@ const baseStyles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
   },
   sidebar: {
-    // Width / minWidth are overridden inline based on collapse state.
-    // Keeping them here as fallback defaults for the expanded case.
     width: "300px",
     minWidth: "260px",
     borderRight: "1px solid var(--border)",
@@ -1600,7 +1462,46 @@ const baseStyles: Record<string, React.CSSProperties> = {
     fontFamily: "ui-monospace, 'Cascadia Code', Consolas, monospace",
   },
   sidebarBody: { flex: 1, overflowY: "auto", overflowX: "hidden" },
-  mainPane: { flex: 1, padding: "2rem", overflow: "auto" },
+  mainCol: {
+    flex: 1,
+    minWidth: 0,
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+  },
+  mainTopBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    padding: "0.4rem 0.6rem",
+    borderBottom: "1px solid var(--border)",
+    background: "var(--bg-deep)",
+  },
+  activeSlotLabel: {
+    fontSize: "0.7rem",
+    color: "var(--text-muted)",
+    marginRight: "0.4rem",
+    userSelect: "none",
+  },
+  gridArea: {
+    flex: 1,
+    minHeight: 0,
+    position: "relative",
+    overflow: "hidden",
+  },
+  hiddenPaneStash: {
+    position: "absolute",
+    width: 0,
+    height: 0,
+    overflow: "hidden",
+    pointerEvents: "none",
+    visibility: "hidden",
+  },
+  errorBanner: {
+    padding: "0.5rem 1rem",
+    borderTop: "1px solid var(--border)",
+    background: "var(--bg-card)",
+  },
   h1: { margin: "0 0 0.75rem", fontSize: "1.6rem", fontWeight: 600 },
   lead: {
     margin: "0 0 0.5rem",
@@ -1614,28 +1515,6 @@ const baseStyles: Record<string, React.CSSProperties> = {
     color: "var(--text-muted)",
     lineHeight: 1.5,
   },
-  editorWrap: {
-    maxWidth: "780px",
-    margin: "0 auto",
-  },
-  fileHeader: {
-    display: "flex",
-    alignItems: "center",
-    gap: "1rem",
-    marginBottom: "1rem",
-    paddingBottom: "0.5rem",
-    borderBottom: "1px solid var(--border)",
-  },
-  filePath: {
-    flex: 1,
-    fontSize: "0.7rem",
-    color: "var(--text-muted)",
-    wordBreak: "break-all",
-    fontFamily: "ui-monospace, 'Cascadia Code', Consolas, monospace",
-  },
-  saveStatus: { fontSize: "0.75rem" },
-  unsaved: { color: "var(--warning)" },
-  saved: { color: "var(--text-muted)" },
   primaryBtn: {
     marginTop: "1rem",
     padding: "0.7rem 1.4rem",
@@ -1647,11 +1526,12 @@ const baseStyles: Record<string, React.CSSProperties> = {
     borderRadius: "6px",
   },
   errorText: {
-    marginTop: "1rem",
+    margin: 0,
     color: "var(--danger)",
     fontSize: "0.85rem",
   },
   muted: { color: "var(--text-muted)", fontSize: "0.9rem" },
 };
 
+// Cluster 6 v1.5: multi-tab layout — single, dual, tri-bottom, tri-top, quad.
 export default App;

@@ -7,9 +7,15 @@ export type FileNode =
   | { type: "file"; name: string; path: string }
   | { type: "folder"; name: string; path: string; children: FileNode[] };
 
+/**
+ * Click options forwarded to the consumer. Used by App.tsx to route
+ * Ctrl+Click into slot 2 in the dual layout.
+ */
+export type SelectFileOpts = { ctrlClick?: boolean };
+
 interface FileTreeProps {
   vaultPath: string;
-  onSelectFile: (path: string) => void;
+  onSelectFile: (path: string, opts?: SelectFileOpts) => void;
   selectedPath: string | null;
   /**
    * Bumping this (e.g., `setRefreshKey(k => k + 1)`) forces a tree re-fetch.
@@ -76,7 +82,7 @@ export function FileTree({
 interface TreeNodeProps {
   node: FileNode;
   depth: number;
-  onSelectFile: (path: string) => void;
+  onSelectFile: (path: string, opts?: SelectFileOpts) => void;
   selectedPath: string | null;
 }
 
@@ -116,7 +122,27 @@ function TreeNode({ node, depth, onSelectFile, selectedPath }: TreeNodeProps) {
     const isSelected = selectedPath === node.path;
     return (
       <div
-        onClick={() => onSelectFile(node.path)}
+        onClick={(e) =>
+          // Cluster 6 v1.5: forward ctrl-click so the multi-tab layout
+          // can route to slot 2 in the dual layout. Meta is treated the
+          // same so macOS works.
+          onSelectFile(node.path, { ctrlClick: e.ctrlKey || e.metaKey })
+        }
+        // Drag-and-drop: tri/quad layouts use this as the primary way
+        // to drop a file into a non-active slot. The data type is
+        // namespaced so we don't collide with anything else the
+        // browser might support.
+        //
+        // We deliberately DO NOT set `text/plain` — TipTap's editor
+        // accepts text drops and would insert the filename as a
+        // string if our capture-phase intercept ever misses. With
+        // only `text/cortex-path` set, ProseMirror has nothing to
+        // consume and silently no-ops.
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData("text/cortex-path", node.path);
+          e.dataTransfer.effectAllowed = "copy";
+        }}
         style={{
           ...styles.row,
           ...indent,

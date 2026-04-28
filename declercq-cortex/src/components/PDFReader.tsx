@@ -1884,7 +1884,11 @@ function basename(path: string): string {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  wrap: { maxWidth: "1100px", margin: "0 auto" },
+  // `position: relative` anchors the search bubble (which uses
+  // position: absolute) to the PDF reader's bounding box, so it
+  // pins to the top-right of *its own tab* in multi-tab layouts
+  // instead of escaping to the window-level top-right.
+  wrap: { maxWidth: "1100px", margin: "0 auto", position: "relative" },
   header: {
     paddingBottom: "0.75rem",
     marginBottom: "1rem",
@@ -2166,10 +2170,14 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
   },
   // ---- in-PDF search bubble (Cluster 6 v1.3) ----
+  // `position: absolute` (not fixed) anchors to the PDF reader's
+  // wrap (position: relative) so in multi-tab the bubble lives in
+  // the top-right of its own tab, not the top-right of the
+  // window. `top: 12px` puts it just under the sticky toolbar.
   searchBubble: {
-    position: "fixed",
-    top: "100px",
-    right: "20px",
+    position: "absolute",
+    top: "12px",
+    right: "12px",
     width: "340px",
     maxHeight: "70vh",
     background: "var(--bg-card)",

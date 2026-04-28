@@ -9,13 +9,17 @@ interface Row {
 }
 
 const ALWAYS: Row[] = [
-  { keys: "Ctrl+S", action: "Save current note" },
-  { keys: "Ctrl+D", action: "Open today's daily log" },
+  { keys: "Ctrl+S", action: "Save current note (active tab only)" },
+  { keys: "Ctrl+R", action: "Reload current note from disk (active tab only)" },
+  { keys: "Ctrl+D", action: "Open today's daily log (in active tab)" },
   { keys: "Ctrl+K", action: "Search notes / command palette" },
   { keys: "Ctrl+/", action: "Show this help" },
   { keys: "Ctrl+L", action: "Toggle the colour legend" },
   { keys: "Ctrl+Shift+B", action: "Insert ::experiment block in editor" },
   { keys: "Ctrl+Shift+T", action: "Insert a table at the cursor" },
+  { keys: "Click", action: "(Tree) Open file in slot 1 (single/dual layout)" },
+  { keys: "Ctrl+Click", action: "(Tree) Open file in slot 2 (dual layout)" },
+  { keys: "Drag", action: "(Tree) Drop file into a specific slot (tri/quad)" },
   { keys: "Esc", action: "Close any modal" },
 ];
 

@@ -1051,3 +1051,164 @@ documented as accepted.
   - new `AnnotationListPanel`, `LinkNotePopup` components inside
     the same file (kept co-located with the React state they
     drive)
+
+---
+
+## Phase 3 — Cluster 6 v1.5 — Multi-tab layout
+
+User-driven feature: the main pane can now host 1, 2, 3, or 4
+panes in five layouts (single, dual, tri-bottom, tri-top, quad).
+Each pane is fully independent — its own open file, structured
+view, dirty state, editor instance — and the existing
+close/switch/open functionality continues to work per-pane.
+
+### What landed
+
+- **`TabPane.tsx`** — extracts every per-file concern from App.tsx
+  (selectedPath, activeView, frontmatter, fileBody, editedBody,
+  dirty, loadingFile, editorInstanceRef) into a `forwardRef`
+  component that exposes a `TabPaneHandle` via
+  `useImperativeHandle`. Methods: `saveIfDirty`, `reload`,
+  `openPath`, `setActiveView`, `insertExperimentBlock`,
+  `insertTable`, plus getters and `getDirtySnapshot` for the
+  close handler. App holds an array of refs (`paneRefs`) and
+  drives panes via these methods.
+- **`LayoutPicker.tsx`** — the top-right toggle. Five options,
+  each with a small SVG-ish CSS-grid preview icon. Active option
+  is highlighted with the accent border. Selection is persisted
+  to `localStorage` so the user's layout survives a restart.
+- **`LayoutGrid.tsx`** — CSS Grid container. Layout-specific
+  templates: dual is `1fr / colFrac:gap:1-colFrac`, tri-bottom is
+  three rows ("a v b" / "h h h" / "c c c"), tri-top mirrors it,
+  quad is the standard 2×2 with both dividers. Resize handles
+  (`VDivider`, `HDivider`) are draggable strips that listen for
+  `mousedown`, attach window-level `mousemove`/`mouseup`, and
+  update `colFrac`/`rowFrac` clamped to [0.15, 0.85]. Sizes
+  persist alongside the layout choice.
+- **`SlotPicker.tsx`** — modal that pops when a search-palette
+  result is clicked while in a multi-slot layout. Shows N tiles
+  (one per visible slot) with the layout preview, slot number,
+  and the file currently in that slot (or "empty"). Press 1–4
+  to pick by keyboard; Esc cancels.
+- **`PaneWrapper`** in `App.tsx` — wraps each `TabPane` with
+  `onDragOver`/`onDrop` handlers. The data type is
+  `text/cortex-path` (set in `FileTree`'s draggable file rows).
+  When a drop lands, the wrapper calls
+  `selectFileInSlot(path, slotIndex)` regardless of the layout
+  — this is the primary routing path for tri/quad.
+- **`FileTree`** got `draggable={true}` on file rows + an
+  `onSelectFile(path, opts?)` signature change to forward
+  `e.ctrlKey || e.metaKey`. Click → slot 0 (or slot 1 if
+  Ctrl-modified, dual only). Drag → drop target's slot.
+
+### Routing rules (file-tree click → slot)
+
+- **Single layout:** always slot 0.
+- **Dual:** plain click → slot 0, Ctrl+Click → slot 1.
+  Always L/R, regardless of which slot is currently active.
+  This matches the user's spec word-for-word.
+- **Tri/quad:** plain click → currently active slot. Drag-and-drop
+  is the recommended way to target a non-active slot. Search
+  palette routes via the SlotPicker modal.
+
+### Architectural choices
+
+- **All `MAX_SLOTS` panes are always mounted.** When the layout
+  shrinks (e.g., quad → dual), slots beyond the visible count
+  go into a hidden div (zero-size, `visibility: hidden`,
+  `pointer-events: none`). State, editor instance, dirty flag,
+  and refs all survive the layout change. The close handler
+  iterates every mounted pane (not just the visible ones) so
+  dirty work in a temporarily-hidden slot is still saved
+  before the window closes.
+- **Per-pane file load is a `useEffect` bound to that pane's
+  `selectedPath` and `reloadTick`.** Each pane has its own
+  effect chain — they don't share state, don't race each other,
+  and `reload()` (Ctrl+R in this pane) bumps the tick to force
+  a re-read. The save-if-dirty step inside `reload` runs first
+  so explicit reload doesn't drop unsaved typing.
+- **`useImperativeHandle` deps include all state read by methods.**
+  This re-creates the handle on every meaningful state change.
+  The parent reads `paneRefs.current[idx]` only at event time
+  (Ctrl+S press, modal submit, etc.), so the freshest handle is
+  always observed. The cost is minor — the pane's render is
+  already happening; building a small object on top is free.
+- **Active slot tracked via `mousedown` and `focusin` on each
+  pane.** `TabPane`'s outer div fires `onActivate` which calls
+  `setActiveSlotIdx`. This means clicking the pane *or*
+  putting focus into its editor activates it. The active pane
+  shows a 2px accent outline and the top bar reflects "Active:
+  slot N" when N > 1.
+- **`selectFileInSlot(path, slotIndex)`** is the single
+  orchestrator — it runs the persistent-destination regen,
+  Methods reagent regen, and daily-log populator (the same
+  cross-cutting logic from the old `selectFile`) once per
+  open-call before delegating to the slot's `openPath`.
+  Wikilink-follow, daily-log open, palette result, and
+  ReviewsMenu destination picks all funnel through it.
+- **Save-on-close fans out across every pane.** The window
+  close handler synchronously calls `event.preventDefault()`,
+  collects `getDirtySnapshot()` from every mounted pane that
+  reports dirty, kicks off serialised saves in an IIFE, then
+  calls `win.destroy()` (which doesn't re-fire
+  `onCloseRequested`). Same shape as the old single-pane
+  handler, just iterated.
+- **Ctrl+R is intercepted globally and routed to the active
+  slot.** Browsers default Ctrl+R to "reload page" — a
+  Tauri webview also honours that, which would blow away the
+  whole app's state. Intercepting at the window level and
+  scoping the action to one pane is the correct UX.
+
+### Files touched (v1.5)
+
+- `src/components/TabPane.tsx` — new component (≈600 lines).
+  Owns all per-file state and effects; exposes
+  `TabPaneHandle` via `forwardRef` + `useImperativeHandle`.
+- `src/components/LayoutPicker.tsx` — new component.
+- `src/components/LayoutGrid.tsx` — new component (CSS Grid
+  + draggable VDivider/HDivider strips).
+- `src/components/SlotPicker.tsx` — new component (search-result
+  slot picker modal).
+- `src/components/FileTree.tsx` — `onSelectFile` signature
+  forwards Ctrl-state; file rows are now draggable.
+- `src/App.tsx` — major refactor:
+  - Removed all per-file state and useEffects (now in TabPane)
+  - New: `layoutMode`, `colFrac`, `rowFrac`, `slotPaths[]`,
+    `slotViews[]`, `slotDirty[]`, `activeSlotIdx`, `paneRefs`
+  - New: `selectFileInSlot(path, slotIndex)` orchestrator
+  - New: `handleTreeClick(path, ctrlClick)` router
+  - New: Ctrl+R interceptor (active slot only)
+  - Save-on-close + save-on-blur iterate all panes
+  - Sidebar buttons (Ideas/Methods/Protocols, ReviewsMenu)
+    target the active slot via `paneRefs[activeSlotIdx]`
+  - LayoutPicker + active-slot label render in a new top bar
+- `verify-cluster-6.ps1` — Pass 9 walkthrough added; commit
+  message + tag bumped to `cluster-6-v1.5-complete`.
+
+### Known rough edges
+
+- **Plain click in tri/quad opens in the active slot.** This is
+  the most reasonable default but may confuse users who expect
+  drag-or-nothing behaviour. If it bites, switch to a no-op
+  with a hint banner ("drag to a slot"). Drag-and-drop and the
+  search-palette slot picker are the documented routing paths
+  for tri/quad.
+- **Hidden-stash mounting keeps memory in use for closed
+  layouts.** With four panes each able to hold a PDFReader
+  (which is the heaviest view), a user who opens four PDFs
+  and shrinks to single still has four PDFReaders mounted.
+  Acceptable at MAX_SLOTS=4. If we ever raise the cap, this
+  becomes a savings target.
+- **No "save all" shortcut.** Ctrl+S saves only the active
+  slot. Multi-pane save is implicit on layout change, blur,
+  or window close. Add `Ctrl+Shift+S` for explicit save-all
+  if it becomes friction.
+- **Single global `colFrac` for quad layout.** Both the top
+  and bottom rows share the same column split. CSS Grid with
+  named areas can't do per-row column splits without
+  separate templates. If users want independent splits per
+  row, the implementation is a second `colFracBottom` plus a
+  layout-specific renderer for quad. Deferred until asked.
+- **The active-slot indicator is subtle.** A 2px accent
+  outline plus the top-bar label. If users miss which slot is
+  active, the indicator can be made bolder later.
