@@ -1,0 +1,449 @@
+/* Cortex global styles — loaded by main.tsx */
+
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* -----------------------------------------------------------------------
+ * Theme tokens
+ * -----------------------------------------------------------------------
+ *
+ * Default: dark. The `useTheme` hook in src/components/ThemeToggle.tsx
+ * sets `documentElement.classList` to `"dark"` or `"light"` based on
+ * the user's selection or the system preference.
+ *
+ * Naming convention:
+ *   --bg          base canvas
+ *   --bg-elev     raised surfaces (sidebar, modal)
+ *   --bg-deep     recessed surfaces (code blocks, paths)
+ *   --bg-card     card backgrounds (welcome, palette)
+ *   --text        primary text
+ *   --text-2      secondary text
+ *   --text-muted  tertiary / placeholder
+ *   --border      subtle borders
+ *   --border-2    stronger borders (buttons)
+ *   --accent      links, wikilinks, palette selection
+ *   --accent-bg   accent on translucent
+ *   --accent-bg-2 accent on hover
+ *   --primary     CTA blue (Choose vault folder)
+ *   --danger      error text
+ *   --warning     dirty indicator
+ *   --scrim       modal backdrop
+ *   --shadow      drop shadow tint
+ */
+:root,
+:root.dark {
+  --bg: #1a1a1a;
+  --bg-elev: #1f1f1f;
+  --bg-deep: #161616;
+  --bg-card: #202020;
+  --text: #e5e5e5;
+  --text-2: #cbd5e1;
+  --text-muted: rgba(229, 229, 229, 0.55);
+  --border: rgba(255, 255, 255, 0.07);
+  --border-2: rgba(255, 255, 255, 0.12);
+  --accent: #6ca0dc;
+  --accent-bg: rgba(108, 160, 220, 0.08);
+  --accent-bg-2: rgba(108, 160, 220, 0.18);
+  --primary: #3b82f6;
+  --danger: #f87171;
+  --warning: #f59e0b;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --shadow: 0 6px 30px rgba(0, 0, 0, 0.35);
+  --code-bg: rgba(255, 255, 255, 0.06);
+  --pre-bg: #12161c;
+  --placeholder: rgba(229, 229, 229, 0.35);
+}
+
+:root.light {
+  --bg: #ffffff;
+  --bg-elev: #fafafa;
+  --bg-deep: #f1f3f5;
+  --bg-card: #ffffff;
+  --text: #1a1a1a;
+  --text-2: #4b5563;
+  --text-muted: rgba(26, 26, 26, 0.55);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-2: rgba(0, 0, 0, 0.16);
+  --accent: #2563eb;
+  --accent-bg: rgba(37, 99, 235, 0.08);
+  --accent-bg-2: rgba(37, 99, 235, 0.18);
+  --primary: #3b82f6;
+  --danger: #dc2626;
+  --warning: #d97706;
+  --scrim: rgba(0, 0, 0, 0.4);
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+  --code-bg: rgba(0, 0, 0, 0.04);
+  --pre-bg: #f6f8fa;
+  --placeholder: rgba(26, 26, 26, 0.35);
+}
+
+/* App-level defaults — uses the variables above. */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+/* Editor fine-tuning — Tailwind typography's dark variant is solid but it
+   tries to make prose look like an article. For a research notebook we want
+   tighter spacing and a slightly smaller baseline. */
+.prose {
+  line-height: 1.55;
+  color: var(--text);
+}
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  color: var(--text);
+  font-weight: 600;
+}
+/* Inline emphasis colour follows the theme. Without these, dropping
+   `prose-invert` from the editor would let Tailwind typography defaults
+   reassert (which can leave bold white in light mode and vice-versa). */
+.prose strong,
+.prose b,
+.prose em,
+.prose i {
+  color: var(--text);
+}
+.prose :first-child {
+  margin-top: 0;
+}
+.prose :last-child {
+  margin-bottom: 0;
+}
+.prose code {
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.9em;
+  color: var(--text);
+}
+.prose pre {
+  background: var(--pre-bg);
+  border: 1px solid var(--border);
+}
+.prose pre code {
+  background: transparent;
+  padding: 0;
+}
+.prose blockquote {
+  border-left-color: var(--border-2);
+  color: var(--text-2);
+}
+.prose a {
+  color: var(--accent);
+}
+
+/* Make the ProseMirror editor node a clean flexible block — no border,
+   no outline; let the container provide framing. */
+.ProseMirror {
+  outline: none;
+  min-height: 60vh;
+}
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--placeholder);
+  pointer-events: none;
+  height: 0;
+}
+
+/* Wikilink decoration — attached by the WikilinkDecoration TipTap
+   extension to every [[Note Title]] / [[Title|alias]] range. The text
+   itself stays as plain markdown; we only style the range. */
+.cortex-wikilink {
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: 3px;
+  padding: 0 2px;
+  text-decoration: none;
+}
+body.cortex-mod-pressed .cortex-wikilink {
+  cursor: pointer;
+  text-decoration: underline;
+  background: var(--accent-bg-2);
+}
+
+/* -------------------------------------------------------------------
+ * Mark System (Cluster 2) — seven colour marks
+ *
+ * On disk: <mark class="mark-yellow">text</mark> etc.
+ * In editor: parsed by the ColorMark TipTap extension and styled below.
+ *
+ * Light theme: translucent saturated colours over white, ink stays dark.
+ * Dark theme: lower saturation, slightly cooler bgs, light ink remains
+ * readable.
+ *
+ * Strikethrough is a separate StarterKit mark; when nested inside or
+ * around a colour mark it applies on top of the colour. Cluster 3 will
+ * treat that combination as "resolved" for queue filtering.
+ * -------------------------------------------------------------------
+ */
+mark.mark-yellow,
+mark.mark-green,
+mark.mark-pink,
+mark.mark-blue,
+mark.mark-orange,
+mark.mark-red,
+mark.mark-purple {
+  border-radius: 2px;
+  padding: 0 2px;
+  /* Ensure inheriting any ::selection / theme color */
+  color: inherit;
+}
+
+/* Light defaults (apply when :root is .light or unspecified). */
+:root.light mark.mark-yellow,
+:root:not(.dark) mark.mark-yellow {
+  background: rgba(255, 220, 80, 0.55);
+}
+:root.light mark.mark-green,
+:root:not(.dark) mark.mark-green {
+  background: rgba(120, 220, 130, 0.45);
+}
+:root.light mark.mark-pink,
+:root:not(.dark) mark.mark-pink {
+  background: rgba(255, 130, 200, 0.4);
+}
+:root.light mark.mark-blue,
+:root:not(.dark) mark.mark-blue {
+  background: rgba(120, 180, 255, 0.45);
+}
+:root.light mark.mark-orange,
+:root:not(.dark) mark.mark-orange {
+  background: rgba(255, 165, 80, 0.5);
+}
+:root.light mark.mark-red,
+:root:not(.dark) mark.mark-red {
+  background: rgba(255, 100, 100, 0.45);
+}
+:root.light mark.mark-purple,
+:root:not(.dark) mark.mark-purple {
+  background: rgba(180, 130, 230, 0.45);
+}
+
+/* Dark theme — lower-saturation backgrounds, paler so light text stays legible. */
+:root.dark mark.mark-yellow,
+:root:not(.light) mark.mark-yellow {
+  background: rgba(220, 180, 60, 0.32);
+  color: #fff5d6;
+}
+:root.dark mark.mark-green,
+:root:not(.light) mark.mark-green {
+  background: rgba(90, 180, 110, 0.32);
+  color: #d6f5dd;
+}
+:root.dark mark.mark-pink,
+:root:not(.light) mark.mark-pink {
+  background: rgba(220, 100, 170, 0.3);
+  color: #ffd6ee;
+}
+:root.dark mark.mark-blue,
+:root:not(.light) mark.mark-blue {
+  background: rgba(90, 150, 230, 0.32);
+  color: #d6e6ff;
+}
+:root.dark mark.mark-orange,
+:root:not(.light) mark.mark-orange {
+  background: rgba(230, 140, 60, 0.32);
+  color: #ffe1c2;
+}
+:root.dark mark.mark-red,
+:root:not(.light) mark.mark-red {
+  background: rgba(220, 90, 90, 0.32);
+  color: #ffd6d6;
+}
+:root.dark mark.mark-purple,
+:root:not(.light) mark.mark-purple {
+  background: rgba(150, 110, 220, 0.32);
+  color: #e6d6ff;
+}
+
+/* -------------------------------------------------------------------
+ * Experiment block decoration (Cluster 4)
+ *
+ * On disk the block lives as plain text:
+ *
+ *   ::experiment NAME / iter-N
+ *   …content paragraphs…
+ *   ::end
+ *
+ * The ExperimentBlockDecoration TipTap extension walks the doc and
+ * tags each participating paragraph with one of three classes. CSS
+ * here turns that trio into a single rounded card:
+ *
+ *   - header  → rounded top, accent tint, raw text hidden via
+ *               color:transparent and a ::before overlay that pulls
+ *               the parsed "NAME · iter N" from data-title.
+ *   - body    → side-bordered, tinted bg, zero margin so consecutive
+ *               body paragraphs join.
+ *   - end     → thin rounded-bottom strip; raw text collapsed.
+ *
+ * The .prose specificity prefix is required because Tailwind
+ * Typography sets paragraph margins via `.prose p`, which would
+ * otherwise punch gaps in our box.
+ * -------------------------------------------------------------------
+ */
+.prose .cortex-experiment-block-header,
+.prose .cortex-experiment-block-body,
+.prose .cortex-experiment-block-end {
+  /* Tailwind Typography puts ~1.25em between block children; zero it
+     so the three pieces sit flush as one card. Top/bottom margins on
+     the header/end below add breathing room around the whole block. */
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+.prose .cortex-experiment-block-header {
+  position: relative;
+  background: var(--accent-bg);
+  border: 1px solid var(--border-2);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  padding: 8px 12px 8px 28px;
+  margin-top: 14px !important;
+  /* Hide the literal `::experiment …` text — caret stays valid (the
+     paragraph and its text node still exist), the ::before overlay
+     paints the user-facing title on top. */
+  color: transparent;
+  user-select: none;
+  line-height: 1.5;
+  min-height: 1.5em;
+}
+.prose .cortex-experiment-block-header::before {
+  content: attr(data-title);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 12px 0 28px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+/* Beaker-ish bullet glyph in the title bar — purely decorative,
+   uses ::after on the header so it sits independent of the content. */
+.prose .cortex-experiment-block-header::after {
+  content: "▸";
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--accent);
+  font-size: 11px;
+  pointer-events: none;
+}
+/* If there are zero body paragraphs, round the header's bottom too
+   so it doesn't end mid-air against the end strip. */
+.prose .cortex-experiment-block-header.is-empty {
+  border-radius: 6px 6px 0 0;
+}
+
+.prose .cortex-experiment-block-body {
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border-2);
+  border-right: 1px solid var(--border-2);
+  padding: 4px 14px;
+}
+/* Compact intermediate body paragraphs — they don't need the full
+   prose paragraph spacing. */
+.prose .cortex-experiment-block-body + .cortex-experiment-block-body {
+  padding-top: 0;
+}
+
+.prose .cortex-experiment-block-end {
+  background: var(--accent-bg);
+  border: 1px solid var(--border-2);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  /* Collapse the literal `::end` text. font-size:0 inherits to the
+     paragraph's text children too, leaving just the styled strip. */
+  color: transparent;
+  font-size: 0;
+  line-height: 0;
+  height: 6px;
+  padding: 0;
+  margin-bottom: 14px !important;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* -----------------------------------------------------------------------
+ * Tables (Cluster 8 v2.1 — protocol Reagents/Parts + method aggregations)
+ * -----------------------------------------------------------------------
+ * Without these rules TipTap renders tables with no visible borders
+ * inside the .prose container (Tailwind Typography removes them in the
+ * dark prose theme). We give them theme-aware borders, a subtle header
+ * tint, and zebra-strip rows for readability.
+ */
+.prose table.cortex-table,
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  table-layout: fixed;
+  font-size: 0.92em;
+}
+
+.prose table.cortex-table th,
+.prose table.cortex-table td,
+.prose table th,
+.prose table td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  vertical-align: top;
+  color: var(--text);
+  background: var(--bg);
+  position: relative;
+}
+
+.prose table.cortex-table th,
+.prose table th {
+  background: var(--bg-deep);
+  color: var(--text-2);
+  font-weight: 600;
+  text-align: left;
+}
+
+.prose table.cortex-table tr:nth-child(even) td,
+.prose table tr:nth-child(even) td {
+  background: var(--bg-elev, var(--bg));
+}
+
+/* TipTap's resizable column drag-handle. Default is invisible; give it
+ * a faint hairline so users discover it. */
+.prose .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+.prose td:hover .column-resize-handle,
+.prose th:hover .column-resize-handle {
+  opacity: 0.35;
+  pointer-events: auto;
+  cursor: col-resize;
+}
+
+/* Selection highlight inside a cell when the cursor is there. */
+.prose .selectedCell {
+  background: var(--bg-elev, var(--bg-deep)) !important;
+}
