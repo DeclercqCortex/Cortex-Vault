@@ -202,6 +202,28 @@ function App() {
   // immediately rather than waiting for its 30s poll.
   const [reminderOverlayOpen, setReminderOverlayOpen] = useState(false);
   const [reminderRefreshTick, setReminderRefreshTick] = useState(0);
+
+  // Cluster 12 — auto-sync Google Calendar on startup + every 5 min.
+  // Re-fetches event rows from Google → upserts into the events
+  // table → deletion sweep. The calendar UI re-fetches via its own
+  // dateRange dep, so a sync that adds/removes rows surfaces in the
+  // grid on the user's next interaction. No-op if Google Calendar
+  // isn't connected.
+  useEffect(() => {
+    if (!vaultPath) return;
+    const tick = () => {
+      invoke("sync_google_calendar", { vaultPath }).catch((e) => {
+        // Don't surface every transient sync failure to the user;
+        // the IntegrationsSettings panel shows the last-sync state
+        // and the connection status.
+        console.warn("[google] background sync failed:", e);
+      });
+    };
+    // Run once on mount, then every 5 minutes.
+    tick();
+    const interval = window.setInterval(tick, 5 * 60_000);
+    return () => window.clearInterval(interval);
+  }, [vaultPath]);
   // Slot picker (used when a search-palette result needs routing in
   // multi-slot layouts).
   const [pendingSlotChoice, setPendingSlotChoice] = useState<{
@@ -1391,6 +1413,7 @@ function App() {
         }}
       />
       <IntegrationsSettings
+        vaultPath={vaultPath}
         isOpen={integrationsOpen}
         onClose={() => setIntegrationsOpen(false)}
       />

@@ -22,6 +22,16 @@ export interface CalendarEvent {
   notify_mode?: string | null;
   /** v1.4: lead time in minutes when notify_mode === 'ahead'. */
   notify_lead_minutes?: number | null;
+  /** Cluster 12: provenance. 'local' (default) or 'google'. */
+  source?: string | null;
+  /** Cluster 12: provider-side identifier (Google event id). */
+  external_id?: string | null;
+  /** Cluster 12: provider-side etag for change detection. */
+  external_etag?: string | null;
+  /** Cluster 12: link to the event in the provider's UI (Google's
+   *  htmlLink). Used by the read-only modal's "Open in Google
+   *  Calendar" button. */
+  external_html_link?: string | null;
 }
 
 export interface EventCategory {
@@ -592,9 +602,16 @@ function WeekView({
                           }
                         : {}),
                     }}
-                    title={`${ev.event.title}${tentative ? " (tentative)" : ""}`}
+                    title={`${ev.event.title}${tentative ? " (tentative)" : ""}${ev.event.source === "google" ? " — Google Calendar" : ""}`}
                   >
-                    <div style={styles.eventTitle}>{ev.event.title}</div>
+                    <div style={styles.eventTitle}>
+                      {ev.event.source === "google" && (
+                        <span style={styles.googleBadge} aria-hidden="true">
+                          G
+                        </span>
+                      )}
+                      {ev.event.title}
+                    </div>
                     <div style={styles.eventTime}>
                       {formatHHMM(ev.event.start_at)}–
                       {formatHHMM(ev.event.end_at)}
@@ -721,8 +738,13 @@ function MonthView({
                         e.stopPropagation();
                         onEventClick(ev);
                       }}
-                      title={ev.title}
+                      title={`${ev.title}${ev.source === "google" ? " — Google Calendar" : ""}`}
                     >
+                      {ev.source === "google" && (
+                        <span style={styles.googleBadge} aria-hidden="true">
+                          G
+                        </span>
+                      )}
                       {ev.all_day ? "" : `${formatHHMM(ev.start_at)} `}
                       {ev.title}
                     </div>
@@ -1050,6 +1072,18 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
     overflow: "hidden",
     textOverflow: "ellipsis",
+  },
+  googleBadge: {
+    display: "inline-block",
+    fontSize: "0.6rem",
+    fontWeight: 700,
+    background: "var(--accent)",
+    color: "white",
+    padding: "0 4px",
+    borderRadius: "3px",
+    marginRight: "4px",
+    verticalAlign: "middle",
+    lineHeight: "1.3",
   },
   eventTime: {
     fontSize: "0.68rem",

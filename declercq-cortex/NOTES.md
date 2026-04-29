@@ -2321,3 +2321,195 @@ save.
   start_at by even one minute creates a "fresh" notification
   surface. Acceptable; matches users' mental model that "moving
   the meeting" is a real change worth re-warning on.
+
+---
+
+## Phase 3 — Cluster 12 v1.0 — Google Calendar (read-only sync)
+
+User explicitly picked Cluster 12 + read-only scope after Cluster 11
+v1.4 shipped. The cluster doc walked the design before code (cluster
+12's "Decisions already made" + "Architecture sketch" sections).
+
+### Architectural choices worth flagging
+
+- **One-way sync, Google → Cortex.** Two-way sync (write-back) is
+  v2.0. v1.0 doesn't need conflict resolution, doesn't need PATCH
+  endpoints, doesn't have to reason about "what if both sides
+  edited the same event." Read-only enforcement happens at the UI
+  layer (modal banner, disabled inputs, hidden Save/Delete) rather
+  than at the database layer — `source = 'google'` events are
+  perfectly editable in SQL, but the UI doesn't expose the path.
+- **Hand-rolled loopback OAuth flow.** No `tauri-plugin-oauth`
+  dependency. The flow is ~150 lines of `std::net::TcpListener` +
+  a single-request HTTP/1.1 parser + a `tauri::async_runtime::
+  spawn_blocking` wrapper around the accept call. Same minimum-
+  dependencies ethos as Cluster 6's PDF.js choice and Cluster 11's
+  hand-rolled grid.
+- **User-provided OAuth credentials.** Cortex doesn't ship a baked-
+  in `client_id` / `client_secret`. The user creates their own
+  Google Cloud OAuth client (5 minutes of clicking through Google
+  Cloud Console; setup steps surfaced in the IntegrationsSettings
+  panel). This is the standard model for open-source desktop apps:
+  no shared secret to leak, no "our" project to maintain at scale,
+  no privacy concern about Cortex routing requests.
+- **`source` column on events.** Adds provenance without schema
+  duplication. Local events get `source = 'local'` (or NULL,
+  treated identically by readers); Google events get `source =
+  'google'`, `external_id = google_event_id`, `external_etag` for
+  change detection, `external_html_link` for the Open-in-Google
+  button. Composite index on `(source, external_id)` for upsert
+  speed.
+- **Full-fetch with deletion sweep**, not `syncToken` delta sync.
+  v1 fetches all events in a 30-day-back / 90-day-forward window
+  every poll and DELETEs Google-sourced events not in the response.
+  Google's incremental `syncToken` API is meaningfully cheaper at
+  scale, but the bookkeeping (storing the token, handling 410-Gone
+  fallbacks, full-resync recovery) is complexity v1 doesn't need.
+- **`singleEvents=true` for recurrence.** Google expands recurring
+  masters server-side and we receive concrete instances. Saves us
+  writing a Google-RRULE-to-Cortex-RRULE translator. Each instance
+  carries a unique `id`, so the upsert/sweep handles them one at a
+  time naturally.
+- **5-minute auto-sync cadence + on-startup + manual button.**
+  Google's API limit (1M queries/day on default project quota) is
+  generous enough that this is well below polite usage. Plus the
+  `Sync now` button in IntegrationsSettings for users who want
+  immediate refresh.
+- **Tokens stored in `config.json`.** Same trade-off Cluster 10
+  made for the GitHub PAT — per-user `%APPDATA%` ACL is the v1
+  protection. OS keychain integration is a future security pass
+  that covers GitHub + Google + Outlook together.
+- **Default `external` category seeded on first sync.** All Google
+  events start there; user can recategorise via SQL if they want
+  (the modal's category dropdown is disabled for Google events).
+  `INSERT OR IGNORE` keeps it idempotent.
+- **App.tsx fires the auto-sync** as a `useEffect` keyed on
+  `vaultPath`. The IntegrationsSettings panel's manual sync calls
+  the same Tauri command. Both paths share the same
+  `sync_google_calendar` implementation; no divergence.
+
+### Files touched (Cluster 12 v1.0)
+
+- `cluster_12_google_calendar_sync.md` (repo root) — new cluster
+  doc.
+- `src-tauri/src/lib.rs`
+  - Schema: 4 idempotent `ALTER TABLE events ADD COLUMN` calls
+    (source / external_id / external_etag / external_html_link)
+    + 2 `CREATE INDEX IF NOT EXISTS` calls.
+  - `Event` struct gains four `Option`-typed fields with
+    `#[serde(default)]`.
+  - `VaultConfig.google_calendar: Option<GoogleCalendarConfig>` +
+    the new struct.
+  - Constants: `GOOGLE_OAUTH_AUTH_URL`, `GOOGLE_OAUTH_TOKEN_URL`,
+    `GOOGLE_OAUTH_USERINFO_URL`, `GOOGLE_CAL_API_BASE`,
+    `GOOGLE_CAL_SCOPE`.
+  - `PendingOAuth` + `PENDING_OAUTH` static for in-flight handshake
+    state.
+  - Helpers: `random_state_token`, `url_encode`, `url_decode`,
+    `hex_val`, `parse_oauth_callback`, `parse_google_datetime`,
+    `parse_rfc3339_to_unix`, `ensure_external_category`,
+    `refresh_google_access_token`, `ensure_fresh_access_token`.
+  - Tauri commands: `start_google_oauth`,
+    `await_google_oauth_code`, `complete_google_oauth`,
+    `get_google_calendar_config`, `disconnect_google_calendar`,
+    `set_google_calendar_id`, `list_google_calendars`,
+    `sync_google_calendar`. Eight new commands; all registered in
+    `invoke_handler!`.
+  - `create_event` / `update_event` continue to set
+    `source = 'local'` on locally-created events; the four new
+    fields default to None there.
+  - `expand_recurrence` carries the new fields through to expanded
+    instances (Google recurring events received with
+    `singleEvents=true` arrive pre-expanded so they don't go
+    through `expand_recurrence`, but local recurring events
+    naturally have `source = 'local'` and the carry-through is
+    correct).
+  - Both `collect_events_in_window` SELECTs include the new
+    columns; row-mapping closures construct the new fields.
+- `src/components/Calendar.tsx`
+  - `CalendarEvent` interface: four new optional fields.
+  - WeekView event-block render and MonthView event-chip render
+    surface a `G` badge when `source === 'google'`. Tooltip
+    appends "— Google Calendar". `googleBadge` style in the
+    styles map.
+- `src/components/EventEditModal.tsx`
+  - `isReadOnly = existingEvent?.source === 'google'` derived
+    flag.
+  - Read-only banner with an "Open in Google Calendar" link
+    (uses `@tauri-apps/plugin-opener`'s `openUrl` lazily).
+  - All inputs gain `disabled={isReadOnly}`.
+  - Footer: Save and Delete hidden when read-only; the Cancel
+    button reads "Close" instead.
+  - `readOnlyStyles` const for the banner.
+- `src/components/IntegrationsSettings.tsx`
+  - Now takes `vaultPath` prop (App.tsx forwards it).
+  - Replaced the v1.0 "Google Calendar / Overleaf (later)"
+    placeholder with a real `GoogleCalendarSection` component.
+  - The section: setup-steps collapsible, client_id /
+    client_secret inputs (with show/hide), Connect / Disconnect /
+    Sync-now / calendar-picker UI, last-sync-timestamp +
+    most-recent SyncSummary display.
+  - The connect flow chains `start_google_oauth → openUrl(auth_url)
+    → await_google_oauth_code → complete_google_oauth →
+    list_google_calendars` end-to-end with single-click UX.
+- `src/App.tsx`
+  - Imports updated.
+  - `IntegrationsSettings` invoke now passes `vaultPath`.
+  - New `useEffect` keyed on `vaultPath` runs an immediate
+    `sync_google_calendar` then schedules one every 5 minutes.
+    No-op if Google Calendar isn't connected; transient errors
+    are `console.warn`'d (the settings panel surfaces persistent
+    state).
+
+### Known rough edges (v1.0)
+
+- **Disconnecting doesn't auto-clean Google events.** After
+  Disconnect the previously synced events stay in the calendar
+  table — the next `sync_google_calendar` is a no-op (no config),
+  so the deletion sweep doesn't run. Users who want a clean slate
+  can run `DELETE FROM events WHERE source = 'google'` directly.
+  v1.1 candidate: add a one-shot cleanup on disconnect.
+- **Cancelled OAuth flow leaves a dangling listener** in the
+  `PENDING_OAUTH` slot until Cortex restarts. The OS reclaims the
+  port at process exit, so it's not a resource leak — but a
+  stuck flow blocks the next Connect attempt with "No OAuth
+  flow in flight." Acceptable; fix is to add an idle timeout +
+  abort to `await_google_oauth_code`.
+- **Refresh-token revocation surfaces as a 401.** When Google
+  revokes the refresh token (user changed password, security
+  event, 6 months of inactivity), `refresh_google_access_token`
+  returns "Token refresh returned non-200: ..." and the next
+  sync fails. v1 doesn't auto-detect this and prompt
+  reconnection; user has to notice the failed-sync banner and
+  Disconnect+Reconnect manually. v1.1 candidate.
+- **All-day Google events use UTC midnight bounds, not local
+  midnight.** Google's `start.date` value is a YYYY-MM-DD
+  without timezone; we map it to UTC midnight. In zones far
+  from UTC this could shift the displayed date by ±1 day at
+  the boundaries. Same drift the rest of Cortex's
+  hand-rolled date helpers accept (see Cluster 11's tz notes).
+- **Read-only enforcement is UI-only.** A motivated user could
+  edit Google events directly via SQL or by manipulating the
+  calendar's invoke calls. v1 trusts the UI gate; this becomes
+  important when v2 enables write-back and we need a clearer
+  contract.
+- **No conflict surfacing for events that exist in both Cortex
+  and Google with similar metadata.** They'll appear as two
+  separate events in v1.0. v2 candidate: detect (by title +
+  start_at within ±5 min) and offer to merge.
+- **Sync window: [now − 30d, now + 90d].** Events outside this
+  window are not synced and are not subject to the deletion
+  sweep. If Google has a meeting 100 days out, it won't appear
+  until the day passes into the sync window. Bumping the
+  forward bound is a one-line constant change (search for
+  `90 * day` in `sync_google_calendar`).
+- **`@tauri-apps/plugin-opener`'s `openUrl` is not available on
+  every Tauri 2 build configuration**. The IntegrationsSettings
+  Connect flow gracefully falls back to surfacing the auth URL
+  in an error banner so the user can copy/paste, but in
+  practice the plugin is in `package.json` and works.
+- **A future Cluster 13 (Outlook)** will reuse most of the
+  OAuth scaffold but with Microsoft-specific endpoints and the
+  Graph API for events. Estimated 1-2 days extension since the
+  loopback listener + state validation + token refresh patterns
+  are already established here.

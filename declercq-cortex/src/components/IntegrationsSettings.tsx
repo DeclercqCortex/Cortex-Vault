@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 interface IntegrationsSettingsProps {
+  vaultPath: string;
   isOpen: boolean;
   onClose: () => void;
 }
@@ -31,6 +33,7 @@ interface GitHubSummary {
  * personal tool; OS-keychain integration is reserved for v2.
  */
 export function IntegrationsSettings({
+  vaultPath,
   isOpen,
   onClose,
 }: IntegrationsSettingsProps) {
@@ -305,22 +308,471 @@ export function IntegrationsSettings({
           </div>
         </div>
 
+        <GoogleCalendarSection vaultPath={vaultPath} />
+
         <div style={{ ...styles.section, opacity: 0.5 }}>
           <div style={styles.sectionHeader}>
-            <span style={styles.sectionTitle}>
-              Google Calendar / Overleaf (later)
-            </span>
-            <span style={styles.sectionStatus}>Not in this cluster</span>
+            <span style={styles.sectionTitle}>Outlook Calendar (later)</span>
+            <span style={styles.sectionStatus}>Cluster 13 — planned</span>
           </div>
           <p style={styles.sectionHint}>
-            Planned for separate clusters once their triggers fire — see{" "}
-            <code>cluster_10_integrations.md</code>.
+            Will reuse this cluster's OAuth scaffold — see{" "}
+            <code>cluster_13_outlook_calendar_sync.md</code>.
           </p>
         </div>
       </div>
     </div>
   );
 }
+
+// -----------------------------------------------------------------------------
+// Cluster 12 — Google Calendar section
+// -----------------------------------------------------------------------------
+
+interface GoogleCalendarConfigPayload {
+  client_id: string;
+  client_secret: string;
+  access_token: string;
+  refresh_token: string;
+  expires_at_unix: number;
+  calendar_id: string;
+  user_email: string;
+  last_sync_unix: number;
+}
+
+interface GoogleAuthHandshake {
+  auth_url: string;
+  port: number;
+  state: string;
+}
+
+interface GoogleCalendarItem {
+  id: string;
+  summary: string;
+  primary: boolean;
+  background_color: string | null;
+  selected: boolean;
+}
+
+interface SyncSummary {
+  total: number;
+  added: number;
+  updated: number;
+  deleted: number;
+  last_sync_iso: string;
+  error: string;
+}
+
+function GoogleCalendarSection({ vaultPath }: { vaultPath: string }) {
+  const [cfg, setCfg] = useState<GoogleCalendarConfigPayload | null>(null);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [showSecret, setShowSecret] = useState(false);
+  const [calendars, setCalendars] = useState<GoogleCalendarItem[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [lastSummary, setLastSummary] = useState<SyncSummary | null>(null);
+
+  // Load any saved config + the calendar list (if connected) on mount
+  // and after any state-changing action.
+  async function refresh() {
+    try {
+      const c = await invoke<GoogleCalendarConfigPayload | null>(
+        "get_google_calendar_config",
+      );
+      setCfg(c);
+      if (c) {
+        setClientId(c.client_id);
+        setClientSecret(c.client_secret);
+        try {
+          const list = await invoke<GoogleCalendarItem[]>(
+            "list_google_calendars",
+          );
+          setCalendars(list);
+        } catch (e) {
+          console.warn("[google] couldn't list calendars:", e);
+          setCalendars([]);
+        }
+      } else {
+        setCalendars([]);
+      }
+    } catch (e) {
+      setError(`Couldn't load Google Calendar config: ${e}`);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function connect() {
+    setError(null);
+    if (!clientId.trim() || !clientSecret.trim()) {
+      setError("Enter both Client ID and Client Secret first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      // 1. Backend binds a loopback listener and returns the auth URL.
+      const handshake = await invoke<GoogleAuthHandshake>(
+        "start_google_oauth",
+        {
+          clientId: clientId.trim(),
+          clientSecret: clientSecret.trim(),
+        },
+      );
+
+      // 2. Open the auth URL in the user's default browser.
+      try {
+        await openUrl(handshake.auth_url);
+      } catch (e) {
+        // Fallback: surface the URL for the user to copy/paste.
+        console.warn("[google] openUrl failed:", e);
+        setError(
+          `Couldn't open the browser automatically. Open this URL manually: ${handshake.auth_url}`,
+        );
+        // Don't return — still wait for the callback in case the
+        // user opens the URL themselves.
+      }
+
+      // 3. Wait for Google's redirect to hit our loopback listener.
+      const code = await invoke<string>("await_google_oauth_code", {
+        port: handshake.port,
+        expectedState: handshake.state,
+      });
+
+      // 4. Exchange the code for tokens.
+      const newCfg = await invoke<GoogleCalendarConfigPayload>(
+        "complete_google_oauth",
+        {
+          clientId: clientId.trim(),
+          clientSecret: clientSecret.trim(),
+          code,
+          port: handshake.port,
+        },
+      );
+      setCfg(newCfg);
+      // 5. Pull the calendar list now that we have a valid token.
+      const list = await invoke<GoogleCalendarItem[]>("list_google_calendars");
+      setCalendars(list);
+    } catch (e) {
+      setError(`Connect failed: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pickCalendar(calendarId: string) {
+    setError(null);
+    try {
+      await invoke("set_google_calendar_id", { calendarId });
+      await refresh();
+    } catch (e) {
+      setError(`Couldn't select calendar: ${e}`);
+    }
+  }
+
+  async function syncNow() {
+    setError(null);
+    setSyncing(true);
+    try {
+      const summary = await invoke<SyncSummary>("sync_google_calendar", {
+        vaultPath,
+      });
+      setLastSummary(summary);
+      await refresh();
+    } catch (e) {
+      setError(`Sync failed: ${e}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function disconnect() {
+    if (
+      !window.confirm(
+        "Disconnect Google Calendar? Synced events will be removed from Cortex's calendar on the next sync. Your tokens will be cleared from config.",
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      await invoke("disconnect_google_calendar");
+      setCfg(null);
+      setCalendars([]);
+      setClientId("");
+      setClientSecret("");
+      setLastSummary(null);
+    } catch (e) {
+      setError(`Disconnect failed: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const connected = cfg !== null && cfg.refresh_token.length > 0;
+  const lastSyncLabel = formatLastSync(cfg?.last_sync_unix);
+
+  return (
+    <div style={styles.section}>
+      <div style={styles.sectionHeader}>
+        <span style={styles.sectionTitle}>Google Calendar</span>
+        <span style={styles.sectionStatus}>
+          {connected ? `Connected · ${cfg?.user_email ?? ""}` : "Not connected"}
+        </span>
+      </div>
+
+      <p style={styles.sectionHint}>
+        Read-only sync (Google → Cortex). Events from your selected calendar
+        appear in Cortex's week / month views and the notification bell. Edits
+        in Cortex don&apos;t push back to Google. You provide your own Google
+        Cloud OAuth client — Cortex doesn&apos;t ship credentials.
+      </p>
+
+      <button
+        type="button"
+        onClick={() => setHelpOpen((o) => !o)}
+        style={{ ...styles.btnGhost, marginBottom: "0.6rem" }}
+      >
+        {helpOpen ? "Hide setup steps" : "Show setup steps"}
+      </button>
+      {helpOpen && (
+        <>
+          <ol style={googleStyles.steps}>
+            <li>
+              Open{" "}
+              <code>https://console.cloud.google.com/apis/credentials</code> and
+              create a project (or pick one).
+            </li>
+            <li>
+              Enable the Google Calendar API for the project (APIs &amp;
+              Services → Library → search &quot;Google Calendar&quot; → Enable).
+            </li>
+            <li>
+              Configure the OAuth consent screen (APIs &amp; Services → OAuth
+              consent screen). Set <strong>User Type</strong> to{" "}
+              <strong>External</strong> (for personal Gmail).
+            </li>
+            <li>
+              <strong>Add the Calendar scope</strong> — on the OAuth consent
+              screen wizard, click through to the <em>Scopes</em> step → Add or
+              Remove Scopes → search &quot;calendar&quot; → check{" "}
+              <code>https://www.googleapis.com/auth/calendar.readonly</code> →
+              Update → Save. Without this, Google issues tokens that lack the
+              scope and Sync fails with{" "}
+              <code>ACCESS_TOKEN_SCOPE_INSUFFICIENT</code>.
+            </li>
+            <li>
+              <strong>Add yourself as a test user</strong> — same OAuth consent
+              screen page → scroll to <em>Test users</em> → Add Users → enter
+              the Gmail address whose calendar you want to sync. This step is
+              required while the app is in Testing publishing status (which it
+              should stay in for personal use). Skipping it produces a 403
+              access_denied error during Connect.
+            </li>
+            <li>
+              Credentials → Create Credentials → OAuth client ID → Application
+              type: <strong>Desktop app</strong>. Name it &quot;Cortex&quot;.
+            </li>
+            <li>
+              Copy the Client ID + Client Secret into the fields below and click
+              Connect. A browser window will open for Google&apos;s auth flow.
+            </li>
+          </ol>
+          <p style={googleStyles.troubleshoot}>
+            <strong>Got &quot;Error 403: access_denied&quot;?</strong> The
+            Google account you signed in with isn&apos;t on the test-users list
+            yet. Go back to step 5 in the OAuth consent screen, add the email,
+            and try Connect again.
+            <br />
+            <br />
+            <strong>
+              Got &quot;ACCESS_TOKEN_SCOPE_INSUFFICIENT&quot; on Sync?
+            </strong>{" "}
+            Connect succeeded but the token lacks the calendar scope. Step
+            4&apos;s &quot;Add the Calendar scope&quot; was skipped. Add it,
+            then Disconnect + Reconnect in Cortex. If the consent screen
+            doesn&apos;t re-prompt for the new scope, revoke Cortex&apos;s
+            access at <code>https://myaccount.google.com/permissions</code> and
+            try again.
+            <br />
+            <br />
+            <strong>Got &quot;SERVICE_DISABLED&quot; on Sync?</strong> The
+            Google Calendar API isn&apos;t enabled in the same Cloud project as
+            your OAuth client (step 2 was skipped or applied to a different
+            project). The error message includes a one-click activation URL —
+            open it, click Enable, wait 1-2 minutes, then Sync now again. No
+            need to Disconnect/Reconnect; the token is fine.
+          </p>
+        </>
+      )}
+
+      {!connected && (
+        <>
+          <label style={styles.label}>
+            <span style={styles.labelText}>Client ID</span>
+            <input
+              type="text"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              placeholder="123456789-abc….apps.googleusercontent.com"
+              style={styles.input}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <label style={{ ...styles.label, marginTop: "0.6rem" }}>
+            <span style={styles.labelText}>Client Secret</span>
+            <div style={styles.tokenRow}>
+              <input
+                type={showSecret ? "text" : "password"}
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                placeholder="GOCSPX-…"
+                style={styles.input}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="button"
+                onClick={() => setShowSecret((s) => !s)}
+                style={styles.btnGhost}
+              >
+                {showSecret ? "Hide" : "Show"}
+              </button>
+            </div>
+          </label>
+          <div style={{ ...styles.actionsRow, marginTop: "0.85rem" }}>
+            <button onClick={connect} disabled={busy} style={styles.btnPrimary}>
+              {busy ? "Connecting…" : "Connect Google Calendar"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {connected && (
+        <>
+          <div style={googleStyles.calRow}>
+            <label style={{ flex: 1 }}>
+              <span style={styles.labelText}>Calendar</span>
+              <select
+                value={cfg?.calendar_id ?? "primary"}
+                onChange={(e) => pickCalendar(e.target.value)}
+                style={styles.input}
+              >
+                {calendars.length === 0 && (
+                  <option value={cfg?.calendar_id ?? "primary"}>
+                    {cfg?.calendar_id ?? "primary"}
+                  </option>
+                )}
+                {calendars.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.primary ? `${c.summary} (primary)` : c.summary}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div style={googleStyles.syncRow}>
+            <span style={styles.muted}>Last sync: {lastSyncLabel}</span>
+            <div style={{ flex: 1 }} />
+            <button
+              onClick={syncNow}
+              disabled={syncing}
+              style={styles.btnPrimary}
+            >
+              {syncing ? "Syncing…" : "Sync now"}
+            </button>
+          </div>
+
+          {lastSummary && (
+            <p style={googleStyles.summary}>
+              {lastSummary.error ? (
+                <span style={{ color: "var(--danger)" }}>
+                  {lastSummary.error}
+                </span>
+              ) : (
+                <>
+                  Synced {lastSummary.total} event
+                  {lastSummary.total === 1 ? "" : "s"}: {lastSummary.added}{" "}
+                  added, {lastSummary.updated} updated, {lastSummary.deleted}{" "}
+                  removed.
+                </>
+              )}
+            </p>
+          )}
+
+          <div style={{ ...styles.actionsRow, marginTop: "0.6rem" }}>
+            <button
+              onClick={disconnect}
+              disabled={busy}
+              style={styles.btnDanger}
+            >
+              Disconnect
+            </button>
+          </div>
+        </>
+      )}
+
+      {error && <p style={styles.error}>{error}</p>}
+    </div>
+  );
+}
+
+function formatLastSync(unix: number | undefined): string {
+  if (!unix || unix === 0) return "never";
+  const d = new Date(unix * 1000);
+  const now = Date.now();
+  const diff = (now - d.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`;
+  return d.toLocaleString();
+}
+
+const googleStyles: Record<string, React.CSSProperties> = {
+  steps: {
+    margin: "0 0 0.85rem",
+    paddingLeft: "1.25rem",
+    fontSize: "0.78rem",
+    color: "var(--text-2)",
+    lineHeight: 1.55,
+  },
+  calRow: {
+    display: "flex",
+    alignItems: "flex-end",
+    gap: "0.5rem",
+    marginBottom: "0.7rem",
+  },
+  syncRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    marginBottom: "0.4rem",
+  },
+  summary: {
+    margin: "0.4rem 0",
+    fontSize: "0.78rem",
+    color: "var(--text-2)",
+  },
+  troubleshoot: {
+    margin: "0 0 0.85rem",
+    padding: "0.5rem 0.7rem",
+    fontSize: "0.78rem",
+    color: "var(--text-2)",
+    background: "var(--bg-elev)",
+    border: "1px solid var(--border-2)",
+    borderLeft: "3px solid var(--warning, var(--accent))",
+    borderRadius: "5px",
+    lineHeight: 1.5,
+  },
+};
 
 const styles: Record<string, React.CSSProperties> = {
   scrim: {

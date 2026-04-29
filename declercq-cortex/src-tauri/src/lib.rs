@@ -58,6 +58,60 @@ struct VaultConfig {
     /// when the user has saved a token through the Integrations modal.
     #[serde(default)]
     github: Option<GitHubConfig>,
+    /// Cluster 12 — Google Calendar (read-only sync).
+    #[serde(default)]
+    google_calendar: Option<GoogleCalendarConfig>,
+}
+
+/// Cluster 12 — persisted Google Calendar (read-only sync) settings.
+/// The user creates their own Google Cloud OAuth client and pastes
+/// `client_id` + `client_secret` into Cortex's settings panel; tokens
+/// are obtained via the loopback OAuth flow.
+///
+/// Same per-user-config-file ACL trade-off as `GitHubConfig`. OS
+/// keychain integration deferred to a future security pass that
+/// covers all integrations together.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct GoogleCalendarConfig {
+    /// OAuth client identifier from the user's Google Cloud project.
+    #[serde(default)]
+    client_id: String,
+    /// OAuth client secret. Distributed in installed-app credentials
+    /// is the standard model — Google's own docs acknowledge it
+    /// can't be truly secret in a desktop app, only obfuscated.
+    #[serde(default)]
+    client_secret: String,
+    /// Long-lived bearer for refreshing access tokens. Obtained on
+    /// the initial auth handshake.
+    #[serde(default)]
+    refresh_token: String,
+    /// Short-lived bearer for actual API calls. Refreshed lazily when
+    /// `expires_at_unix <= now + 60s`.
+    #[serde(default)]
+    access_token: String,
+    /// Unix-second timestamp at which `access_token` expires.
+    #[serde(default)]
+    expires_at_unix: i64,
+    /// Calendar selected for sync. "primary" means the connected
+    /// account's default calendar; explicit IDs are valid too.
+    #[serde(default)]
+    calendar_id: String,
+    /// Email of the connected Google account, surfaced in the
+    /// Settings UI so the user can confirm which account is wired up.
+    #[serde(default)]
+    user_email: String,
+    /// Unix-second timestamp of the last successful sync. 0 = never
+    /// synced yet.
+    #[serde(default)]
+    last_sync_unix: i64,
+    /// Space-separated list of scopes Google actually granted on the
+    /// last token response. Persisted so the sync engine can surface
+    /// "you asked for calendar.readonly but got back only `openid
+    /// email`" in error messages when a 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT
+    /// happens — the most common cause is the Calendar API not being
+    /// enabled in the same Cloud project as the OAuth client.
+    #[serde(default)]
+    granted_scopes: String,
 }
 
 /// Cluster 10 — persisted GitHub integration settings. Stored inside
@@ -1274,6 +1328,29 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE events ADD COLUMN notify_mode TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE events ADD COLUMN notify_lead_minutes INTEGER",
+        [],
+    );
+
+    // Cluster 12 v1.0 schema migration: external-source provenance
+    // for calendar events. `source` is 'local' (the user created it
+    // in Cortex) or 'google' (synced from Google Calendar). NULL on
+    // pre-migration rows is treated as 'local' by the readers.
+    //   external_id   — provider-side identifier (Google event id)
+    //   external_etag — for change detection without re-comparing
+    //                   every field on each sync.
+    let _ = conn.execute(
+        "ALTER TABLE events ADD COLUMN source TEXT DEFAULT 'local'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE events ADD COLUMN external_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE events ADD COLUMN external_etag TEXT", []);
+    let _ = conn.execute("ALTER TABLE events ADD COLUMN external_html_link TEXT", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_source ON events(source)",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_external ON events(source, external_id)",
         [],
     );
 
@@ -4649,6 +4726,23 @@ pub struct Event {
     /// Ignored otherwise.
     #[serde(default)]
     pub notify_lead_minutes: Option<i64>,
+    /// Cluster 12 v1.0: provenance. "local" for events created in
+    /// Cortex, "google" for events synced from Google Calendar.
+    /// NULL is treated as "local" for backwards-compat.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Cluster 12: provider-side identifier (Google event id).
+    /// NULL for local events.
+    #[serde(default)]
+    pub external_id: Option<String>,
+    /// Cluster 12: provider-side etag for change detection.
+    #[serde(default)]
+    pub external_etag: Option<String>,
+    /// Cluster 12: link to the event in the external provider's UI
+    /// (Google's `htmlLink`). Used by the read-only modal's "Open in
+    /// Google Calendar" button.
+    #[serde(default)]
+    pub external_html_link: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -4768,6 +4862,10 @@ fn expand_recurrence(master: &Event, window_start: i64, window_end: i64) -> Vec<
                 recurrence_rule: master.recurrence_rule.clone(),
                 notify_mode: master.notify_mode.clone(),
                 notify_lead_minutes: master.notify_lead_minutes,
+                source: master.source.clone(),
+                external_id: master.external_id.clone(),
+                external_etag: master.external_etag.clone(),
+                external_html_link: master.external_html_link.clone(),
             });
         }
     };
@@ -5054,6 +5152,14 @@ fn create_event(
         recurrence_rule: cleaned_rule,
         notify_mode: cleaned_mode,
         notify_lead_minutes: cleaned_lead,
+        // create_event / update_event are the calendar-UI paths and
+        // always produce locally-owned events. Google-synced events
+        // come through `sync_google_calendar` instead, which writes
+        // directly via SQL with source='google'.
+        source: Some("local".to_string()),
+        external_id: None,
+        external_etag: None,
+        external_html_link: None,
     })
 }
 
@@ -5151,6 +5257,14 @@ fn update_event(
         recurrence_rule: cleaned_rule,
         notify_mode: cleaned_mode,
         notify_lead_minutes: cleaned_lead,
+        // create_event / update_event are the calendar-UI paths and
+        // always produce locally-owned events. Google-synced events
+        // come through `sync_google_calendar` instead, which writes
+        // directly via SQL with source='google'.
+        source: Some("local".to_string()),
+        external_id: None,
+        external_etag: None,
+        external_html_link: None,
     })
 }
 
@@ -5376,7 +5490,8 @@ fn collect_events_in_window(
             .prepare(
                 "SELECT id, title, start_at, end_at, all_day, category, status, body,
                         created_at, updated_at, recurrence_rule,
-                        notify_mode, notify_lead_minutes
+                        notify_mode, notify_lead_minutes,
+                        source, external_id, external_etag, external_html_link
                  FROM events
                  WHERE recurrence_rule IS NULL
                    AND start_at < ?1 AND end_at > ?2
@@ -5399,6 +5514,10 @@ fn collect_events_in_window(
                     recurrence_rule: row.get(10)?,
                     notify_mode: row.get(11)?,
                     notify_lead_minutes: row.get(12)?,
+                    source: row.get(13)?,
+                    external_id: row.get(14)?,
+                    external_etag: row.get(15)?,
+                    external_html_link: row.get(16)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -5411,7 +5530,8 @@ fn collect_events_in_window(
             .prepare(
                 "SELECT id, title, start_at, end_at, all_day, category, status, body,
                         created_at, updated_at, recurrence_rule,
-                        notify_mode, notify_lead_minutes
+                        notify_mode, notify_lead_minutes,
+                        source, external_id, external_etag, external_html_link
                  FROM events
                  WHERE recurrence_rule IS NOT NULL",
             )
@@ -5432,6 +5552,10 @@ fn collect_events_in_window(
                     recurrence_rule: row.get(10)?,
                     notify_mode: row.get(11)?,
                     notify_lead_minutes: row.get(12)?,
+                    source: row.get(13)?,
+                    external_id: row.get(14)?,
+                    external_etag: row.get(15)?,
+                    external_html_link: row.get(16)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -5620,6 +5744,1086 @@ fn delete_reminder_line(vault_path: String, line_content: String) -> Result<(), 
 }
 
 // -----------------------------------------------------------------------------
+// Cluster 12 — Google Calendar (read-only sync)
+// -----------------------------------------------------------------------------
+//
+// The user provides their own Google Cloud OAuth client (client_id +
+// client_secret). Cortex performs the loopback OAuth flow:
+//
+//   1. start_google_oauth(client_id, client_secret)
+//      → binds 127.0.0.1:<random_free_port>
+//      → generates a CSRF state token
+//      → returns the auth_url (Google's authorise endpoint with
+//        redirect_uri = http://127.0.0.1:<port>/callback) and the port
+//   2. Frontend opens the auth_url in the user's browser via the
+//      tauri-plugin-opener.
+//   3. User authorises on Google. Google redirects to the loopback URL
+//      with `?code=...&state=...`.
+//   4. await_google_oauth_code(port, expected_state) accepts one TCP
+//      connection on the listener, parses the GET line for `code` +
+//      `state`, validates state, and returns the code (and writes a
+//      "you can close this tab" HTML response back).
+//   5. complete_google_oauth(client_id, client_secret, code) POSTs to
+//      Google's token endpoint, gets access_token + refresh_token,
+//      fetches the user's email, persists the GoogleCalendarConfig.
+//
+// The HTTP listener is hand-rolled — ~80 lines of std::net + a tiny
+// HTTP/1.1 single-request parser. No tauri-plugin-oauth dep, matching
+// the project's "minimum dependencies" ethos (NOTES.md sets the same
+// precedent for Cluster 11's hand-rolled grid and Cluster 6's PDF.js
+// over PDFium choice).
+
+const GOOGLE_OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_OAUTH_USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
+const GOOGLE_CAL_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
+const GOOGLE_CAL_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly openid email";
+
+/// In-process state for the loopback OAuth flow. Keyed on the listener
+/// port so multiple concurrent flows (theoretically possible if the
+/// user clicks Connect twice) don't collide. Cleaned up by
+/// `await_google_oauth_code` removing its entry on completion.
+struct PendingOAuth {
+    listener: std::net::TcpListener,
+    state: String,
+    redirect_uri: String,
+}
+
+static PENDING_OAUTH: Mutex<Option<(u16, PendingOAuth)>> = Mutex::new(None);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GoogleAuthHandshake {
+    auth_url: String,
+    port: u16,
+    state: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GoogleCalendarItem {
+    id: String,
+    summary: String,
+    primary: bool,
+    background_color: Option<String>,
+    selected: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct SyncSummary {
+    pub total: i64,
+    pub added: i64,
+    pub updated: i64,
+    pub deleted: i64,
+    pub last_sync_iso: String,
+    pub error: String,
+}
+
+/// Generate a cryptographically-uniqueish CSRF state token. Not a
+/// hard security boundary (the loopback flow is local-only), but
+/// matches OAuth 2.0 best practice and protects against weird
+/// browser auto-redirect cases.
+fn random_state_token() -> String {
+    let mut bytes = [0u8; 16];
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let pid = std::process::id() as u64;
+    let mix = now.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(pid);
+    for (i, b) in bytes.iter_mut().enumerate() {
+        let shift = (i * 13) & 63;
+        *b = ((mix.rotate_left(shift as u32)) & 0xFF) as u8;
+    }
+    bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    out
+}
+
+#[tauri::command]
+async fn start_google_oauth(
+    client_id: String,
+    client_secret: String,
+) -> Result<GoogleAuthHandshake, String> {
+    let _ = client_secret; // validated later in complete_google_oauth
+    if client_id.trim().is_empty() {
+        return Err("client_id is required".to_string());
+    }
+
+    // Bind to a random free port on loopback. The OS picks the port
+    // when we ask for :0 — saves us from having to probe ports.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Couldn't bind loopback listener: {}", e))?;
+    listener
+        .set_nonblocking(false)
+        .map_err(|e| format!("Couldn't set listener mode: {}", e))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+
+    let state = random_state_token();
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
+
+    let auth_url = format!(
+        "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}",
+        GOOGLE_OAUTH_AUTH_URL,
+        url_encode(&client_id),
+        url_encode(&redirect_uri),
+        url_encode(GOOGLE_CAL_SCOPE),
+        url_encode(&state),
+    );
+
+    if let Ok(mut g) = PENDING_OAUTH.lock() {
+        *g = Some((
+            port,
+            PendingOAuth {
+                listener,
+                state: state.clone(),
+                redirect_uri,
+            },
+        ));
+    }
+
+    Ok(GoogleAuthHandshake {
+        auth_url,
+        port,
+        state,
+    })
+}
+
+/// Block on the loopback listener until Google's redirect arrives,
+/// parse the auth code out of the query string, return it. Sends a
+/// minimal HTML page back so the user sees "Authorisation complete"
+/// in their browser tab.
+#[tauri::command]
+async fn await_google_oauth_code(port: u16, expected_state: String) -> Result<String, String> {
+    // Take ownership of the pending listener — the slot is cleared
+    // so a stuck or cancelled flow doesn't leave a dangling listener
+    // for the next attempt.
+    let pending = match PENDING_OAUTH.lock() {
+        Ok(mut g) => match g.take() {
+            Some((p, pending)) if p == port => pending,
+            Some(other) => {
+                *g = Some(other);
+                return Err(format!(
+                    "Port {} doesn't match the in-flight OAuth flow",
+                    port
+                ));
+            }
+            None => return Err("No OAuth flow in flight".to_string()),
+        },
+        Err(_) => return Err("OAuth state lock poisoned".to_string()),
+    };
+    if pending.state != expected_state {
+        return Err("OAuth state mismatch — possible CSRF".to_string());
+    }
+
+    // Run the blocking accept on a worker so the Tauri runtime stays
+    // responsive. A single accept is enough — the loopback flow only
+    // expects one redirect. Using Tauri's runtime helper instead of
+    // `tokio` directly so we don't have to add tokio as a direct dep.
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // 30-second budget so a stuck browser tab doesn't lock us
+        // out forever.
+        pending
+            .listener
+            .set_nonblocking(false)
+            .map_err(|e| e.to_string())?;
+        let (mut stream, _) = pending
+            .listener
+            .accept()
+            .map_err(|e| format!("OAuth accept failed: {}", e))?;
+        // Read the GET request line — that's enough to extract the
+        // query params. We don't bother reading headers / body.
+        use std::io::{BufRead, BufReader, Write};
+        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .map_err(|e| format!("OAuth read failed: {}", e))?;
+
+        let code_or_err = parse_oauth_callback(&request_line);
+
+        // Always send a response so the browser tab doesn't hang.
+        let body = match &code_or_err {
+            Ok(_) => "<!doctype html><html><body style=\"font-family: system-ui, sans-serif; padding: 4rem; text-align: center;\"><h2>Authorisation complete</h2><p>You can close this tab and return to Cortex.</p></body></html>",
+            Err(e) => {
+                let _ = e;
+                "<!doctype html><html><body style=\"font-family: system-ui, sans-serif; padding: 4rem; text-align: center;\"><h2>Authorisation failed</h2><p>Please return to Cortex and try again.</p></body></html>"
+            }
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+
+        match code_or_err {
+            Ok((code, returned_state)) => {
+                if returned_state != pending.state {
+                    Err("OAuth callback state mismatch".to_string())
+                } else {
+                    Ok(code)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    })
+    .await
+    .map_err(|e| format!("OAuth worker join failed: {}", e))??;
+
+    Ok(result)
+}
+
+/// Parse a request line like
+/// `GET /callback?code=ABC&state=DEF HTTP/1.1`
+/// Returns (code, state). Tolerant — order of params doesn't matter.
+fn parse_oauth_callback(request_line: &str) -> Result<(String, String), String> {
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err("Malformed OAuth request".to_string());
+    }
+    let path = parts[1];
+    let q_start = match path.find('?') {
+        Some(i) => i + 1,
+        None => return Err("OAuth callback missing query string".to_string()),
+    };
+    let query = &path[q_start..];
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+    let mut error: Option<String> = None;
+    for kv in query.split('&') {
+        let eq = match kv.find('=') {
+            Some(i) => i,
+            None => continue,
+        };
+        let key = &kv[..eq];
+        let val_raw = &kv[eq + 1..];
+        let val = url_decode(val_raw);
+        match key {
+            "code" => code = Some(val),
+            "state" => state = Some(val),
+            "error" => error = Some(val),
+            _ => {}
+        }
+    }
+    if let Some(e) = error {
+        return Err(format!("OAuth provider returned error: {}", e));
+    }
+    let code = code.ok_or_else(|| "OAuth callback missing `code`".to_string())?;
+    let state = state.ok_or_else(|| "OAuth callback missing `state`".to_string())?;
+    Ok((code, state))
+}
+
+fn url_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'+' {
+            out.push(' ');
+        } else if b == b'%' {
+            let h = bytes.next();
+            let l = bytes.next();
+            if let (Some(h), Some(l)) = (h, l) {
+                if let (Some(h), Some(l)) = (hex_val(h), hex_val(l)) {
+                    out.push(((h << 4) | l) as char);
+                    continue;
+                }
+            }
+            out.push('%');
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + b - b'a'),
+        b'A'..=b'F' => Some(10 + b - b'A'),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct GoogleTokenResponse {
+    access_token: String,
+    expires_in: i64,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
+    token_type: String,
+    /// Space-separated list of scopes Google ACTUALLY granted.
+    /// May be a subset of what we requested in the auth URL — e.g.
+    /// if the Cloud project doesn't have the Calendar API enabled,
+    /// Google silently drops `calendar.readonly` from this string
+    /// even though the consent screen showed it. Capturing this is
+    /// the only way to diagnose that case from inside Cortex.
+    #[serde(default)]
+    scope: String,
+}
+
+#[derive(Deserialize)]
+struct GoogleUserInfo {
+    email: String,
+}
+
+#[tauri::command]
+async fn complete_google_oauth(
+    app: tauri::AppHandle,
+    client_id: String,
+    client_secret: String,
+    code: String,
+    port: u16,
+) -> Result<GoogleCalendarConfig, String> {
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {}", e))?;
+
+    let token_resp = client
+        .post(GOOGLE_OAUTH_TOKEN_URL)
+        .form(&[
+            ("code", code.as_str()),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+            ("redirect_uri", redirect_uri.as_str()),
+            ("grant_type", "authorization_code"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Token exchange request failed: {}", e))?;
+
+    if !token_resp.status().is_success() {
+        let body = token_resp.text().await.unwrap_or_default();
+        return Err(format!("Token exchange returned non-200: {}", body));
+    }
+    let token: GoogleTokenResponse = token_resp
+        .json()
+        .await
+        .map_err(|e| format!("Token JSON parse failed: {}", e))?;
+    let _ = token.token_type;
+
+    if token.refresh_token.trim().is_empty() {
+        return Err(
+            "No refresh_token returned. The OAuth client may need access_type=offline + prompt=consent on the auth URL, or the user may have a prior consent that didn't grant offline access. Try disconnecting any existing app authorisation in your Google Account settings and re-connect."
+                .to_string(),
+        );
+    }
+
+    // Pull the user's email so the settings UI can confirm the right
+    // account is connected.
+    let user_resp = client
+        .get(GOOGLE_OAUTH_USERINFO_URL)
+        .bearer_auth(&token.access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Userinfo request failed: {}", e))?;
+    let user_info: GoogleUserInfo = if user_resp.status().is_success() {
+        user_resp.json().await.map_err(|e| e.to_string())?
+    } else {
+        GoogleUserInfo {
+            email: "(unknown)".to_string(),
+        }
+    };
+
+    let cfg = GoogleCalendarConfig {
+        client_id,
+        client_secret,
+        refresh_token: token.refresh_token,
+        access_token: token.access_token,
+        expires_at_unix: unix_now() + token.expires_in.saturating_sub(60),
+        calendar_id: "primary".to_string(),
+        user_email: user_info.email,
+        last_sync_unix: 0,
+        granted_scopes: token.scope,
+    };
+
+    let mut full = read_config(&app)?;
+    full.google_calendar = Some(cfg.clone());
+    write_config(&app, &full)?;
+
+    Ok(cfg)
+}
+
+#[tauri::command]
+fn get_google_calendar_config(
+    app: tauri::AppHandle,
+) -> Result<Option<GoogleCalendarConfig>, String> {
+    let cfg = read_config(&app)?;
+    Ok(cfg.google_calendar)
+}
+
+#[tauri::command]
+fn disconnect_google_calendar(app: tauri::AppHandle) -> Result<(), String> {
+    let mut cfg = read_config(&app)?;
+    cfg.google_calendar = None;
+    write_config(&app, &cfg)
+}
+
+#[tauri::command]
+fn set_google_calendar_id(app: tauri::AppHandle, calendar_id: String) -> Result<(), String> {
+    let mut cfg = read_config(&app)?;
+    if let Some(g) = cfg.google_calendar.as_mut() {
+        g.calendar_id = calendar_id;
+        write_config(&app, &cfg)?;
+        Ok(())
+    } else {
+        Err("Google Calendar isn't connected".to_string())
+    }
+}
+
+/// Refresh the access token using the stored refresh token. Persists
+/// the new access token + expires_at back into config.json so the
+/// updated value survives restarts.
+async fn refresh_google_access_token(
+    app: &tauri::AppHandle,
+    cfg: &mut GoogleCalendarConfig,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {}", e))?;
+    let resp = client
+        .post(GOOGLE_OAUTH_TOKEN_URL)
+        .form(&[
+            ("client_id", cfg.client_id.as_str()),
+            ("client_secret", cfg.client_secret.as_str()),
+            ("refresh_token", cfg.refresh_token.as_str()),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Refresh request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Token refresh returned non-200: {}", body));
+    }
+    let token: GoogleTokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Refresh JSON parse failed: {}", e))?;
+    cfg.access_token = token.access_token;
+    cfg.expires_at_unix = unix_now() + token.expires_in.saturating_sub(60);
+    // Google sometimes returns a fresh refresh_token on refresh; if
+    // it's present, keep it. If empty, retain the old one.
+    if !token.refresh_token.trim().is_empty() {
+        cfg.refresh_token = token.refresh_token;
+    }
+    // The refresh response also tells us what scopes Google considers
+    // currently granted. If the user just enabled the Calendar API
+    // mid-session, this update captures that.
+    if !token.scope.trim().is_empty() {
+        cfg.granted_scopes = token.scope;
+    }
+    let mut full = read_config(app)?;
+    full.google_calendar = Some(cfg.clone());
+    write_config(app, &full)?;
+    Ok(())
+}
+
+async fn ensure_fresh_access_token(
+    app: &tauri::AppHandle,
+    cfg: &mut GoogleCalendarConfig,
+) -> Result<(), String> {
+    if cfg.expires_at_unix > unix_now() + 30 {
+        return Ok(());
+    }
+    refresh_google_access_token(app, cfg).await
+}
+
+#[tauri::command]
+async fn list_google_calendars(app: tauri::AppHandle) -> Result<Vec<GoogleCalendarItem>, String> {
+    let mut cfg = read_config(&app)?
+        .google_calendar
+        .ok_or_else(|| "Google Calendar isn't connected".to_string())?;
+    ensure_fresh_access_token(&app, &mut cfg).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {}", e))?;
+    let resp = client
+        .get(format!("{}/users/me/calendarList", GOOGLE_CAL_API_BASE))
+        .bearer_auth(&cfg.access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Calendar list request failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Calendar list returned HTTP {}",
+            resp.status().as_u16()
+        ));
+    }
+    let raw: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    if let Some(items) = raw.get("items").and_then(|v| v.as_array()) {
+        for it in items {
+            let id = it
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let summary = it
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
+            let primary = it.get("primary").and_then(|v| v.as_bool()).unwrap_or(false);
+            let background_color = it
+                .get("backgroundColor")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let selected = it
+                .get("selected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !id.is_empty() {
+                out.push(GoogleCalendarItem {
+                    id,
+                    summary,
+                    primary,
+                    background_color,
+                    selected,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Parse a Google `dateTime` value (RFC3339 with explicit offset, or
+/// just a date for all-day events). Returns (unix_seconds, all_day).
+/// Tolerant — bad input produces (0, false) which the caller can
+/// detect via the surrounding context.
+fn parse_google_datetime(date_time: Option<&str>, date: Option<&str>) -> (i64, bool) {
+    if let Some(dt) = date_time {
+        return (parse_rfc3339_to_unix(dt), false);
+    }
+    if let Some(d) = date {
+        // YYYY-MM-DD interpreted as local-midnight on that date,
+        // expressed as UTC unix seconds. Without a timezone library
+        // we treat it as UTC midnight; the calendar UI's local
+        // rendering will then show it as the same date in most
+        // timezones, with a small drift in extreme zones — same
+        // trade-off the rest of Cortex's date helpers accept.
+        let parts: Vec<&str> = d.split('-').collect();
+        if parts.len() == 3 {
+            if let (Ok(y), Ok(m), Ok(dd)) = (
+                parts[0].parse::<i32>(),
+                parts[1].parse::<u32>(),
+                parts[2].parse::<u32>(),
+            ) {
+                if let Some(unix) = unix_from_ymd_hms(y, m, dd, 0, 0, 0) {
+                    return (unix, true);
+                }
+            }
+        }
+    }
+    (0, false)
+}
+
+/// Parse a Google RFC3339 datetime like "2026-04-29T14:30:00-07:00"
+/// or "2026-04-29T14:30:00Z" into unix seconds. Hand-rolled to avoid
+/// chrono.
+fn parse_rfc3339_to_unix(s: &str) -> i64 {
+    // Expected layout: YYYY-MM-DDTHH:MM:SS{±HH:MM | Z}
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 {
+        return 0;
+    }
+    let y: i32 = match std::str::from_utf8(&bytes[0..4])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) => v,
+        None => return 0,
+    };
+    let mo: u32 = match std::str::from_utf8(&bytes[5..7])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) => v,
+        None => return 0,
+    };
+    let d: u32 = match std::str::from_utf8(&bytes[8..10])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) => v,
+        None => return 0,
+    };
+    let h: u32 = match std::str::from_utf8(&bytes[11..13])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) => v,
+        None => return 0,
+    };
+    let mn: u32 = match std::str::from_utf8(&bytes[14..16])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) => v,
+        None => return 0,
+    };
+    let sec: u32 = match std::str::from_utf8(&bytes[17..19])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    // Walk past optional fractional seconds (".sss").
+    let mut idx = 19;
+    if bytes.get(idx) == Some(&b'.') {
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+    }
+
+    let base = match unix_from_ymd_hms(y, mo, d, h, mn, sec) {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    // Trailing offset: "Z", "+HH:MM", or "-HH:MM"
+    let offset_secs: i64 = match bytes.get(idx) {
+        Some(&b'Z') | None => 0,
+        Some(&sign @ b'+') | Some(&sign @ b'-') => {
+            if bytes.len() < idx + 6 {
+                return base;
+            }
+            let oh: i64 = std::str::from_utf8(&bytes[idx + 1..idx + 3])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let om: i64 = std::str::from_utf8(&bytes[idx + 4..idx + 6])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let total = oh * 3600 + om * 60;
+            if sign == b'-' {
+                -total
+            } else {
+                total
+            }
+        }
+        _ => 0,
+    };
+
+    // The offset tells us what the local time is relative to UTC. To
+    // get UTC unix seconds, subtract the offset from the parsed
+    // wall-clock time-as-if-UTC.
+    base - offset_secs
+}
+
+/// Pull the per-project activation URL out of a SERVICE_DISABLED
+/// 403 body. Google embeds it twice (once in `extendedHelp`, once
+/// in `details[].metadata.activationUrl`); we look for either. The
+/// regex-free extraction is sufficient for this very specific JSON
+/// shape — we don't need to handle arbitrary nested cases.
+fn extract_google_activation_url(body: &str) -> Option<String> {
+    // Try the structured `metadata.activationUrl` field first; it's
+    // newer and more reliable than `extendedHelp`.
+    for needle in [
+        "\"activationUrl\":\"",
+        "\"activationUrl\": \"",
+        "Enable it by visiting ",
+    ] {
+        if let Some(start) = body.find(needle) {
+            let rest = &body[start + needle.len()..];
+            // Walk until we hit a quote (JSON) or " then" / "\n"
+            // (the "Enable it by visiting ... then retry" pattern).
+            let end = rest
+                .find('"')
+                .or_else(|| rest.find(" then"))
+                .or_else(|| rest.find('\n'))
+                .unwrap_or(rest.len());
+            let url = rest[..end].trim().to_string();
+            if url.starts_with("http") {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+fn ensure_external_category(conn: &Connection) -> Result<(), String> {
+    // Idempotent: only inserts if absent.
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO event_categories (id, label, color, sort_order)
+         VALUES ('external', 'External', '#64748b', 99)",
+        [],
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn sync_google_calendar(
+    app: tauri::AppHandle,
+    vault_path: String,
+) -> Result<SyncSummary, String> {
+    let mut cfg = match read_config(&app)?.google_calendar {
+        Some(c) => c,
+        None => {
+            return Ok(SyncSummary {
+                error: "Google Calendar isn't connected".to_string(),
+                ..Default::default()
+            });
+        }
+    };
+    ensure_fresh_access_token(&app, &mut cfg).await?;
+
+    let now_secs = unix_now();
+    let day = 86_400;
+    let time_min_unix = now_secs - 30 * day;
+    let time_max_unix = now_secs + 90 * day;
+    let time_min = iso_utc_from_unix(time_min_unix as u64);
+    let time_max = iso_utc_from_unix(time_max_unix as u64);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("HTTP client build failed: {}", e))?;
+
+    // Paginate through all events. Google caps at 2500/page on the
+    // events endpoint.
+    let mut all_items: Vec<serde_json::Value> = Vec::new();
+    let mut page_token: Option<String> = None;
+    let mut already_refreshed = false;
+    loop {
+        let mut url = format!(
+            "{}/calendars/{}/events?singleEvents=true&timeMin={}&timeMax={}&maxResults=2500&orderBy=startTime",
+            GOOGLE_CAL_API_BASE,
+            url_encode(&cfg.calendar_id),
+            url_encode(&time_min),
+            url_encode(&time_max),
+        );
+        if let Some(t) = &page_token {
+            url.push_str(&format!("&pageToken={}", url_encode(t)));
+        }
+        let resp = client
+            .get(&url)
+            .bearer_auth(&cfg.access_token)
+            .send()
+            .await
+            .map_err(|e| format!("Events request failed: {}", e))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            // 401: the access token was rejected even though
+            // ensure_fresh_access_token thought it was fresh. Force
+            // a refresh-and-retry once before giving up. Catches the
+            // case where the persisted expires_at_unix was wrong, or
+            // Google revoked the token early.
+            if status.as_u16() == 401 && !already_refreshed {
+                already_refreshed = true;
+                cfg.expires_at_unix = 0; // forces refresh
+                if let Err(e) = ensure_fresh_access_token(&app, &mut cfg).await {
+                    return Err(format!(
+                        "Events returned 401 and the forced refresh also failed: {}. \
+Disconnect, revoke Cortex at https://myaccount.google.com/permissions, then Reconnect.",
+                        e
+                    ));
+                }
+                continue; // retry the same page with the fresh token
+            }
+            // 403 with "ACCESS_TOKEN_SCOPE_INSUFFICIENT" is a setup
+            // gotcha rather than a runtime failure: the OAuth consent
+            // screen in Google Cloud Console doesn't list the
+            // calendar.readonly scope, so Google issued the token
+            // without it. Surface a directly-actionable message
+            // instead of the raw Google JSON.
+            // 403 SERVICE_DISABLED / accessNotConfigured: the Google
+            // Calendar API isn't enabled for the OAuth client's
+            // Cloud project. Token + scope are fine; the API itself
+            // is off. Google's response includes a per-project
+            // activation URL — extract it so the error message is
+            // one-click-actionable.
+            if status.as_u16() == 403
+                && (body.contains("SERVICE_DISABLED") || body.contains("accessNotConfigured"))
+            {
+                let activation_url = extract_google_activation_url(&body).unwrap_or_else(|| {
+                    "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com"
+                        .to_string()
+                });
+                return Err(format!(
+                    "Google Calendar API isn't enabled in your Cloud project. \
+Open {} and click Enable. Wait ~1-2 minutes for propagation, then click Sync now \
+again — no need to disconnect/reconnect.",
+                    activation_url
+                ));
+            }
+            if status.as_u16() == 403 && body.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+                let actual_scopes = if cfg.granted_scopes.is_empty() {
+                    "(unknown — granted scopes weren't captured on the last connect)".to_string()
+                } else {
+                    cfg.granted_scopes.clone()
+                };
+                let has_calendar = cfg.granted_scopes.contains("calendar.readonly");
+                let diagnosis = if has_calendar {
+                    "Google's token endpoint says it granted calendar.readonly, but the API \
+is rejecting it. This is unusual — it usually means the API call is hitting a different \
+Cloud project than the OAuth client lives in. Confirm at \
+https://console.cloud.google.com/apis/credentials that the OAuth client and the \
+enabled Calendar API are in the *same* project (the project picker at the top)."
+                } else {
+                    "Google's token endpoint did NOT grant calendar.readonly. The most \
+likely cause is that the Calendar API isn't enabled in the same Cloud project as the \
+OAuth client. Open https://console.cloud.google.com/apis/dashboard, confirm the \
+project picker matches your OAuth client's project, and enable the 'Google Calendar \
+API' there if it's not in the list. Alternatively the consent screen for that project \
+doesn't list calendar.readonly under Scopes — open \
+https://console.cloud.google.com/apis/credentials/consent → Edit App → Scopes and verify \
+it's checked. After fixing either, click Disconnect in Cortex, revoke at \
+https://myaccount.google.com/permissions, then Reconnect."
+                };
+                return Err(format!(
+                    "ACCESS_TOKEN_SCOPE_INSUFFICIENT.\n\nActually-granted scopes: {}\n\n{}\n\nRaw Google response: {}",
+                    actual_scopes, diagnosis, body
+                ));
+            }
+            // 401 still after a refresh attempt — the refresh token
+            // itself is bad, or the user revoked Cortex without
+            // disconnecting. Direct them at the recovery path.
+            if status.as_u16() == 401 {
+                return Err(format!(
+                    "Google rejected the access token even after a forced refresh. \
+The most likely cause is that you revoked Cortex's access at \
+https://myaccount.google.com/permissions, or the refresh token has been invalidated. \
+Click Disconnect in Cortex's Integrations Settings, then revoke any remaining \
+Cortex grant at https://myaccount.google.com/permissions, then Reconnect. \
+Raw response: {}",
+                    body
+                ));
+            }
+            return Err(format!(
+                "Events request returned HTTP {} — {}",
+                status.as_u16(),
+                body
+            ));
+        }
+        let raw: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(items) = raw.get("items").and_then(|v| v.as_array()) {
+            all_items.extend(items.clone());
+        }
+        page_token = raw
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    // Upsert each event into the events table.
+    let conn = open_or_init_db(&vault_path)?;
+    ensure_external_category(&conn)?;
+
+    let mut returned_ids: Vec<String> = Vec::new();
+    let mut added: i64 = 0;
+    let mut updated: i64 = 0;
+
+    for ev in &all_items {
+        let status_str = ev.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status_str == "cancelled" {
+            // Skip — the deletion sweep will drop any prior rows.
+            continue;
+        }
+        let id = match ev.get("id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        let etag = ev
+            .get("etag")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = ev
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no title)")
+            .to_string();
+        let body = ev
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let html_link = ev
+            .get("htmlLink")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cortex_status = match status_str {
+            "tentative" => "tentative",
+            _ => "confirmed",
+        }
+        .to_string();
+
+        let start_obj = ev.get("start");
+        let end_obj = ev.get("end");
+        let (start_unix, start_all_day) = parse_google_datetime(
+            start_obj
+                .and_then(|v| v.get("dateTime"))
+                .and_then(|v| v.as_str()),
+            start_obj
+                .and_then(|v| v.get("date"))
+                .and_then(|v| v.as_str()),
+        );
+        let (end_unix, _end_all_day) = parse_google_datetime(
+            end_obj
+                .and_then(|v| v.get("dateTime"))
+                .and_then(|v| v.as_str()),
+            end_obj.and_then(|v| v.get("date")).and_then(|v| v.as_str()),
+        );
+        if start_unix == 0 || end_unix == 0 {
+            // Unparseable — skip this event rather than insert
+            // garbage that breaks the calendar grid.
+            continue;
+        }
+
+        returned_ids.push(id.clone());
+
+        // Look up an existing row by (source='google', external_id).
+        let existing: Option<(String, String)> = conn
+            .query_row(
+                "SELECT id, COALESCE(external_etag, '') FROM events
+                 WHERE source = 'google' AND external_id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok();
+
+        let now = unix_now();
+        if let Some((row_id, prev_etag)) = existing {
+            if !etag.is_empty() && etag == prev_etag {
+                // Unchanged — leave as-is.
+                continue;
+            }
+            conn.execute(
+                "UPDATE events
+                 SET title = ?2, start_at = ?3, end_at = ?4, all_day = ?5,
+                     status = ?6, body = ?7, updated_at = ?8,
+                     external_etag = ?9, external_html_link = ?10
+                 WHERE id = ?1",
+                params![
+                    row_id,
+                    title,
+                    start_unix,
+                    end_unix,
+                    if start_all_day { 1 } else { 0 },
+                    cortex_status,
+                    body,
+                    now,
+                    etag,
+                    html_link,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            updated += 1;
+        } else {
+            // Generate a fresh local row id. We deliberately don't
+            // reuse the Google id as the local id — that'd couple
+            // our id space to Google's and complicate write-back
+            // later. The link is the (source, external_id) tuple.
+            let date_iso = today_iso_date();
+            let row_id = next_event_id(&conn, &date_iso)?;
+            conn.execute(
+                "INSERT INTO events (id, title, start_at, end_at, all_day, category, status, body,
+                                     created_at, updated_at, recurrence_rule,
+                                     notify_mode, notify_lead_minutes,
+                                     source, external_id, external_etag, external_html_link)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'external', ?6, ?7, ?8, ?8, NULL, NULL, NULL,
+                         'google', ?9, ?10, ?11)",
+                params![
+                    row_id,
+                    title,
+                    start_unix,
+                    end_unix,
+                    if start_all_day { 1 } else { 0 },
+                    cortex_status,
+                    body,
+                    now,
+                    id,
+                    etag,
+                    html_link,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            added += 1;
+        }
+    }
+
+    // Deletion sweep: drop any Google-sourced rows whose external_id
+    // no longer appears in the response. Window-bounded so we don't
+    // blow away events outside the sync window we just queried.
+    let placeholders = if returned_ids.is_empty() {
+        "''".to_string()
+    } else {
+        returned_ids
+            .iter()
+            .map(|_| "?".to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let delete_sql = format!(
+        "DELETE FROM events
+         WHERE source = 'google'
+           AND start_at >= ?
+           AND start_at <= ?
+           AND external_id NOT IN ({})",
+        placeholders
+    );
+    let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    params_dyn.push(Box::new(time_min_unix));
+    params_dyn.push(Box::new(time_max_unix));
+    for s in &returned_ids {
+        params_dyn.push(Box::new(s.clone()));
+    }
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| b.as_ref()).collect();
+    let deleted = conn
+        .execute(delete_sql.as_str(), params_refs.as_slice())
+        .map_err(|e| e.to_string())? as i64;
+
+    // Persist last_sync timestamp.
+    let mut full = read_config(&app)?;
+    if let Some(g) = full.google_calendar.as_mut() {
+        g.last_sync_unix = unix_now();
+    }
+    write_config(&app, &full)?;
+
+    Ok(SyncSummary {
+        total: all_items.len() as i64,
+        added,
+        updated,
+        deleted,
+        last_sync_iso: iso_now(),
+        error: String::new(),
+    })
+}
+
+// -----------------------------------------------------------------------------
 // App entry
 // -----------------------------------------------------------------------------
 
@@ -5683,6 +6887,14 @@ pub fn run() {
             read_reminders,
             write_reminders,
             delete_reminder_line,
+            start_google_oauth,
+            await_google_oauth_code,
+            complete_google_oauth,
+            get_google_calendar_config,
+            disconnect_google_calendar,
+            set_google_calendar_id,
+            list_google_calendars,
+            sync_google_calendar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

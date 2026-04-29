@@ -149,6 +149,10 @@ export function EventEditModal({
 
   if (!isOpen) return null;
 
+  // v1.4 + Cluster 12: events synced from Google are read-only.
+  // Inputs disabled, save/delete hidden, edits push back disabled.
+  const isReadOnly = existingEvent?.source === "google";
+
   function handleAllDayToggle(next: boolean) {
     setAllDay(next);
     // When switching modes, re-coerce the input values so the
@@ -238,6 +242,42 @@ export function EventEditModal({
           {existingEvent ? "Edit event" : "New event"}
         </h2>
 
+        {existingEvent?.source === "google" && (
+          <div style={readOnlyStyles.banner}>
+            <span style={readOnlyStyles.bannerIcon}>↗</span>
+            <span style={readOnlyStyles.bannerText}>
+              Synced from Google Calendar — read-only. Edits happen in Google.
+              {existingEvent.external_html_link && (
+                <>
+                  {" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const link = existingEvent.external_html_link;
+                      if (!link) return;
+                      // Prefer the Tauri opener; fall back to plain
+                      // window.open for environments where it isn't
+                      // available (test renders).
+                      try {
+                        // Dynamic import so this stays optional in tests.
+                        void (async () => {
+                          const m = await import("@tauri-apps/plugin-opener");
+                          await m.openUrl(link);
+                        })();
+                      } catch {
+                        window.open(link, "_blank", "noopener,noreferrer");
+                      }
+                    }}
+                    style={readOnlyStyles.openLink}
+                  >
+                    Open in Google Calendar →
+                  </button>
+                </>
+              )}
+            </span>
+          </div>
+        )}
+
         <label style={styles.label}>
           <span style={styles.labelText}>Title</span>
           <input
@@ -247,6 +287,7 @@ export function EventEditModal({
             onChange={(e) => setTitle(e.target.value)}
             placeholder="What's happening?"
             style={styles.input}
+            disabled={existingEvent?.source === "google"}
           />
         </label>
 
@@ -258,6 +299,7 @@ export function EventEditModal({
               value={startLocal}
               onChange={(e) => setStartLocal(e.target.value)}
               style={styles.input}
+              disabled={isReadOnly}
             />
           </label>
           <label style={styles.labelHalf}>
@@ -267,6 +309,7 @@ export function EventEditModal({
               value={endLocal}
               onChange={(e) => setEndLocal(e.target.value)}
               style={styles.input}
+              disabled={isReadOnly}
             />
           </label>
         </div>
@@ -276,6 +319,7 @@ export function EventEditModal({
             type="checkbox"
             checked={allDay}
             onChange={(e) => handleAllDayToggle(e.target.checked)}
+            disabled={isReadOnly}
           />
           <span style={styles.labelText}>
             All-day event (use for deadlines, special days)
@@ -298,6 +342,7 @@ export function EventEditModal({
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
                 style={styles.input}
+                disabled={isReadOnly}
               >
                 {categories.length === 0 ? (
                   <option value="">
@@ -322,6 +367,7 @@ export function EventEditModal({
                 style={
                   status === "confirmed" ? styles.statusOn : styles.statusOff
                 }
+                disabled={isReadOnly}
               >
                 Confirmed
               </button>
@@ -331,6 +377,7 @@ export function EventEditModal({
                 style={
                   status === "tentative" ? styles.statusOn : styles.statusOff
                 }
+                disabled={isReadOnly}
               >
                 Tentative
               </button>
@@ -344,6 +391,7 @@ export function EventEditModal({
             value={repeat}
             onChange={(e) => setRepeat(e.target.value as RepeatPreset)}
             style={styles.input}
+            disabled={isReadOnly}
           >
             <option value="none">Doesn&apos;t repeat</option>
             <option value="daily">Every day</option>
@@ -465,6 +513,7 @@ export function EventEditModal({
             value={notifyMode}
             onChange={(e) => setNotifyMode(e.target.value as NotifyMode)}
             style={styles.input}
+            disabled={isReadOnly}
           >
             <option value="none">None</option>
             <option value="all_day">All day on the event date</option>
@@ -538,13 +587,14 @@ export function EventEditModal({
             placeholder="Agenda, prep, links to relevant notes…"
             style={styles.textarea}
             rows={6}
+            disabled={isReadOnly}
           />
         </label>
 
         {error && <p style={styles.error}>{error}</p>}
 
         <div style={styles.footer}>
-          {existingEvent && (
+          {existingEvent && !isReadOnly && (
             <button
               onClick={() => onDelete(existingEvent.id)}
               style={styles.btnDanger}
@@ -554,11 +604,13 @@ export function EventEditModal({
           )}
           <div style={{ flex: 1 }} />
           <button onClick={onClose} style={styles.btnGhost}>
-            Cancel
+            {isReadOnly ? "Close" : "Cancel"}
           </button>
-          <button onClick={submit} style={styles.btnPrimary}>
-            {existingEvent ? "Save" : "Create"}
-          </button>
+          {!isReadOnly && (
+            <button onClick={submit} style={styles.btnPrimary}>
+              {existingEvent ? "Save" : "Create"}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -766,6 +818,46 @@ function isoWeekdayShortFromUnix(unix: number): string {
   const map = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
   return map[d.getDay()];
 }
+
+// -----------------------------------------------------------------------------
+// Read-only banner styling (Cluster 12)
+// -----------------------------------------------------------------------------
+
+const readOnlyStyles: Record<string, React.CSSProperties> = {
+  banner: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "0.5rem",
+    padding: "0.55rem 0.75rem",
+    marginBottom: "0.85rem",
+    background: "var(--bg-elev)",
+    border: "1px solid var(--border-2)",
+    borderLeft: "3px solid var(--accent)",
+    borderRadius: "5px",
+    fontSize: "0.82rem",
+    color: "var(--text-2)",
+    lineHeight: 1.5,
+  },
+  bannerIcon: {
+    color: "var(--accent)",
+    fontSize: "0.95rem",
+    fontWeight: 600,
+    flexShrink: 0,
+  },
+  bannerText: {
+    flex: 1,
+  },
+  openLink: {
+    background: "transparent",
+    color: "var(--accent)",
+    border: "none",
+    padding: 0,
+    margin: 0,
+    cursor: "pointer",
+    textDecoration: "underline",
+    font: "inherit",
+  },
+};
 
 // -----------------------------------------------------------------------------
 // Styles
