@@ -154,7 +154,9 @@ export function IntegrationsSettings({
         token: token.trim(),
         repos: cleanedRepos,
       });
-      const result = await invoke<GitHubSummary>("fetch_github_summary_now");
+      const result = await invoke<GitHubSummary>("fetch_github_summary_now", {
+        tzOffsetMinutes: -new Date().getTimezoneOffset(),
+      });
       setTestResult(result);
     } catch (e) {
       setError(`Test failed: ${e}`);

@@ -29,6 +29,7 @@ import { MarkQueueView } from "./MarkQueueView";
 import { IdeaLog } from "./IdeaLog";
 import { MethodsArsenal } from "./MethodsArsenal";
 import { ProtocolsLog } from "./ProtocolsLog";
+import { Calendar } from "./Calendar";
 import { PDFReader } from "./PDFReader";
 import { parseFrontmatter, serializeFrontmatter } from "../utils/frontmatter";
 
@@ -44,7 +45,8 @@ export type ActiveView =
   | "idea-log"
   | "methods-arsenal"
   | "protocols-log"
-  | "pdf-reader";
+  | "pdf-reader"
+  | "calendar";
 
 /** Imperative API the parent uses to drive this pane. */
 export type TabPaneHandle = {
@@ -87,7 +89,22 @@ export type TabPaneProps = {
   slotIndex: number;
   vaultPath: string;
   indexVersion: number;
+  /**
+   * Semantic "this slot is the active one" flag. True for the only
+   * pane in a single-slot layout AND for the active pane in
+   * multi-slot. Used by PDFReader to decide whether to respond to
+   * window-level Ctrl+K. **Not** used directly for visual chrome —
+   * see `multiSlot` for that.
+   */
   isActive: boolean;
+  /**
+   * True when more than one slot is visible. Drives the active-slot
+   * outline and the slot-number badge — both should hide when there's
+   * only one pane to disambiguate. v1.6 of Cluster 6 used `isActive`
+   * for this dual purpose, which broke single-slot Ctrl+K because the
+   * gate became unreachable.
+   */
+  multiSlot: boolean;
   /** Bump indexVersion in App so backlinks et al. re-fetch. */
   bumpIndex: () => void;
   /** Surface a recoverable error to App's banner. */
@@ -123,6 +140,7 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
       vaultPath,
       indexVersion,
       isActive,
+      multiSlot,
       bumpIndex,
       setError,
       onActivate,
@@ -467,11 +485,15 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           padding: isPdf ? 0 : "1.5rem 1.5rem",
           boxSizing: "border-box",
           background: "var(--bg)",
-          outline: isActive ? "2px solid var(--accent)" : "none",
+          // Outline and badge are visual disambiguators for multi-
+          // slot layouts only — single-slot users have nothing to
+          // disambiguate against, so we hide both. (Keyboard routing
+          // uses the `isActive` prop directly; visuals use `multiSlot`.)
+          outline: isActive && multiSlot ? "2px solid var(--accent)" : "none",
           outlineOffset: "-2px",
         }}
       >
-        <SlotBadge index={slotIndex} active={isActive} />
+        {multiSlot && <SlotBadge index={slotIndex} active={isActive} />}
         {activeView === "queue-yellow" ? (
           <MarkQueueView
             vaultPath={vaultPath}
@@ -525,6 +547,8 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
               /* see comment above */
             }}
           />
+        ) : activeView === "calendar" ? (
+          <Calendar vaultPath={vaultPath} onClose={closeStructuredView} />
         ) : activeView === "pdf-reader" && selectedPath ? (
           <PDFReader
             vaultPath={vaultPath}

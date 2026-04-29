@@ -1224,7 +1224,34 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
              content TEXT NOT NULL,
              PRIMARY KEY (daily_note_path, block_index)
          );
-         CREATE INDEX IF NOT EXISTS idx_routings_iteration ON experiment_routings(iteration_path);",
+         CREATE INDEX IF NOT EXISTS idx_routings_iteration ON experiment_routings(iteration_path);
+
+         /* Phase 3 Cluster 11: Personal Calendar.
+            Events live in SQLite (not as one-file-per-event) because there
+            will be hundreds and the row shape is small + uniform. Body is
+            markdown — wikilinks resolve via the existing graph. */
+         CREATE TABLE IF NOT EXISTS events (
+             id TEXT PRIMARY KEY,
+             title TEXT NOT NULL,
+             start_at INTEGER NOT NULL,        -- unix seconds, UTC
+             end_at INTEGER NOT NULL,          -- unix seconds, UTC
+             all_day INTEGER NOT NULL DEFAULT 0,
+             category TEXT NOT NULL,
+             status TEXT NOT NULL DEFAULT 'confirmed',  -- 'confirmed' | 'tentative'
+             body TEXT NOT NULL DEFAULT '',
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_at);
+         CREATE INDEX IF NOT EXISTS idx_events_end ON events(end_at);
+         CREATE INDEX IF NOT EXISTS idx_events_category ON events(category);
+
+         CREATE TABLE IF NOT EXISTS event_categories (
+             id TEXT PRIMARY KEY,
+             label TEXT NOT NULL,
+             color TEXT NOT NULL,              -- CSS hex
+             sort_order INTEGER NOT NULL DEFAULT 0
+         );",
     )
     .map_err(|e| e.to_string())?;
 
@@ -1232,6 +1259,36 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
     // pink marks that have already been carried into a daily note. The
     // ALTER TABLE will fail if the column already exists; ignore that.
     let _ = conn.execute("ALTER TABLE marks ADD COLUMN injected_at INTEGER", []);
+
+    // Cluster 11 v1.1 schema migration: events.recurrence_rule (RRULE
+    // string per RFC 5545). NULL = standalone event. Same idempotent-
+    // ALTER pattern as the marks migration above.
+    let _ = conn.execute("ALTER TABLE events ADD COLUMN recurrence_rule TEXT", []);
+
+    // Cluster 11 — seed five starter categories on first init. The
+    // user can edit colours / labels in the Categories settings panel
+    // and add more. We only seed if the table is empty so we don't
+    // re-overwrite the user's edits on every open.
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM event_categories", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
+    if count == 0 {
+        let defaults = [
+            ("work", "Work", "#3b82f6", 0),
+            ("personal", "Personal", "#22c55e", 1),
+            ("health", "Health", "#ef4444", 2),
+            ("learning", "Learning", "#a855f7", 3),
+            ("social", "Social", "#f59e0b", 4),
+        ];
+        for (id, label, color, order) in defaults.iter() {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO event_categories (id, label, color, sort_order) VALUES (?1, ?2, ?3, ?4)",
+                params![id, label, color, order],
+            );
+        }
+    }
 
     Ok(conn)
 }
@@ -3968,12 +4025,21 @@ struct GhPullItem {
     title: String,
 }
 
-fn github_config_fingerprint(cfg: &GitHubConfig) -> String {
-    // Token's first 8 chars (or all of it if shorter) plus the joined
-    // repo list. Used to invalidate the summary cache on config
-    // changes without leaking the full token into a key.
+fn github_config_fingerprint(cfg: &GitHubConfig, local_today_iso: &str) -> String {
+    // Token's first 8 chars (or all of it if shorter), the joined
+    // repo list, and today's local date. Used to invalidate the
+    // summary cache on config changes — and on day rollover — without
+    // leaking the full token into a key. Including the date forces a
+    // fresh fetch the first time we look up the cache after local
+    // midnight, which is the only correct behaviour for a "today's
+    // activity" summary.
     let token_prefix = cfg.token.chars().take(8).collect::<String>();
-    format!("{}|{}", token_prefix, cfg.repos.join(","))
+    format!(
+        "{}|{}|{}",
+        token_prefix,
+        cfg.repos.join(","),
+        local_today_iso
+    )
 }
 
 /// ISO8601 UTC timestamp from a unix-seconds value. Hand-rolled with
@@ -4005,12 +4071,24 @@ fn iso_now() -> String {
     iso_utc_from_unix(secs)
 }
 
-fn iso_24h_ago() -> String {
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    iso_utc_from_unix(secs.saturating_sub(86_400))
+/// UTC unix-second timestamp of "the start of today's local day" —
+/// computed by shifting now by the user's tz offset, rounding to the
+/// local-day boundary, and shifting back to UTC. This is the ISO
+/// timestamp the GitHub summary uses for `?since=` so the splice
+/// shows TODAY's commits in the user's local frame, not the rolling
+/// last-24h window the cluster doc originally proposed.
+fn since_local_midnight_today_iso(tz_offset_minutes: i32) -> String {
+    let now_utc = unix_now();
+    let offset_secs = (tz_offset_minutes as i64) * 60;
+    let now_local_repr = now_utc + offset_secs;
+    let local_midnight_repr = now_local_repr - now_local_repr.rem_euclid(86_400);
+    let local_midnight_utc = local_midnight_repr - offset_secs;
+    let safe = if local_midnight_utc < 0 {
+        0
+    } else {
+        local_midnight_utc as u64
+    };
+    iso_utc_from_unix(safe)
 }
 
 async fn gh_get_user_login(client: &reqwest::Client, token: &str) -> Result<String, String> {
@@ -4235,8 +4313,17 @@ fn format_github_markdown(
 }
 
 /// Inner async worker that does the actual API calls. Caches results
-/// for 10 minutes keyed on a fingerprint of the (token, repos) pair.
-async fn fetch_github_summary_inner(cfg: GitHubConfig) -> GitHubSummary {
+/// for 10 minutes keyed on a fingerprint of (token, repos, local
+/// today). Including the local date in the fingerprint forces a
+/// fresh fetch the first time we look up the cache after local
+/// midnight — otherwise yesterday's commits leak into today's splice.
+///
+/// `tz_offset_minutes` is the user's UTC offset in minutes
+/// (`-new Date().getTimezoneOffset()` on the JS side). Used both for
+/// the cache key and for the `?since=` window passed to GitHub's
+/// commits API — so the summary always reflects "today's activity"
+/// in the user's local frame, not a rolling 24-hour window from now.
+async fn fetch_github_summary_inner(cfg: GitHubConfig, tz_offset_minutes: i32) -> GitHubSummary {
     if cfg.token.is_empty() {
         return GitHubSummary {
             markdown:
@@ -4246,7 +4333,8 @@ async fn fetch_github_summary_inner(cfg: GitHubConfig) -> GitHubSummary {
             error: "no token".to_string(),
         };
     }
-    let fingerprint = github_config_fingerprint(&cfg);
+    let local_today = local_iso_date_for(unix_now(), tz_offset_minutes);
+    let fingerprint = github_config_fingerprint(&cfg, &local_today);
     if let Ok(g) = GITHUB_SUMMARY_CACHE.lock() {
         if let Some(cache) = &*g {
             if cache.config_fingerprint == fingerprint {
@@ -4281,7 +4369,7 @@ async fn fetch_github_summary_inner(cfg: GitHubConfig) -> GitHubSummary {
             };
         }
     };
-    let since = iso_24h_ago();
+    let since = since_local_midnight_today_iso(tz_offset_minutes);
     let mut results: Vec<(String, Result<(Vec<GhCommitItem>, Vec<GhPullItem>), String>)> =
         Vec::new();
     for repo in &cfg.repos {
@@ -4370,20 +4458,26 @@ fn clear_github_config(app: tauri::AppHandle) -> Result<(), String> {
 /// Force a fresh fetch (bypasses the 10-min cache). Used by the
 /// settings modal's "Test connection" button.
 #[tauri::command]
-async fn fetch_github_summary_now(app: tauri::AppHandle) -> Result<GitHubSummary, String> {
+async fn fetch_github_summary_now(
+    app: tauri::AppHandle,
+    tz_offset_minutes: i32,
+) -> Result<GitHubSummary, String> {
     if let Ok(mut g) = GITHUB_SUMMARY_CACHE.lock() {
         *g = None;
     }
     let cfg = read_config(&app)?.github.unwrap_or_default();
-    Ok(fetch_github_summary_inner(cfg).await)
+    Ok(fetch_github_summary_inner(cfg, tz_offset_minutes).await)
 }
 
 /// Fetch (cache-respecting). Used by Ctrl+Shift+G insert-at-cursor and
 /// by `regenerate_github_section` for daily-note auto-population.
 #[tauri::command]
-async fn fetch_github_summary(app: tauri::AppHandle) -> Result<GitHubSummary, String> {
+async fn fetch_github_summary(
+    app: tauri::AppHandle,
+    tz_offset_minutes: i32,
+) -> Result<GitHubSummary, String> {
     let cfg = read_config(&app)?.github.unwrap_or_default();
-    Ok(fetch_github_summary_inner(cfg).await)
+    Ok(fetch_github_summary_inner(cfg, tz_offset_minutes).await)
 }
 
 /// Helper: stick the markers + body directly under
@@ -4440,13 +4534,18 @@ async fn regenerate_github_section(
     app: tauri::AppHandle,
     vault_path: String,
     file_path: String,
+    tz_offset_minutes: i32,
 ) -> Result<(), String> {
     let path = PathBuf::from(&file_path);
     let basename = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let today_basename = format!("{}.md", today_iso_date());
+    // Use local today (not UTC today) for the basename check so the
+    // splice runs against the daily note that matches the user's
+    // local date, not UTC's.
+    let today_local = local_iso_date_for(unix_now(), tz_offset_minutes);
+    let today_basename = format!("{}.md", today_local);
     if basename != today_basename {
         // Past daily note — leave it alone.
         return Ok(());
@@ -4464,7 +4563,7 @@ async fn regenerate_github_section(
         Ok(s) => s,
         Err(_) => return Ok(()),
     };
-    let summary = fetch_github_summary_inner(cfg).await;
+    let summary = fetch_github_summary_inner(cfg, tz_offset_minutes).await;
     let new_content = if let (Some(start_idx), Some(end_idx)) = (
         existing.find(GITHUB_AUTO_START),
         existing.find(GITHUB_AUTO_END),
@@ -4487,6 +4586,895 @@ async fn regenerate_github_section(
     if new_content != existing {
         fs::write(&file_path, new_content).map_err(|e| e.to_string())?;
         index_single_file(vault_path, file_path)?;
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Cluster 11 — Personal Calendar (v1.0)
+// -----------------------------------------------------------------------------
+//
+// Local-first calendar storage + CRUD. Events live in the vault's
+// SQLite index alongside the FTS5 / metadata / hierarchy tables.
+// Body field is markdown — wikilinks resolve via the existing graph.
+//
+// All timestamps are unix seconds, UTC. The frontend converts to
+// local time for rendering via standard `new Date(secs * 1000)`.
+//
+// IDs follow the project's `evt-YYYY-MM-DD-N` shape (similar to
+// `ann-…` for PDF annotations) where N is a per-day monotonic
+// counter — predictable for git diffs and for visual scanning.
+
+const CALENDAR_AUTO_START: &str =
+    "<!-- CALENDAR-AUTO-START — derived from your Cortex calendar; do not edit -->";
+const CALENDAR_AUTO_END: &str = "<!-- CALENDAR-AUTO-END -->";
+const CALENDAR_HEADING: &str = "## Today's calendar";
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Event {
+    pub id: String,
+    pub title: String,
+    pub start_at: i64,
+    pub end_at: i64,
+    pub all_day: bool,
+    pub category: String,
+    pub status: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// v1.1: RFC 5545 RRULE string. None = standalone event.
+    /// Some = master of a recurring series. Expanded instances
+    /// carry the same value through `list_events_in_range`.
+    #[serde(default)]
+    pub recurrence_rule: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EventCategory {
+    pub id: String,
+    pub label: String,
+    pub color: String,
+    pub sort_order: i64,
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Generate a unique event ID. Reads existing IDs for today, picks
+/// the next N. Predictable and git-friendly.
+fn next_event_id(conn: &Connection, date_iso: &str) -> Result<String, String> {
+    let prefix = format!("evt-{}-", date_iso);
+    let pattern = format!("{}%", prefix);
+    let max_n: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(id, ?1) AS INTEGER)), 0) FROM events WHERE id LIKE ?2",
+            params![(prefix.len() + 1) as i64, pattern],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    Ok(format!("{}{}", prefix, max_n + 1))
+}
+
+/// Hand-rolled RRULE expander supporting the subset Cluster 11 v1.1
+/// ships through the modal UI:
+///   FREQ = DAILY | WEEKLY | MONTHLY (required)
+///   INTERVAL = N (default 1)
+///   BYDAY = MO,TU,WE,TH,FR,SA,SU (WEEKLY only; default = master's weekday)
+///   BYMONTHDAY = N (MONTHLY only; default = master's day-of-month)
+///   COUNT = N (max occurrences emitted)
+///   UNTIL = YYYYMMDDTHHMMSSZ (inclusive cutoff)
+///
+/// Anything unrecognised is silently ignored — the rule is best-effort
+/// and v1.1 leans toward "useful enough" rather than "spec-complete".
+/// More exotic rules (BYSETPOS, BYWEEKNO, BYYEARDAY, exceptions via
+/// EXDATE) are reserved for v1.2.
+///
+/// Expansion is bounded by both `window_end` and a hard cap (5000)
+/// so a buggy rule can't run away and starve the SQLite query.
+fn expand_recurrence(master: &Event, window_start: i64, window_end: i64) -> Vec<Event> {
+    let rule_str = match &master.recurrence_rule {
+        Some(s) if !s.trim().is_empty() => s.clone(),
+        _ => return vec![master.clone()],
+    };
+    // Parse `KEY=VAL;KEY=VAL` into a HashMap of UPPERCASE keys.
+    let mut parts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for kv in rule_str.split(';') {
+        let kv = kv.trim();
+        if kv.is_empty() {
+            continue;
+        }
+        if let Some(eq) = kv.find('=') {
+            let k = kv[..eq].trim().to_ascii_uppercase();
+            let v = kv[eq + 1..].trim().to_string();
+            parts.insert(k, v);
+        }
+    }
+    let freq = match parts.get("FREQ").map(|s| s.to_ascii_uppercase()) {
+        Some(s) => s,
+        None => return vec![master.clone()],
+    };
+    let interval: i64 = parts
+        .get("INTERVAL")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1);
+    let count_cap: Option<i64> = parts.get("COUNT").and_then(|s| s.parse::<i64>().ok());
+    let until_unix: Option<i64> = parts.get("UNTIL").and_then(|s| parse_rrule_until(s));
+
+    let by_day: Vec<u32> = parts
+        .get("BYDAY")
+        .map(|s| {
+            s.split(',')
+                .filter_map(|d| weekday_iso_index_from_short(d.trim()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let by_monthday: Option<u32> = parts.get("BYMONTHDAY").and_then(|s| s.parse::<u32>().ok());
+
+    let duration = (master.end_at - master.start_at).max(0);
+
+    let mut out: Vec<Event> = Vec::new();
+    let hard_cap: usize = 5000;
+    let mut emitted: i64 = 0;
+
+    // Walk forward from the master's start. We don't try to be clever
+    // about jumping into the window — for the rule-shapes v1.1 ships,
+    // a linear walk is fast (visible windows are 7 or 42 days; rules
+    // emit at most a handful per week / month).
+    let mut cursor = master.start_at;
+    let walk_end = window_end.min(until_unix.unwrap_or(window_end));
+
+    let push_instance = |out: &mut Vec<Event>, start_at: i64| {
+        let end_at = start_at + duration;
+        // Only include if the instance overlaps the visible window.
+        if start_at < window_end && end_at > window_start {
+            out.push(Event {
+                id: master.id.clone(),
+                title: master.title.clone(),
+                start_at,
+                end_at,
+                all_day: master.all_day,
+                category: master.category.clone(),
+                status: master.status.clone(),
+                body: master.body.clone(),
+                created_at: master.created_at,
+                updated_at: master.updated_at,
+                recurrence_rule: master.recurrence_rule.clone(),
+            });
+        }
+    };
+
+    match freq.as_str() {
+        "DAILY" => {
+            while cursor <= walk_end && out.len() < hard_cap {
+                push_instance(&mut out, cursor);
+                emitted += 1;
+                if let Some(c) = count_cap {
+                    if emitted >= c {
+                        break;
+                    }
+                }
+                cursor += interval * 86_400;
+            }
+        }
+        "WEEKLY" => {
+            // Master's weekday becomes the implicit BYDAY when none was given.
+            let master_weekday = weekday_iso_for_unix(master.start_at);
+            let weekdays: Vec<u32> = if by_day.is_empty() {
+                vec![master_weekday]
+            } else {
+                by_day.clone()
+            };
+            // Walk week by week (`interval` weeks at a time). Within each
+            // week we emit on the BYDAY weekdays (in chronological order)
+            // whose timestamps land at or after the master start.
+            let week_seconds = 7 * 86_400;
+            let mut week_anchor = master.start_at;
+            let mut count = 0i64;
+            let mut safety = 0;
+            'outer: while week_anchor <= walk_end && safety < hard_cap {
+                safety += 1;
+                let week_start_weekday = weekday_iso_for_unix(week_anchor);
+                let mut sorted_days = weekdays.clone();
+                sorted_days.sort();
+                for d in &sorted_days {
+                    let offset_days = ((*d as i64) - (week_start_weekday as i64) + 7) % 7;
+                    let inst = week_anchor + offset_days * 86_400;
+                    if inst < master.start_at {
+                        continue;
+                    }
+                    if inst > walk_end {
+                        continue;
+                    }
+                    push_instance(&mut out, inst);
+                    count += 1;
+                    if let Some(c) = count_cap {
+                        if count >= c {
+                            break 'outer;
+                        }
+                    }
+                }
+                week_anchor += interval * week_seconds;
+            }
+        }
+        "MONTHLY" => {
+            // Walk forward month by month, emitting on BYMONTHDAY (or
+            // master's day-of-month when not specified).
+            let (mut y, mut m, _) = ymd_from_unix(master.start_at);
+            let target_day = by_monthday.unwrap_or_else(|| {
+                let (_, _, d) = ymd_from_unix(master.start_at);
+                d
+            });
+            let (sh, sm, ss) = hms_from_unix(master.start_at);
+            let mut count = 0i64;
+            let mut safety = 0;
+            while safety < hard_cap {
+                safety += 1;
+                if let Some(unix) = unix_from_ymd_hms(y, m, target_day, sh, sm, ss) {
+                    if unix >= master.start_at && unix <= walk_end {
+                        push_instance(&mut out, unix);
+                        count += 1;
+                        if let Some(c) = count_cap {
+                            if count >= c {
+                                break;
+                            }
+                        }
+                    } else if unix > walk_end {
+                        break;
+                    }
+                }
+                // Advance by `interval` months.
+                let mut steps = interval;
+                while steps > 0 {
+                    m += 1;
+                    if m > 12 {
+                        m = 1;
+                        y += 1;
+                    }
+                    steps -= 1;
+                }
+            }
+        }
+        _ => {
+            // Unknown FREQ — fall back to a single occurrence so the
+            // user sees something rather than nothing.
+            push_instance(&mut out, master.start_at);
+        }
+    }
+
+    out
+}
+
+/// Parse a UNTIL value like "20261231T235959Z" or "20261231" into
+/// unix seconds. Tolerant — bad input returns None.
+fn parse_rrule_until(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() < 8 {
+        return None;
+    }
+    let y: i32 = std::str::from_utf8(&bytes[0..4]).ok()?.parse().ok()?;
+    let mo: u32 = std::str::from_utf8(&bytes[4..6]).ok()?.parse().ok()?;
+    let d: u32 = std::str::from_utf8(&bytes[6..8]).ok()?.parse().ok()?;
+    let (h, mn, sc) = if bytes.len() >= 15 && bytes[8] == b'T' {
+        let h: u32 = std::str::from_utf8(&bytes[9..11]).ok()?.parse().ok()?;
+        let mn: u32 = std::str::from_utf8(&bytes[11..13]).ok()?.parse().ok()?;
+        let sc: u32 = std::str::from_utf8(&bytes[13..15]).ok()?.parse().ok()?;
+        (h, mn, sc)
+    } else {
+        (23, 59, 59)
+    };
+    unix_from_ymd_hms(y, mo, d, h, mn, sc)
+}
+
+/// Days-since-epoch from civil (y, m, d). Howard Hinnant.
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (d as u32 - 1);
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era as i64) * 146_097 + doe as i64 - 719_468
+}
+
+fn unix_from_ymd_hms(y: i32, m: u32, d: u32, h: u32, mn: u32, s: u32) -> Option<i64> {
+    if m < 1 || m > 12 || d < 1 || d > 31 {
+        return None;
+    }
+    let dom = days_in_month(y, m);
+    if d > dom {
+        return None;
+    }
+    if h > 23 || mn > 59 || s > 59 {
+        return None;
+    }
+    let days = days_from_civil(y, m, d);
+    Some(days * 86_400 + (h as i64) * 3600 + (mn as i64) * 60 + (s as i64))
+}
+
+fn days_in_month(y: i32, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn ymd_from_unix(secs: i64) -> (i32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m as u32, d as u32)
+}
+
+fn hms_from_unix(secs: i64) -> (u32, u32, u32) {
+    let s = secs.rem_euclid(86_400);
+    ((s / 3600) as u32, ((s / 60) % 60) as u32, (s % 60) as u32)
+}
+
+/// ISO weekday (Mon=1..Sun=7) converted to RRULE-style 0..6 (Mon=0..Sun=6).
+fn weekday_iso_for_unix(secs: i64) -> u32 {
+    // 1970-01-01 was a Thursday. Days since epoch + Thursday's index 3
+    // → ISO Mon=0 result.
+    let days = secs.div_euclid(86_400);
+    (((days + 3) % 7) + 7) as u32 % 7
+}
+
+fn weekday_iso_index_from_short(s: &str) -> Option<u32> {
+    match s.to_ascii_uppercase().as_str() {
+        "MO" => Some(0),
+        "TU" => Some(1),
+        "WE" => Some(2),
+        "TH" => Some(3),
+        "FR" => Some(4),
+        "SA" => Some(5),
+        "SU" => Some(6),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+fn list_events_in_range(
+    vault_path: String,
+    start_unix: i64,
+    end_unix: i64,
+) -> Result<Vec<Event>, String> {
+    let conn = open_or_init_db(&vault_path)?;
+    collect_events_in_window(&conn, start_unix, end_unix)
+}
+
+#[tauri::command]
+fn create_event(
+    vault_path: String,
+    title: String,
+    start_at: i64,
+    end_at: i64,
+    all_day: bool,
+    category: String,
+    status: String,
+    body: String,
+    recurrence_rule: Option<String>,
+) -> Result<Event, String> {
+    if title.trim().is_empty() {
+        return Err("Event title is empty".to_string());
+    }
+    if end_at < start_at {
+        return Err("Event end is before start".to_string());
+    }
+    let cleaned_rule = recurrence_rule
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let conn = open_or_init_db(&vault_path)?;
+    let now = unix_now();
+    let date_iso = today_iso_date();
+    let id = next_event_id(&conn, &date_iso)?;
+    conn.execute(
+        "INSERT INTO events (id, title, start_at, end_at, all_day, category, status, body, created_at, updated_at, recurrence_rule)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            id,
+            title,
+            start_at,
+            end_at,
+            if all_day { 1 } else { 0 },
+            category,
+            status,
+            body,
+            now,
+            now,
+            cleaned_rule,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(Event {
+        id,
+        title,
+        start_at,
+        end_at,
+        all_day,
+        category,
+        status,
+        body,
+        created_at: now,
+        updated_at: now,
+        recurrence_rule: cleaned_rule,
+    })
+}
+
+#[tauri::command]
+fn update_event(
+    vault_path: String,
+    id: String,
+    title: String,
+    start_at: i64,
+    end_at: i64,
+    all_day: bool,
+    category: String,
+    status: String,
+    body: String,
+    recurrence_rule: Option<String>,
+) -> Result<Event, String> {
+    if title.trim().is_empty() {
+        return Err("Event title is empty".to_string());
+    }
+    if end_at < start_at {
+        return Err("Event end is before start".to_string());
+    }
+    let cleaned_rule = recurrence_rule
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let conn = open_or_init_db(&vault_path)?;
+    let now = unix_now();
+    let affected = conn
+        .execute(
+            "UPDATE events
+             SET title = ?2, start_at = ?3, end_at = ?4, all_day = ?5,
+                 category = ?6, status = ?7, body = ?8, updated_at = ?9,
+                 recurrence_rule = ?10
+             WHERE id = ?1",
+            params![
+                id,
+                title,
+                start_at,
+                end_at,
+                if all_day { 1 } else { 0 },
+                category,
+                status,
+                body,
+                now,
+                cleaned_rule,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(format!("No event with id `{}`", id));
+    }
+    let created_at: i64 = conn
+        .query_row(
+            "SELECT created_at FROM events WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(Event {
+        id,
+        title,
+        start_at,
+        end_at,
+        all_day,
+        category,
+        status,
+        body,
+        created_at,
+        updated_at: now,
+        recurrence_rule: cleaned_rule,
+    })
+}
+
+#[tauri::command]
+fn delete_event(vault_path: String, id: String) -> Result<(), String> {
+    let conn = open_or_init_db(&vault_path)?;
+    conn.execute("DELETE FROM events WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_event_categories(vault_path: String) -> Result<Vec<EventCategory>, String> {
+    let conn = open_or_init_db(&vault_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, label, color, sort_order FROM event_categories
+             ORDER BY sort_order ASC, label ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(EventCategory {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                color: row.get(2)?,
+                sort_order: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<EventCategory> = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn upsert_event_category(
+    vault_path: String,
+    id: String,
+    label: String,
+    color: String,
+    sort_order: i64,
+) -> Result<(), String> {
+    if id.trim().is_empty() || label.trim().is_empty() {
+        return Err("Category id and label cannot be empty".to_string());
+    }
+    let conn = open_or_init_db(&vault_path)?;
+    conn.execute(
+        "INSERT INTO event_categories (id, label, color, sort_order)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+            label = excluded.label,
+            color = excluded.color,
+            sort_order = excluded.sort_order",
+        params![id, label, color, sort_order],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_event_category(vault_path: String, id: String) -> Result<(), String> {
+    let conn = open_or_init_db(&vault_path)?;
+    // v1.0 forces the user to reassign events first — refuse if any
+    // event still references this category. Avoids orphaning events
+    // and prevents the "I deleted the wrong category and now my
+    // schedule is uncoloured" surprise.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE category = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if count > 0 {
+        return Err(format!(
+            "Can't delete category `{}` — {} event(s) still use it. Reassign them first.",
+            id, count
+        ));
+    }
+    conn.execute("DELETE FROM event_categories WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// HH:MM in the user's local time. `tz_offset_minutes` is the
+/// difference between local time and UTC, in minutes (positive
+/// east of UTC, negative west — same sign convention used by
+/// JavaScript's `-d.getTimezoneOffset()`).
+fn local_hhmm_for_with_offset(utc_secs: i64, tz_offset_minutes: i32) -> String {
+    let local_secs = utc_secs + (tz_offset_minutes as i64) * 60;
+    let safe = if local_secs < 0 { 0 } else { local_secs as u64 };
+    let rem = safe % 86_400;
+    let h = rem / 3600;
+    let m = (rem / 60) % 60;
+    format!("{:02}:{:02}", h, m)
+}
+
+/// Local YYYY-MM-DD for the given UTC unix seconds and offset.
+/// Same trick: shift the input by the offset so the existing
+/// `ymd_from_unix` helper produces the local civil date.
+fn local_iso_date_for(utc_secs: i64, tz_offset_minutes: i32) -> String {
+    let local_secs = utc_secs + (tz_offset_minutes as i64) * 60;
+    let (y, m, d) = ymd_from_unix(local_secs);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Build the markdown body for the daily-note `## Today's calendar`
+/// auto-section. Always non-empty so the splice doesn't produce a
+/// hollow section.
+///
+/// v1.1: indents the event body (markdown verbatim) under each event
+/// so wikilinks the user typed in the body resolve via the daily
+/// note's TipTap render. Empty-body events are unchanged.
+///
+/// v1.2: HH:MM rendered in the user's local time via
+/// `tz_offset_minutes` (sourced from `-new Date().getTimezoneOffset()`
+/// on the JS side). Without this, events stored in UTC unix seconds
+/// would render with their UTC hours — e.g. a 12:00 MST event (19:00
+/// UTC) showed as "19:00" instead of "12:00".
+fn format_calendar_markdown(
+    events: &[Event],
+    categories: &[EventCategory],
+    tz_offset_minutes: i32,
+) -> String {
+    if events.is_empty() {
+        return "_(no events scheduled for today)_".to_string();
+    }
+    let cat_label_by_id: std::collections::HashMap<String, String> = categories
+        .iter()
+        .map(|c| (c.id.clone(), c.label.clone()))
+        .collect();
+    let mut out = String::new();
+    for e in events {
+        let cat_label = cat_label_by_id
+            .get(&e.category)
+            .cloned()
+            .unwrap_or_else(|| e.category.clone());
+        let tentative = if e.status == "tentative" {
+            " _(tentative)_"
+        } else {
+            ""
+        };
+        if e.all_day {
+            out.push_str(&format!(
+                "- **All day** — **{}** _({})_{}\n",
+                e.title, cat_label, tentative
+            ));
+        } else {
+            out.push_str(&format!(
+                "- {}–{} — **{}** _({})_{}\n",
+                local_hhmm_for_with_offset(e.start_at, tz_offset_minutes),
+                local_hhmm_for_with_offset(e.end_at, tz_offset_minutes),
+                e.title,
+                cat_label,
+                tentative
+            ));
+        }
+        // Body content indented as a sub-list-item under the event.
+        // Markdown — including [[wikilinks]] — round-trips verbatim
+        // so the daily note's editor renders the wikilinks as live
+        // links and counts them in backlinks.
+        let trimmed_body = e.body.trim();
+        if !trimmed_body.is_empty() {
+            for line in trimmed_body.lines() {
+                if line.trim().is_empty() {
+                    out.push_str("  \n");
+                } else {
+                    out.push_str("  ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+fn insert_calendar_under_heading(existing: &str, body: &str) -> String {
+    if let Some(idx) = existing.find(CALENDAR_HEADING) {
+        let after_heading = &existing[idx + CALENDAR_HEADING.len()..];
+        let line_end = after_heading.find('\n').unwrap_or(after_heading.len());
+        let head_end = idx + CALENDAR_HEADING.len() + line_end;
+        let head = &existing[..head_end];
+        let tail = &existing[head_end..];
+        let next_h2 = tail
+            .find("\n## ")
+            .map(|i| i + 1)
+            .unwrap_or_else(|| tail.len());
+        let after_section = &tail[next_h2..];
+        format!(
+            "{head}\n\n{start}\n{body}\n{end}\n{after_section}",
+            head = head,
+            start = CALENDAR_AUTO_START,
+            body = body,
+            end = CALENDAR_AUTO_END,
+            after_section = after_section,
+        )
+    } else {
+        format!(
+            "{existing}\n\n{heading}\n\n{start}\n{body}\n{end}\n",
+            existing = existing.trim_end(),
+            heading = CALENDAR_HEADING,
+            start = CALENDAR_AUTO_START,
+            body = body,
+            end = CALENDAR_AUTO_END,
+        )
+    }
+}
+
+/// Internal helper used by both `list_events_in_range` and
+/// `regenerate_calendar_section` so recurrence expansion is shared.
+fn collect_events_in_window(
+    conn: &Connection,
+    window_start: i64,
+    window_end: i64,
+) -> Result<Vec<Event>, String> {
+    let mut out: Vec<Event> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, start_at, end_at, all_day, category, status, body,
+                        created_at, updated_at, recurrence_rule
+                 FROM events
+                 WHERE recurrence_rule IS NULL
+                   AND start_at < ?1 AND end_at > ?2
+                 ORDER BY start_at ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![window_end, window_start], |row| {
+                Ok(Event {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    start_at: row.get(2)?,
+                    end_at: row.get(3)?,
+                    all_day: row.get::<_, i64>(4)? != 0,
+                    category: row.get(5)?,
+                    status: row.get(6)?,
+                    body: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    recurrence_rule: row.get(10)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+    }
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, start_at, end_at, all_day, category, status, body,
+                        created_at, updated_at, recurrence_rule
+                 FROM events
+                 WHERE recurrence_rule IS NOT NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(Event {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    start_at: row.get(2)?,
+                    end_at: row.get(3)?,
+                    all_day: row.get::<_, i64>(4)? != 0,
+                    category: row.get(5)?,
+                    status: row.get(6)?,
+                    body: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    recurrence_rule: row.get(10)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            let master = r.map_err(|e| e.to_string())?;
+            out.extend(expand_recurrence(&master, window_start, window_end));
+        }
+    }
+    out.sort_by_key(|e| e.start_at);
+    Ok(out)
+}
+
+/// Splice today's calendar events into the given file. Gated to
+/// today's daily note basename only — past daily notes stay frozen.
+/// Idempotent: only re-writes when the computed content differs.
+///
+/// v1.2: takes `tz_offset_minutes` (signed minutes east of UTC) so
+/// the day window and the basename check both use the user's local
+/// "today" rather than UTC's. Events stored in UTC unix seconds are
+/// otherwise spuriously excluded around timezone-shifted midnight.
+#[tauri::command]
+fn regenerate_calendar_section(
+    vault_path: String,
+    file_path: String,
+    tz_offset_minutes: i32,
+) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+    let basename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let now_utc = unix_now();
+    let today_local = local_iso_date_for(now_utc, tz_offset_minutes);
+    let today_basename = format!("{}.md", today_local);
+    if basename != today_basename {
+        return Ok(());
+    }
+
+    // Compute the local-day window, then convert back to UTC unix
+    // seconds for the SQL query. `start_at` / `end_at` are stored
+    // in UTC; the SQL window must be expressed in UTC too.
+    //
+    // For Arizona (offset = -420 minutes), now_utc = 19:30 → local
+    // representation is 12:30, the day starts at "00:00 local",
+    // which corresponds to 07:00 UTC (the unix timestamp for
+    // Arizona midnight). day_end is 24h later: 07:00 UTC tomorrow.
+    let offset_secs = (tz_offset_minutes as i64) * 60;
+    let now_local_repr = now_utc + offset_secs;
+    let local_day_start_repr = now_local_repr - now_local_repr.rem_euclid(86_400);
+    let local_day_end_repr = local_day_start_repr + 86_400;
+    let day_start = local_day_start_repr - offset_secs;
+    let day_end = local_day_end_repr - offset_secs;
+
+    let conn = open_or_init_db(&vault_path)?;
+
+    // Pull events overlapping the window — including recurring
+    // expansions via the shared helper.
+    let events = collect_events_in_window(&conn, day_start, day_end)?;
+
+    // Categories for label lookup in the markdown.
+    let mut cat_stmt = conn
+        .prepare(
+            "SELECT id, label, color, sort_order FROM event_categories
+             ORDER BY sort_order ASC, label ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let cat_rows = cat_stmt
+        .query_map([], |row| {
+            Ok(EventCategory {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                color: row.get(2)?,
+                sort_order: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut categories: Vec<EventCategory> = Vec::new();
+    for r in cat_rows {
+        categories.push(r.map_err(|e| e.to_string())?);
+    }
+    drop(cat_stmt);
+
+    if !vault_path.is_empty() && !file_path.is_empty() {
+        let existing = match fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
+        let body_md = format_calendar_markdown(&events, &categories, tz_offset_minutes);
+        let new_content = if let (Some(start_idx), Some(end_idx)) = (
+            existing.find(CALENDAR_AUTO_START),
+            existing.find(CALENDAR_AUTO_END),
+        ) {
+            if end_idx > start_idx {
+                let head = &existing[..start_idx + CALENDAR_AUTO_START.len()];
+                let tail = &existing[end_idx..];
+                format!(
+                    "{head}\n{body}\n{tail}",
+                    head = head,
+                    body = body_md,
+                    tail = tail
+                )
+            } else {
+                insert_calendar_under_heading(&existing, &body_md)
+            }
+        } else {
+            insert_calendar_under_heading(&existing, &body_md)
+        };
+        if new_content != existing {
+            fs::write(&file_path, new_content).map_err(|e| e.to_string())?;
+            index_single_file(vault_path, file_path)?;
+        }
     }
     Ok(())
 }
@@ -4544,6 +5532,14 @@ pub fn run() {
             fetch_github_summary,
             fetch_github_summary_now,
             regenerate_github_section,
+            list_events_in_range,
+            create_event,
+            update_event,
+            delete_event,
+            list_event_categories,
+            upsert_event_category,
+            delete_event_category,
+            regenerate_calendar_section,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

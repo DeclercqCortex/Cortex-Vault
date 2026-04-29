@@ -1,8 +1,22 @@
 # verify-cluster-10.ps1
-# Phase 3 Cluster 10 — Integrations: GitHub-only (v1.1)
-# Also tags Cluster 6 v1.6 — PDF reader fixups landed in the same
-# session (Ctrl+K isActive gate, search bubble pinned to visible area,
-# single scrollbar inside PDF view).
+# Phase 3 Cluster 10 — Integrations: GitHub-only (v1.2)
+# Also tags Cluster 6 v1.7 — PDF Ctrl+K single-slot fix.
+#
+# v1.2 / v1.7 fixups (this round):
+#   - Cluster 10 v1.2: GitHub `?since=` now uses local-midnight-today
+#     instead of a rolling 24h-from-now window. Three Tauri commands
+#     (fetch_github_summary, fetch_github_summary_now,
+#     regenerate_github_section) take tz_offset_minutes; cache
+#     fingerprint includes the local date so a fresh fetch happens
+#     after midnight rollover. Closes "GitHub activity from a day
+#     ago appearing in today's daily note."
+#   - Cluster 6 v1.7: PDF Ctrl+K works in single-slot layouts again.
+#     Root cause was App.tsx passing isActive=false to the only pane
+#     (the prop's old definition was `activeSlotIdx === i &&
+#     slotCount > 1`) which my v1.6 PDFReader gate then blocked. Now
+#     isActive is a pure semantic flag (true for the active pane in
+#     either single- or multi-slot), with a separate `multiSlot`
+#     prop driving the visual accent outline + slot badge.
 #
 #   cd "C:\Declercq Cortex\declercq-cortex"
 #   pnpm install            # picks up nothing new on JS side; Rust has reqwest
@@ -161,18 +175,20 @@ try {
 Write-Host "==> 3/4  Stage and commit" -ForegroundColor Cyan
 git add .
 if ((git diff --cached --name-only).Length -gt 0) {
-    git commit -m "Cluster 10 v1.1 + Cluster 6 v1.6 - Cluster 10: GitHub integration shipped in v1.0 (settings modal Ctrl+, token+repos+show/hide+add/remove+test+disconnect; six Tauri commands; auto-populate today's daily note via GITHUB-AUTO markers mirroring Cluster 8 v2 reagents; Ctrl+Shift+G insert-at-cursor; 10-min summary cache + per-process user-login cache invalidated on token swap; offline degrades to _(couldn't fetch)_ lines; reqwest 0.12 rustls; GH sidebar button); v1.1 fixups: drop ?author= filter on recent commits per spec (was over-filtering); 404/401/403 produce user-friendly error hints calling out private-repo+missing-scope as the common cause. Cluster 6 v1.6 fixups landed same session: PDFReader Ctrl+K listener gated on isActive prop so multi-slot PDFs don't all toggle search bubbles together; PDFReader owns its own scroll container (wrap=flex column overflow:hidden; new scrollArea=flex 1 overflow:auto; search bubble pinned via position:absolute to non-scrolling wrap); TabPane.paneRoot uses overflow:hidden for PDF view so only the inner page scrollbar shows."
+    git commit -m "Cluster 10 v1.2 + Cluster 6 v1.7 - Cluster 10 v1.2: GitHub `?since=` uses local-midnight-today (not rolling 24h-from-now). New since_local_midnight_today_iso helper. fetch_github_summary, fetch_github_summary_now, regenerate_github_section all accept tz_offset_minutes (signed minutes east of UTC, frontend passes -new Date().getTimezoneOffset()). Cache fingerprint extended with local-today date so cross-day rollover invalidates cache automatically. regenerate_github_section's basename check switched from today_iso_date (UTC) to local_iso_date_for (local). Closes 'GitHub activity from a day ago appearing in today's daily note' report. Cluster 6 v1.7: PDF Ctrl+K works in single-slot layouts again. App.tsx's isActive prop was previously `activeSlotIdx === i && slotCount > 1` (always false in single-slot), and my v1.6 PDFReader gate `if (!isActive) return` was therefore blocking every Ctrl+K press in single-slot mode. Fixed by making isActive a pure semantic flag (`activeSlotIdx === i || slotCount === 1`) and routing the multi-slot visual concerns (accent outline, slot number badge) through a new `multiSlot` prop. Includes prior v1.0/v1.1 work: settings modal, six Tauri commands, daily-note auto-section, Ctrl+Shift+G insert-at-cursor, 10-min cache, reqwest 0.12 rustls, GH sidebar button, drop ?author= over-filter, friendly 404/401/403 hints; PDFReader own-scroll-container restructure, search bubble pinned to wrap, paneRoot overflow:hidden in PDF view."
 } else {
     Write-Host "    (nothing to commit; tagging current HEAD)" -ForegroundColor DarkGray
 }
 
-Write-Host "==> 4/4  Tag cluster-10-v1.1-complete + cluster-6-v1.6-complete" -ForegroundColor Cyan
+Write-Host "==> 4/4  Tag cluster-10-v1.2-complete + cluster-6-v1.7-complete" -ForegroundColor Cyan
 git tag -f cluster-10-v1.0-complete   # keep v1.0 marker as a checkpoint
-git tag -f cluster-10-v1.1-complete
-git tag -f cluster-6-v1.6-complete
+git tag -f cluster-10-v1.1-complete   # keep v1.1 marker as a checkpoint
+git tag -f cluster-10-v1.2-complete
+git tag -f cluster-6-v1.6-complete    # keep v1.6 marker as a checkpoint
+git tag -f cluster-6-v1.7-complete
 
 Write-Host ""
-Write-Host "Done. Cluster 10 (GitHub) v1.1 + Cluster 6 v1.6 shipped:" -ForegroundColor Green
+Write-Host "Done. Cluster 10 v1.2 + Cluster 6 v1.7 shipped:" -ForegroundColor Green
 Write-Host "  Cluster 10 v1.0 (foundation):" -ForegroundColor Green
 Write-Host "    - VaultConfig.github { token, repos[] } stored in %APPDATA%" -ForegroundColor Green
 Write-Host "    - reqwest 0.12 + rustls-tls (no OpenSSL)" -ForegroundColor Green

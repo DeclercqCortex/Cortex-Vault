@@ -1411,3 +1411,570 @@ out of scope for this cluster — the cluster doc is explicit about
   mutex is poisoned). This is acceptable degradation — the user
   gets a slow but correct fetch every call until the process
   restarts.
+
+---
+
+## Phase 3 — Cluster 11 v1.0 — Personal Calendar
+
+The first local-first calendar surface inside Cortex. The user-stated
+long-term vision is much bigger (Google + Outlook sync, recurrence,
+NLP input, heat map, pie analytics, multi-tz strip, density toggle,
+day view, time-tracking analytics), but the cluster doc explicitly
+slices that into Cluster 11 v1.0 → v1.6 + Cluster 12 (Google sync) +
+Cluster 13 (Outlook) + Cluster 14 (planned-vs-actual). This entry
+covers v1.0 — the foundation everything else builds on.
+
+### What landed
+
+- **Two new SQLite tables** in the existing `<vault>/.research-hub/
+  index.db`: `events` (id, title, start_at, end_at, all_day, category,
+  status, body, created_at, updated_at) and `event_categories` (id,
+  label, color, sort_order). `CREATE TABLE IF NOT EXISTS` so existing
+  vaults migrate themselves on first open.
+- **Five seeded categories** on first init: Work / Personal / Health
+  / Learning / Social. Only seeded if the categories table is empty
+  so user edits aren't overwritten.
+- **Eight Tauri commands**: `list_events_in_range`, `create_event`,
+  `update_event`, `delete_event`, `list_event_categories`,
+  `upsert_event_category`, `delete_event_category`,
+  `regenerate_calendar_section`. All registered in `invoke_handler`.
+- **`Calendar.tsx`** — top-level component hosted in `TabPane` like
+  the other structured views. Hand-rolled CSS Grid; no
+  `react-big-calendar`, no FullCalendar.
+- **Embedded WeekView** — 7 day columns × 24 hour rows, click-and-
+  drag drafting (15-min snap), event blocks with category-tinted
+  backgrounds, side-by-side conflict layout, "now" line that updates
+  each minute, tentative diagonal-stripe styling.
+- **Embedded MonthView** — 6 rows × 7 columns. Focus month at full
+  opacity; surrounding days dimmed. Click a day → opens new-event
+  modal defaulted to 9 am. Click an event chip → opens edit modal.
+- **`EventEditModal.tsx`** — title, datetime-local inputs (date-only
+  when "all-day" is on), category dropdown with swatch preview,
+  confirmed/tentative status, body textarea, Ctrl+Enter to save,
+  Escape to cancel. Existing events show a Delete button on the
+  left of the footer.
+- **`CategoriesSettings.tsx`** — list + edit + add + delete with a
+  soft 8-category warning ("visual signal degrades past this", per
+  the user spec).
+- **`ActiveView` += `"calendar"`** in `TabPane.tsx`; render branch
+  added between protocols-log and pdf-reader.
+- **Sidebar "Cal" button** in `App.tsx` routes
+  `paneRefs.current[activeSlotIdx]?.setActiveView("calendar")`,
+  same shape as the existing Ideas / Methods / Protocols buttons.
+- **Daily-note auto-section** at `## Today's calendar` between
+  `<!-- CALENDAR-AUTO-START -->` / `<!-- CALENDAR-AUTO-END -->`.
+  Same shape as the GitHub auto-section; gated to today's basename
+  only; idempotent rewrite + reindex.
+
+### Architectural choices
+
+- **SQLite, not one-file-per-event.** Events are small, uniform, and
+  there will be hundreds. The sidecar pattern that works for PDFs
+  (where the asset is the PDF and the JSON is small) is the wrong
+  shape here. The events table also gets indexes on `start_at`,
+  `end_at`, `category`.
+- **Times stored UTC, rendered local.** `start_at` / `end_at` are
+  unix seconds in UTC. The frontend converts to local time via
+  standard `new Date(secs * 1000)`. Cortex's existing
+  `today_iso_date` already accepts the same UTC-vs-local drift
+  around midnight; mirror.
+- **Hand-rolled grid, no calendar library.** `react-big-calendar`
+  would have given drag/drop + recurrence rendering for free, but
+  it's a 200kB dep that doesn't match Cortex's aesthetic and
+  doesn't customise easily. The hand-rolled WeekView is ~150 lines
+  of layout code; comparable effort to wiring + theming a library.
+  Revisit if recurrence (v1.1) gets nasty.
+- **Click-and-drag uses pointer-capture + 15-min snapping.**
+  Pointer-capture means a single column owns the drag from
+  pointer-down through pointer-up regardless of where the pointer
+  travels. 15-min snap matches Google/Apple/Outlook defaults.
+- **"Now" line updates on a 1-minute interval.** Cheap; one
+  `setState` per minute. The line only renders if `now` falls
+  inside the visible window — past/future weeks don't draw it.
+- **Conflict layout is global-cluster width.** When N events
+  overlap anywhere in a column, all overlapping events render at
+  `1/N` width. Not perfect for sparse overlaps but visually
+  consistent and easy to reason about. v1.1 candidate: per-cluster
+  width via interval-graph colouring.
+- **Tentative styling: solid background → diagonal stripe.** Per
+  the user's spec ("solid for confirmed, hatched/outlined for
+  tentative"). Implemented as a `repeating-linear-gradient`
+  background plus a dashed border. ~5 lines of CSS.
+- **Body field is a plain textarea, not TipTap.** Mounting TipTap
+  inside a modal adds notable complexity (editor instance ref,
+  onUpdate / setContent dance, wikilink decoration plumbing). The
+  body's `[[wikilinks]]` survive verbatim in storage and resolve
+  for free in the daily-note auto-section. Upgrade to TipTap in
+  v1.1 if the textarea feels limiting.
+- **Day-of-week start = Monday (ISO).** Cluster doc decision.
+  `mondayStartLocal` derives the anchor from any unix timestamp.
+- **Delete-category gate.** `delete_event_category` refuses if any
+  events still reference the category. The error string tells the
+  user how many events block the deletion. v1's stance is "fail
+  loudly" rather than orphaning events — the alternative ("re-
+  categorise to default") would be invisible damage.
+- **Daily-note section is gated to today only.** Past daily notes
+  stay frozen as the day's snapshot — same rule the GitHub
+  auto-section follows. If you open yesterday's note, the
+  calendar section there reflects what was on the calendar
+  yesterday, not what's there today.
+
+### Files touched
+
+- `src-tauri/src/lib.rs` —
+  - `events` and `event_categories` tables added to
+    `open_or_init_db`'s `execute_batch`.
+  - 5-default seeding logic at the end of `open_or_init_db`.
+  - New marker constants `CALENDAR_AUTO_START` / `CALENDAR_AUTO_END`
+    / `CALENDAR_HEADING`.
+  - Public structs `Event` and `EventCategory`.
+  - Helpers `unix_now`, `next_event_id`, `local_hhmm_for`,
+    `format_calendar_markdown`, `insert_calendar_under_heading`.
+  - Eight Tauri commands.
+  - Eight new entries in the `invoke_handler!` macro.
+- `src/components/Calendar.tsx` — new (~600 lines).
+- `src/components/EventEditModal.tsx` — new.
+- `src/components/CategoriesSettings.tsx` — new.
+- `src/components/TabPane.tsx` — `ActiveView` += `"calendar"`,
+  `Calendar` import + render branch.
+- `src/App.tsx` — `Cal` sidebar button (routes to active slot's
+  `setActiveView('calendar')`); `selectFileInSlot`'s daily-log
+  branch invokes `regenerate_calendar_section` after the GitHub
+  regen.
+- `verify-cluster-11.ps1` — new.
+- `cluster_11_personal_calendar.md` (at repo root) — cluster doc.
+- `phase_2_overview.md` — index updated, cluster 11 listed as in
+  flight, clusters 12/13/14 listed as planned follow-ups.
+
+### Known rough edges
+
+- **Multi-slot live update.** If the calendar is open in slot 1
+  and slot 2, an event created in slot 1 doesn't refresh slot 2
+  until the user navigates / clicks Today / re-opens that pane.
+  v1.0 doesn't have a cross-slot pub-sub channel; the Calendar
+  reloads on its own range change. Add a `bumpIndex`-style
+  signal for events in v1.1 if this bites.
+- **Day-spanning events.** Render in the start day's column from
+  the event's start time to 24:00, and in the end day's column
+  from 00:00 to the end time. The block's title appears in both
+  segments, but there's no visual cue that they're the same
+  event. Add a tiny "↘ continues" indicator in v1.1.
+- **Conflict layout uses global-cluster width.** As noted above,
+  not optimal for sparse overlaps. v1.1 candidate.
+- **No drag-resize / drag-move on existing events.** v1.0 supports
+  edit-via-modal only. Drag-resize + drag-move are deferred to
+  v1.1 alongside recurrence, since both touch the same drag
+  infrastructure.
+- **`regenerate_calendar_section` uses UTC midnight bounds.**
+  Around midnight in non-UTC zones, today's events at the very
+  edge of the day might fall outside the splice window. Same
+  drift the rest of Cortex's daily-note machinery accepts; revisit
+  if it bites.
+- **`local_hhmm_for` uses UTC times.** The daily-note splice shows
+  HH:MM in UTC, not the user's local time. The calendar UI itself
+  renders local time correctly via `new Date()`. Local-time
+  rendering in the splice is a v1.1 polish.
+- **Body textarea doesn't render wikilink decorations.** The
+  textarea displays `[[Foo]]` as plain text. Wikilinks are still
+  honoured by the daily-note auto-section because the body is
+  spliced verbatim into a markdown context. Upgrade to TipTap in
+  v1.1 if visual feedback inside the modal becomes useful.
+- **Categories panel doesn't expose `sort_order`.** Categories are
+  ordered by their seeded `sort_order`. New categories get
+  `sort_order = categories.length`. Reordering requires hand-
+  editing the SQLite table or a v1.1 drag-handle UI.
+- **`upsert_event_category` doesn't validate the colour string.**
+  It's stored verbatim. The colour input is a `<input type="color">`
+  which always produces valid `#RRGGBB`, but a future migration
+  could store CSS variable names and break.
+- **Future clusters depend on this schema.** Cluster 12 (Google
+  sync) will need `external_id` + `external_provider` columns on
+  `events` to dedupe round-trips. Adding them later via `ALTER
+  TABLE` is straightforward but worth noting now.
+
+---
+
+## Phase 3 — Cluster 11 v1.1 — Calendar follow-ups + recurrence
+
+User-driven follow-ups within the same session as v1.0:
+
+1. Wikilinks the user typed in event bodies didn't appear in daily
+   notes (the splice only emitted title/time/category — bug).
+2. New events didn't register to the daily note while the daily
+   note was already open (a known v1.0 limitation; the user
+   experienced it as "events don't register to daily notes").
+3. "Repeat modal field" — recurrence support: every week / multi-
+   times-per-week / biweekly / monthly / custom (the v1.1 work the
+   cluster doc had originally deferred to a separate session).
+
+### What changed
+
+**Body content in the daily-note splice.** `format_calendar_markdown`
+now indents the event body (markdown verbatim) under each event's
+bullet. Wikilinks survive verbatim and resolve via the daily note's
+TipTap render — so `[[Idea — XYZ]]` typed in an event body lands as
+a live link in the daily note and counts in the backlinks panel.
+Empty-body events are unchanged.
+
+**Post-mutation regen.** `Calendar.saveEdit` and `Calendar.deleteEdit`
+explicitly invoke `regenerate_calendar_section` on today's daily
+note path after a successful mutation. The regen function is
+idempotent and no-ops if today's daily note doesn't exist yet.
+Means the daily note is up-to-date the moment a user adds / edits /
+deletes an event, even if the daily note isn't currently open in
+any pane. Multi-slot live update: still requires the user to click
+into the daily note's pane to see the new content (TabPane caches
+its body in state and re-reads on `reloadTick`); v1.2 candidate.
+
+**Visible regen failure surface.** If `regenerate_calendar_section`
+returns an error (most likely cause: stale Tauri binary because
+the user didn't restart `pnpm tauri dev` after a Rust change), the
+calendar's banner now shows a pointed message rather than a silent
+`console.warn`. Diagnostic, not a fix — but it means the user
+catches the "I need to restart the dev server" issue immediately.
+
+**Schema migration.** `ALTER TABLE events ADD COLUMN
+recurrence_rule TEXT` (idempotent — fails silently if the column
+already exists). `Event` struct gets `recurrence_rule:
+Option<String>` with `#[serde(default)]` so existing rows
+deserialise fine.
+
+**Hand-rolled RRULE expander.** No `rrule` npm package on the
+frontend; instead `expand_recurrence(master, window_start,
+window_end) -> Vec<Event>` in Rust. Supports the subset Cluster 11
+v1.1 ships through the modal UI:
+
+- `FREQ=DAILY|WEEKLY|MONTHLY` (required)
+- `INTERVAL=N` (default 1)
+- `BYDAY=MO,TU,WE,TH,FR,SA,SU` (WEEKLY only; defaults to master's
+  weekday when unspecified)
+- `BYMONTHDAY=N` (MONTHLY only; defaults to master's day-of-month)
+- `COUNT=N` (cap on emitted occurrences)
+- `UNTIL=YYYYMMDDTHHMMSSZ` (inclusive cutoff)
+
+Anything else is silently ignored — best-effort. A buggy rule is
+bounded by both `window_end` and a hard 5000-occurrence cap so it
+can't run away.
+
+**Shared helper.** `collect_events_in_window(conn, start, end)` is
+a private function called by both `list_events_in_range` (the
+calendar UI) and `regenerate_calendar_section` (the daily-note
+splice). Two passes: standalone events with overlap query, then
+recurring masters with full scan + per-master expansion. Sort by
+start. Without this, the splice wouldn't include recurring
+occurrences and the calendar's day view would silently disagree
+with the daily note about what's scheduled.
+
+**Repeat field in `EventEditModal`.** New "Repeat" section between
+Status and Notes. Top-level dropdown:
+
+- Doesn't repeat
+- Every day
+- Every week on…
+- Every 2 weeks on…
+- Every month (same date)
+- Custom (RRULE)
+
+Weekly / biweekly options expose a 7-button day-of-week multi-
+select. Custom shows a free-text RRULE input. The end-condition
+sub-row picks one of: Never / On date / After N occurrences.
+Existing rules round-trip back to UI state via `parseRRuleToUi`;
+exotic rules (BYSETPOS, BYWEEKNO, anything the parser doesn't
+recognise) fall into "Custom" so the user can still edit them as
+text.
+
+**React key composition.** Recurring events surface multiple
+instances with the same master `id` from `list_events_in_range`.
+WeekView and MonthView now key event blocks by `${id}@${start_at}`
+so React doesn't collapse the occurrences into a single entry.
+
+### Files touched (v1.1)
+
+- `src-tauri/src/lib.rs`
+  - Schema migration `ALTER TABLE events ADD COLUMN
+    recurrence_rule TEXT`.
+  - `Event` struct: `recurrence_rule: Option<String>` with
+    `#[serde(default)]`.
+  - `expand_recurrence` (the RRULE engine).
+  - Helpers: `parse_rrule_until`, `days_from_civil`,
+    `unix_from_ymd_hms`, `days_in_month`, `ymd_from_unix`,
+    `hms_from_unix`, `weekday_iso_for_unix`,
+    `weekday_iso_index_from_short`.
+  - `collect_events_in_window` (shared by the two callers).
+  - `list_events_in_range` rewritten to delegate.
+  - `regenerate_calendar_section` rewritten to delegate.
+  - `format_calendar_markdown` indents event body under each event.
+  - `create_event` / `update_event` accept `recurrence_rule:
+    Option<String>` and persist the cleaned value.
+- `src/components/Calendar.tsx`
+  - `CalendarEvent` interface: `recurrence_rule?: string | null`.
+  - `saveEdit` / `deleteEdit`: invoke
+    `regenerate_calendar_section` on today's daily note after
+    success.
+  - `regenerateTodaysDailyNote` helper, with visible error banner
+    on failure.
+  - `todayLocalIso` helper (matches Rust's `today_iso_date`).
+  - WeekView + MonthView render keys composed from `id + start_at`.
+- `src/components/EventEditModal.tsx`
+  - `RepeatPreset` / `EndCondition` types.
+  - State: `repeat`, `repeatDays`, `endCondition`, `customRRule`.
+  - Repeat UI block (dropdown + day-of-week buttons + custom
+    RRULE input + end-condition row + caveat hint).
+  - `parseRRuleToUi` (load existing rule into UI state).
+  - `buildRRuleFromUi` (UI state → RRULE string for save).
+  - `submit` includes `recurrence_rule` in the payload.
+  - New styles for the recurrence block.
+- `verify-cluster-11.ps1` — bumped tag pattern + commit message
+  to v1.1; v1.0 tag is preserved as a checkpoint.
+
+### Known rough edges (v1.1)
+
+- **Whole-series edits only.** Editing any occurrence of a
+  recurring event modifies the master, which propagates to every
+  instance. Cluster doc explicitly flagged this as the hard
+  problem; v1.2 candidate. Until then, "delete just this one"
+  isn't possible — the user has to delete the series and recreate
+  the rule with the desired exception manually.
+- **No EXDATE / RDATE.** Unsupported in v1.1's expander. Custom
+  RRULE input accepts EXDATE/RDATE strings but the expander
+  ignores them.
+- **`regenerate_calendar_section` uses UTC midnight bounds** —
+  unchanged from v1.0. Around midnight in non-UTC zones, edge-of-
+  day events may fall outside the splice window. Same drift
+  Cortex's `today_iso_date` already accepts elsewhere.
+- **`local_hhmm_for` still emits UTC HH:MM in the splice.** The
+  calendar UI itself renders local time correctly via `new
+  Date()`. Local-time splice rendering deferred (was a v1.1
+  candidate; pushed because the recurrence work soaked the
+  session).
+- **Custom RRULE has no validator.** An unparseable string is
+  stored verbatim; the expander treats unknown FREQ as
+  "single occurrence at master start". Bad rules degrade to
+  non-recurring rather than crashing.
+- **The "After N occurrences" count counts ALL occurrences from
+  the master's start**, not just those inside the visible window.
+  So COUNT=10 with a master in 2024 means 10 instances total
+  starting 2024, of which the user may see 0 in the current
+  visible window. Standard RRULE semantics, but worth knowing.
+- **Multi-slot live update for the daily note** still requires
+  re-clicking into the daily note's pane. The post-save regen
+  rewrites the file on disk; if the daily note is open in
+  another slot, that pane caches `editedBody` until the user
+  bumps `reloadTick` (Ctrl+R or click another file then back).
+  v1.2 candidate.
+- **`parseRRuleToUi` falls into "custom" for any rule shape it
+  doesn't recognise.** That means a rule the parser couldn't
+  classify presents as a free-text input on next edit, which is
+  honest but slightly clunky. Acceptable for v1.1.
+
+---
+
+## Phase 3 — Cluster 11 v1.2 — Calendar timezone fixes
+
+User report: "It only registers the event that the 'Now' line is on,
+and the hours are wrong." Both symptoms had the same root cause:
+v1.0 / v1.1's daily-note splice was UTC-everything.
+
+### What was wrong
+
+`regenerate_calendar_section` computed the "today" window as UTC
+midnight to UTC next-midnight:
+
+```rust
+let day_start = today_secs - (today_secs % 86_400);  // UTC midnight
+let day_end = day_start + 86_400;
+```
+
+Events are stored in UTC unix seconds (correct). But the user's
+"today" runs from local midnight to local midnight. For the user
+in Arizona (MST = UTC-7), Arizona midnight = 07:00 UTC, so the
+splice's window covered 17:00 MST yesterday through 17:00 MST
+today — a UTC-anchored 24h slice, not a local day. Events created
+after 5pm local fell into the *next* UTC day and were spuriously
+excluded from "today's" splice. The user's "now" event happened to
+straddle the UTC midnight, which is why it appeared to be the only
+one that registered.
+
+The matching half ("hours are wrong") was the splice's HH:MM
+formatter. `local_hhmm_for(secs)` despite the misleading name
+formatted UTC HH:MM — so a 12:00 noon MST event (= 19:00 UTC)
+rendered as `"19:00"` in the markdown.
+
+The basename check (`today_iso_date()` vs the daily note's
+filename) was also UTC-vs-local mismatched. During the hours when
+the user's local date trailed the UTC date by one (5pm-midnight
+Arizona = 00:00-07:00 UTC next day), the basename check returned
+early and the splice did nothing at all.
+
+### What changed
+
+- **`regenerate_calendar_section` takes `tz_offset_minutes: i32`**.
+  Frontend passes `-new Date().getTimezoneOffset()` (positive east
+  of UTC, negative west — Arizona = -420). The basename check
+  compares against local-today via the new `local_iso_date_for`
+  helper. The day-window calculation shifts unix seconds by the
+  offset, rounds to local-day boundaries, and converts back to UTC
+  unix seconds before issuing the SQL query.
+- **`format_calendar_markdown` takes `tz_offset_minutes`** and
+  formats HH:MM via the new `local_hhmm_for_with_offset` helper.
+- **Old `local_hhmm_for` removed** — the misleading-name UTC-HH:MM
+  helper no longer has callers. Cleanup, not a behaviour change.
+- **Two call sites updated**: `App.selectFileInSlot`'s daily-log
+  branch and `Calendar.regenerateTodaysDailyNote` both pass
+  `tzOffsetMinutes: -new Date().getTimezoneOffset()` on every
+  invocation.
+
+### Architectural choice: pass-the-offset vs add-a-tz-crate
+
+I did NOT add a Rust timezone crate (`chrono`, `time`, `tzfile`).
+Reasons: (a) the project's existing date helpers are hand-rolled
+to avoid `chrono` (see the comment on `today_iso_date`), and (b)
+the offset is trivially available from JS via standard browser
+APIs. The frontend is the source of truth for "what is the user's
+local time"; the Rust side just receives the answer. Saves ~1MB
+of binary, no system tz database lookup, no DST transitions
+during a fetch, no surprise stale tz tables.
+
+The trade-off: if the user changes their system clock /
+timezone while Cortex is open and doesn't refresh the page,
+the offset Rust receives can drift from reality. Acceptable
+— the same drift would affect any browser app and is corrected
+by any new daily-note open.
+
+### Files touched (v1.2)
+
+- `src-tauri/src/lib.rs`
+  - New helpers: `local_hhmm_for_with_offset(utc_secs,
+    tz_offset_minutes)`, `local_iso_date_for(utc_secs,
+    tz_offset_minutes)`.
+  - Removed: `local_hhmm_for`.
+  - `format_calendar_markdown` signature gains
+    `tz_offset_minutes: i32`.
+  - `regenerate_calendar_section` signature gains
+    `tz_offset_minutes: i32` and uses local-day window logic +
+    local-today basename check.
+- `src/App.tsx` — `selectFileInSlot` calendar branch passes
+  `tzOffsetMinutes`.
+- `src/components/Calendar.tsx` — `regenerateTodaysDailyNote`
+  passes `tzOffsetMinutes`.
+- `verify-cluster-11.ps1` — bumped to tag `cluster-11-v1.2-complete`,
+  preserving v1.0 / v1.1 checkpoints.
+
+### Known rough edges (v1.2)
+
+- **`list_events_in_range` does not currently take an offset**
+  because the frontend already computes its window in local
+  terms (`mondayStartLocal` returns the UTC unix-second
+  equivalent of local Monday midnight). So the calendar UI was
+  always correct — only the splice was wrong. This means there
+  are now two independent paths to the same SQL query, both
+  producing the right window in different ways. v1.3 candidate:
+  thread the offset through `list_events_in_range` for symmetry,
+  even though it doesn't change behaviour.
+- **DST transitions** mid-event are not handled — an event
+  spanning a DST boundary uses a single offset for both ends.
+  `getTimezoneOffset()` returns the offset for the moment it's
+  called, not for each event's start. For Arizona this is
+  irrelevant (no DST observed). For other zones, an event from
+  01:00 to 03:00 on a "spring forward" night would have its
+  splice hours off by one. Acceptable for v1.2; v1.3 if it bites.
+- **The `Now` line in WeekView** is also derived from a JS
+  `Date.now()`, which is local-time-correct already. No fix
+  needed there.
+
+---
+
+## Phase 3 — Cluster 10 v1.2 + Cluster 6 v1.7 follow-ups
+
+Two unrelated regressions reported in the same session.
+
+### Cluster 10 v1.2 — yesterday's commits in today's daily note
+
+`fetch_github_summary_inner` was passing `iso_24h_ago()` as the
+`?since=` parameter to GitHub's commits API — a rolling 24-hour
+window from now. The `## Today's GitHub activity` heading promises
+"today's" activity, but a rolling window naturally includes commits
+made yesterday afternoon when opened today morning. User reported
+this as a bug.
+
+Fix: introduce `since_local_midnight_today_iso(tz_offset_minutes)`
+which computes the UTC unix-second timestamp of "the start of
+today's local day" (using the same shift-then-round-then-shift
+trick the v1.2 calendar fix uses). Replaced the `iso_24h_ago` call
+with this. Removed `iso_24h_ago` (had no other callers).
+
+The cache fingerprint now includes `local_today_iso` so a cache
+populated yesterday is automatically considered stale today,
+regardless of the 10-minute TTL.
+
+Three Tauri commands took on a new `tz_offset_minutes: i32`
+parameter — `fetch_github_summary`, `fetch_github_summary_now`,
+`regenerate_github_section`. Three frontend call sites updated:
+`App.selectFileInSlot` (daily-log GitHub regen), `App.tsx`'s
+`Ctrl+Shift+G` insert-at-cursor handler, and
+`IntegrationsSettings.testConnection`. All pass
+`tzOffsetMinutes: -new Date().getTimezoneOffset()`. The
+`regenerate_github_section` basename check also moved from
+`today_iso_date()` (UTC) to `local_iso_date_for(unix_now(),
+tz_offset_minutes)` so the splice runs against the right daily
+note when the user's local date and UTC date disagree.
+
+### Cluster 6 v1.7 — Ctrl+K on PDFs broken in single-slot
+
+User reported "Ctrl+K search on PDFs is not working anymore."
+Root cause was a v1.6 regression I introduced when adding the
+`isActive` gate to PDFReader's window keydown listener.
+
+App.tsx had been passing `isActive={activeSlotIdx === i &&
+slotCount > 1}` to TabPane — semantically "this is the active
+slot AND we're in multi-slot mode," which doubled as both the
+keyboard-routing signal AND the visual accent-outline trigger.
+In single-slot mode `slotCount > 1` is false, so `isActive` was
+false on the only pane. My v1.6 PDFReader gate `if (!isActive)
+return;` then suppressed every Ctrl+K press in single-slot.
+
+Fix: split the prop. `isActive` now means purely "this is the
+active slot" (true for the only pane in single-slot AND for the
+active pane in multi-slot). A new `multiSlot: boolean` prop
+drives the visual chrome — the accent outline on `paneRoot` and
+the SlotBadge — both of which only render when `multiSlot &&
+isActive`.
+
+This restores single-slot Ctrl+K (PDFReader's gate now lets the
+event through) while preserving the existing visual behaviour
+(no outline / badge in single-slot mode, since the user has
+nothing to disambiguate against). Multi-slot Ctrl+K behaviour
+is unchanged: only the active slot's PDFReader toggles its
+search bubble, since `isActive` is still false for inactive
+slots in multi-slot mode.
+
+### Files touched (v1.2 / v1.7)
+
+- `src-tauri/src/lib.rs`
+  - New `since_local_midnight_today_iso(tz_offset_minutes)`.
+  - Removed `iso_24h_ago`.
+  - `github_config_fingerprint` signature gained a
+    `local_today_iso` parameter.
+  - `fetch_github_summary_inner` signature gained
+    `tz_offset_minutes: i32`; uses it for the cache fingerprint
+    and the `?since=` window.
+  - Three Tauri commands updated to pass through
+    `tz_offset_minutes`.
+  - `regenerate_github_section`'s basename check switched to
+    `local_iso_date_for(unix_now(), tz_offset_minutes)`.
+- `src/App.tsx`
+  - `<TabPane isActive=...>` changed from `activeSlotIdx === i
+    && slotCount > 1` to `activeSlotIdx === i || slotCount === 1`.
+  - New `multiSlot={slotCount > 1}` prop.
+  - Three GitHub invoke calls updated to pass
+    `tzOffsetMinutes`.
+- `src/components/TabPane.tsx`
+  - `TabPaneProps` gained `multiSlot: boolean`.
+  - Outline and SlotBadge render gated on `isActive && multiSlot`
+    (was `isActive`).
+- `src/components/IntegrationsSettings.tsx`
+  - `fetch_github_summary_now` invoke includes
+    `tzOffsetMinutes`.
+- `verify-cluster-10.ps1` — bumped to tag
+  `cluster-10-v1.2-complete` + `cluster-6-v1.7-complete` on the
+  same commit, preserving v1.0 / v1.1 / v1.6 checkpoints.

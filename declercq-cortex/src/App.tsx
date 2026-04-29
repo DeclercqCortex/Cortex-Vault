@@ -392,14 +392,32 @@ function App() {
         // Cluster 10 — GitHub auto-section. The Rust side is
         // gated to today's daily note only and to a populated
         // config; past daily notes and unconfigured users are
-        // no-ops by design.
+        // no-ops by design. tzOffsetMinutes makes the "today"
+        // boundary AND the GitHub /commits ?since= window use
+        // the user's local day rather than UTC.
         try {
           await invoke("regenerate_github_section", {
             vaultPath,
             filePath: path,
+            tzOffsetMinutes: -new Date().getTimezoneOffset(),
           });
         } catch (e) {
           console.warn("regenerate_github_section failed:", e);
+        }
+        // Cluster 11 — Calendar auto-section. Same today-only gate
+        // as GitHub. No-op when no events exist for today (renders
+        // an italic "(no events scheduled)" placeholder).
+        // tzOffsetMinutes is signed minutes east of UTC; the Rust
+        // side uses it to compute the local-day window and to
+        // render HH:MM in local time (v1.2 fix).
+        try {
+          await invoke("regenerate_calendar_section", {
+            vaultPath,
+            filePath: path,
+            tzOffsetMinutes: -new Date().getTimezoneOffset(),
+          });
+        } catch (e) {
+          console.warn("regenerate_calendar_section failed:", e);
         }
       }
     }
@@ -703,7 +721,9 @@ function App() {
               markdown: string;
               last_fetch_iso: string;
               error: string;
-            }>("fetch_github_summary");
+            }>("fetch_github_summary", {
+              tzOffsetMinutes: -new Date().getTimezoneOffset(),
+            });
             const handle = paneRefs.current[activeSlotIdx];
             if (handle) {
               handle.insertGitHubMarkdown(summary.markdown);
@@ -967,7 +987,8 @@ function App() {
           slotIndex={i}
           vaultPath={vaultPath}
           indexVersion={indexVersion}
-          isActive={activeSlotIdx === i && slotCount > 1}
+          isActive={activeSlotIdx === i || slotCount === 1}
+          multiSlot={slotCount > 1}
           bumpIndex={() => setIndexVersion((v) => v + 1)}
           setError={(msg) => setError(msg)}
           onActivate={() => activatePane(i)}
@@ -1161,6 +1182,16 @@ function App() {
                     + Block
                   </button>
                   <ReviewsMenu onPick={pickDestination} />
+                  <button
+                    onClick={() => {
+                      const handle = paneRefs.current[activeSlotIdx];
+                      if (handle) handle.setActiveView("calendar");
+                    }}
+                    style={baseStyles.changeBtn}
+                    title="Open calendar"
+                  >
+                    Cal
+                  </button>
                   <button
                     onClick={() => setIntegrationsOpen(true)}
                     style={baseStyles.changeBtn}
