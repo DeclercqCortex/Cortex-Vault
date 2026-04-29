@@ -15,10 +15,15 @@ interface EventEditModalProps {
     payload: Omit<CalendarEvent, "id" | "created_at" | "updated_at"> & {
       id?: string;
       recurrence_rule?: string | null;
+      notify_mode?: string | null;
+      notify_lead_minutes?: number | null;
     },
   ) => void;
   onDelete: (id: string) => void;
 }
+
+type NotifyMode = "none" | "all_day" | "urgent" | "ahead";
+const LEAD_PRESETS = [5, 10, 15, 30, 60, 120, 1440] as const;
 
 type RepeatPreset =
   | "none"
@@ -77,6 +82,9 @@ export function EventEditModal({
     kind: "never",
   });
   const [customRRule, setCustomRRule] = useState("");
+  // v1.4 notification UI state.
+  const [notifyMode, setNotifyMode] = useState<NotifyMode>("none");
+  const [notifyLead, setNotifyLead] = useState<number>(15);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
 
@@ -103,6 +111,23 @@ export function EventEditModal({
       setRepeatDays(new Set(parsed.days));
       setEndCondition(parsed.endCondition);
       setCustomRRule(parsed.customRRule);
+      // v1.4: load saved notification config.
+      const savedMode = (existingEvent.notify_mode ?? "none") as string;
+      if (
+        savedMode === "all_day" ||
+        savedMode === "urgent" ||
+        savedMode === "ahead"
+      ) {
+        setNotifyMode(savedMode);
+      } else {
+        setNotifyMode("none");
+      }
+      setNotifyLead(
+        existingEvent.notify_lead_minutes != null &&
+          existingEvent.notify_lead_minutes >= 0
+          ? existingEvent.notify_lead_minutes
+          : 15,
+      );
     } else {
       setTitle("");
       setStartLocal(unixToLocalInputValue(defaultStart, false));
@@ -115,6 +140,8 @@ export function EventEditModal({
       setRepeatDays(new Set());
       setEndCondition({ kind: "never" });
       setCustomRRule("");
+      setNotifyMode("none");
+      setNotifyLead(15);
     }
     setError(null);
     setTimeout(() => titleRef.current?.focus(), 0);
@@ -169,6 +196,11 @@ export function EventEditModal({
       return;
     }
 
+    // v1.4: serialise notification config. None → null on disk.
+    const notify_mode_value = notifyMode === "none" ? null : notifyMode;
+    const notify_lead_value =
+      notifyMode === "ahead" ? Math.max(0, Math.round(notifyLead) || 0) : null;
+
     onSave({
       id: existingEvent?.id,
       title: trimmedTitle,
@@ -179,6 +211,8 @@ export function EventEditModal({
       status,
       body,
       recurrence_rule,
+      notify_mode: notify_mode_value,
+      notify_lead_minutes: notify_lead_value,
     });
   }
 
@@ -424,6 +458,76 @@ export function EventEditModal({
           )}
         </div>
 
+        {/* v1.4 — notification config. */}
+        <div style={styles.recurrenceBlock}>
+          <span style={styles.labelText}>Notification</span>
+          <select
+            value={notifyMode}
+            onChange={(e) => setNotifyMode(e.target.value as NotifyMode)}
+            style={styles.input}
+          >
+            <option value="none">None</option>
+            <option value="all_day">All day on the event date</option>
+            <option value="urgent">Urgent (always red, until resolved)</option>
+            <option value="ahead">Ahead of time…</option>
+          </select>
+
+          {notifyMode === "ahead" && (
+            <div style={styles.endRow}>
+              <span style={styles.fieldLabelInline}>Notify</span>
+              <select
+                value={
+                  LEAD_PRESETS.includes(
+                    notifyLead as (typeof LEAD_PRESETS)[number],
+                  )
+                    ? String(notifyLead)
+                    : "custom"
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "custom") {
+                    // Keep current value; user will edit the number
+                    // input below.
+                    return;
+                  }
+                  setNotifyLead(Number(v));
+                }}
+                style={styles.endSelect}
+              >
+                {LEAD_PRESETS.map((m) => (
+                  <option key={m} value={String(m)}>
+                    {formatLeadLabel(m)} before
+                  </option>
+                ))}
+                <option value="custom">Custom…</option>
+              </select>
+              <input
+                type="number"
+                min={0}
+                max={10080}
+                value={notifyLead}
+                onChange={(e) =>
+                  setNotifyLead(Math.max(0, Number(e.target.value) || 0))
+                }
+                style={{ ...styles.endInput, maxWidth: "90px" }}
+                title="Minutes before the event"
+              />
+              <span style={styles.fieldHint}>min</span>
+            </div>
+          )}
+
+          {notifyMode !== "none" && (
+            <p style={styles.recurrenceHint}>
+              {notifyMode === "all_day" &&
+                "Shows in the bell all day on the event's date; turns red the day after if not resolved."}
+              {notifyMode === "urgent" &&
+                "Shows in the bell as past-due (red) immediately and stays until resolved."}
+              {notifyMode === "ahead" &&
+                `Notification fires ${formatLeadLabel(notifyLead)} before the event start. Stays in the bell until you dismiss it or the event passes.`}
+            </p>
+          )}
+        </div>
+
         <label style={styles.label}>
           <span style={styles.labelText}>
             Notes — supports <code>[[wikilinks]]</code> to vault notes
@@ -643,6 +747,17 @@ const WEEKDAY_ORDER: Record<string, number> = {
 
 function weekdayOrder(s: string): number {
   return WEEKDAY_ORDER[s.toUpperCase()] ?? 99;
+}
+
+function formatLeadLabel(minutes: number): string {
+  if (minutes <= 0) return "at start";
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 60 * 24) {
+    const h = Math.round((minutes / 60) * 10) / 10;
+    return `${h} h`;
+  }
+  const d = Math.round((minutes / (60 * 24)) * 10) / 10;
+  return `${d} day${d === 1 ? "" : "s"}`;
 }
 
 function isoWeekdayShortFromUnix(unix: number): string {

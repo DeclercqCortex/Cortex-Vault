@@ -11,6 +11,8 @@ import { ColorLegend } from "./components/ColorLegend";
 import { ExperimentBlockModal } from "./components/ExperimentBlockModal";
 import { InsertTableModal } from "./components/InsertTableModal";
 import { IntegrationsSettings } from "./components/IntegrationsSettings";
+import { ReminderOverlay } from "./components/ReminderOverlay";
+import { NotificationBell } from "./components/NotificationBell";
 import { ThemeToggle, useTheme } from "./components/ThemeToggle";
 import {
   NewHierarchyModal,
@@ -195,6 +197,11 @@ function App() {
   const [tableModalOpen, setTableModalOpen] = useState(false);
   // Cluster 10 — Integrations settings (currently GitHub-only).
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
+  // Cluster 15 — Reminders overlay (Ctrl+Shift+M) and a tick the
+  // overlay bumps after every save so the NotificationBell refreshes
+  // immediately rather than waiting for its 30s poll.
+  const [reminderOverlayOpen, setReminderOverlayOpen] = useState(false);
+  const [reminderRefreshTick, setReminderRefreshTick] = useState(0);
   // Slot picker (used when a search-palette result needs routing in
   // multi-slot layouts).
   const [pendingSlotChoice, setPendingSlotChoice] = useState<{
@@ -737,12 +744,30 @@ function App() {
         // Cluster 10 — open Integrations settings modal.
         e.preventDefault();
         setIntegrationsOpen(true);
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key === "C" || e.key === "c")
+      ) {
+        // Cluster 11 — switch the active slot to the Calendar view.
+        e.preventDefault();
+        const handle = paneRefs.current[activeSlotIdx];
+        if (handle) handle.setActiveView("calendar");
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key === "M" || e.key === "m")
+      ) {
+        // Cluster 15 — open the Reminders overlay (modal, not a slot).
+        e.preventDefault();
+        setReminderOverlayOpen(true);
       } else if (e.key === "Escape") {
         setPaletteOpen(false);
         setHelpOpen(false);
         setHierarchyKind(null);
         setTableModalOpen(false);
         setIntegrationsOpen(false);
+        setReminderOverlayOpen(false);
         setPendingSlotChoice(null);
       }
     };
@@ -1253,6 +1278,10 @@ function App() {
           <span style={baseStyles.activeSlotLabel}>
             {slotCount > 1 ? `Active: slot ${activeSlotIdx + 1}` : ""}
           </span>
+          <NotificationBell
+            vaultPath={vaultPath}
+            refreshTick={reminderRefreshTick}
+          />
           <LayoutPicker mode={layoutMode} onChange={setLayoutMode} />
         </div>
 
@@ -1364,6 +1393,13 @@ function App() {
       <IntegrationsSettings
         isOpen={integrationsOpen}
         onClose={() => setIntegrationsOpen(false)}
+      />
+      <ReminderOverlay
+        vaultPath={vaultPath}
+        isOpen={reminderOverlayOpen}
+        onClose={() => setReminderOverlayOpen(false)}
+        onChanged={() => setReminderRefreshTick((t) => t + 1)}
+        onOpenInPane={(filePath) => selectFileInSlot(filePath, activeSlotIdx)}
       />
     </div>
   );

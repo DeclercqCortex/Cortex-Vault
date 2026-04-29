@@ -1,5 +1,28 @@
 # verify-cluster-11.ps1
-# Phase 3 Cluster 11 — Personal Calendar (v1.2)
+# Phase 3 Cluster 11 — Personal Calendar (v1.4)
+#
+# v1.4 follow-ups vs v1.3:
+#   - Per-event notifications. Schema migration adds events.notify_mode
+#     (TEXT: NULL / "all_day" / "urgent" / "ahead") and
+#     events.notify_lead_minutes (INTEGER, used only for "ahead").
+#     create_event / update_event / Event struct gain matching fields;
+#     SELECTs in collect_events_in_window pull them; expand_recurrence
+#     carries them through to expanded instances so recurring events
+#     get per-instance notifications for free.
+#   - EventEditModal grows a Notification block (between Repeat and
+#     Notes): mode dropdown plus a conditional "minutes ahead" preset
+#     selector + custom number input when mode === "ahead". Existing
+#     events round-trip the saved values.
+#   - NotificationBell merges file-source reminders with synthetic
+#     event-source reminders. all_day → all-day-active for the event
+#     date (past-due if event date is in the past). urgent → forced
+#     past-due (red), persists until dismissed. ahead → "future"
+#     (hidden) before trigger, "approaching" from trigger to event
+#     start, "past-due" afterwards. Resolve dispatches by source:
+#     file lines are deleted from disk; event synthetics get a
+#     localStorage dismiss flag keyed on (event-id, instance-start)
+#     so dismissing one occurrence of a recurring event doesn't
+#     silence the rest.
 #
 # v1.2 follow-ups vs v1.1:
 #   - Timezone bug fixes. The daily-note splice was computing the
@@ -190,18 +213,20 @@ try {
 Write-Host "==> 3/4  Stage and commit" -ForegroundColor Cyan
 git add .
 if ((git diff --cached --name-only).Length -gt 0) {
-    git commit -m "Cluster 11 v1.2 - Calendar timezone fixes: regenerate_calendar_section now takes tz_offset_minutes (signed minutes east of UTC, frontend passes -new Date().getTimezoneOffset()). Day window computed against the user's local day (00:00-24:00 local converted to UTC unix-second bounds for the SQL query), basename check uses local-today, HH:MM formatted in local time inside the splice via new local_hhmm_for_with_offset / local_iso_date_for helpers; old UTC-only local_hhmm_for removed. Closes the 'only the Now event registers' and 'hours are wrong' reports — root cause was UTC midnight bounds meaning events after 5pm local in Arizona MST fell into the next UTC day and the splice rendered times in UTC. Includes prior v1.1 work: body content flows into ## Today's calendar daily-note section so wikilinks resolve as live links; Calendar.saveEdit/deleteEdit invoke regenerate_calendar_section on today's daily-note path; visible error banner on regen failure; recurrence engine (schema migration adds events.recurrence_rule; Repeat field in EventEditModal with Daily/Weekly+BYDAY/Biweekly/Monthly/Custom presets and Never/On date/After N end conditions; hand-rolled Rust RRULE expander supports FREQ=DAILY/WEEKLY/MONTHLY plus INTERVAL/BYDAY/BYMONTHDAY/COUNT/UNTIL; collect_events_in_window helper shared by list_events_in_range + regenerate_calendar_section; React keys composed from id+start_at to dedupe recurring occurrences). v1.2 ships whole-series edits only (per-instance modification still deferred); textarea body editor unchanged (TipTap mount deferred)."
+    git commit -m "Cluster 11 v1.4 - per-event notifications: schema migration adds events.notify_mode (NULL / 'all_day' / 'urgent' / 'ahead') and events.notify_lead_minutes (INTEGER, only for 'ahead'). Event struct + create_event/update_event signatures + collect_events_in_window SELECTs + expand_recurrence pickup the new fields so recurring events get per-instance notifications for free. EventEditModal grows a Notification block between Repeat and Notes: mode dropdown plus conditional minutes-ahead preset (5/10/15/30/60/120/1440) + custom number input. NotificationBell now merges file-source reminders with synthetic event-source reminders via new synthesizeEventReminders helper: all_day = all-day-active on event date (past-due if past), urgent = forced past-due red until dismissed, ahead = future (hidden) before trigger / approaching from trigger to event_start / past-due after. Resolve dispatches by source — file lines deleted from disk (existing); event synthetics get a localStorage dismiss flag keyed (event-id @ instance-start) so dismissing Monday's standup doesn't silence Tuesday's. Includes prior v1.1-v1.3 work (recurrence engine; body content in daily-note splice so wikilinks resolve; Calendar.saveEdit/deleteEdit invoke regenerate_calendar_section on today's daily-note path; visible regen-failure banner; tz_offset_minutes for local-day window + local HH:MM in splice; Ctrl+Shift+C calendar shortcut)."
 } else {
     Write-Host "    (nothing to commit; tagging current HEAD)" -ForegroundColor DarkGray
 }
 
-Write-Host "==> 4/4  Tag cluster-11-v1.2-complete" -ForegroundColor Cyan
+Write-Host "==> 4/4  Tag cluster-11-v1.4-complete" -ForegroundColor Cyan
 git tag -f cluster-11-v1.0-complete   # keep the v1.0 checkpoint
 git tag -f cluster-11-v1.1-complete   # keep the v1.1 checkpoint
-git tag -f cluster-11-v1.2-complete
+git tag -f cluster-11-v1.2-complete   # keep the v1.2 checkpoint
+git tag -f cluster-11-v1.3-complete   # keep the v1.3 checkpoint (Ctrl+Shift+C)
+git tag -f cluster-11-v1.4-complete
 
 Write-Host ""
-Write-Host "Done. Cluster 11 v1.2 (timezone fixes + recurrence) shipped:" -ForegroundColor Green
+Write-Host "Done. Cluster 11 v1.4 (per-event notifications) shipped:" -ForegroundColor Green
 Write-Host "  v1.0 foundation:" -ForegroundColor Green
 Write-Host "    - SQLite events + event_categories tables (5 seeded categories)" -ForegroundColor Green
 Write-Host "    - Eight Tauri commands (CRUD + regen-daily-section)" -ForegroundColor Green

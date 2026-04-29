@@ -1265,6 +1265,18 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
     // ALTER pattern as the marks migration above.
     let _ = conn.execute("ALTER TABLE events ADD COLUMN recurrence_rule TEXT", []);
 
+    // Cluster 11 v1.4 schema migration: per-event notification config.
+    //   notify_mode: NULL / 'all_day' / 'urgent' / 'ahead'
+    //   notify_lead_minutes: INTEGER, used only when mode = 'ahead'
+    // The notification bell synthesises reminder entries from these
+    // on every poll; nothing is written into Reminders.md as a side
+    // effect of saving an event.
+    let _ = conn.execute("ALTER TABLE events ADD COLUMN notify_mode TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE events ADD COLUMN notify_lead_minutes INTEGER",
+        [],
+    );
+
     // Cluster 11 — seed five starter categories on first init. The
     // user can edit colours / labels in the Categories settings panel
     // and add more. We only seed if the table is empty so we don't
@@ -4627,6 +4639,16 @@ pub struct Event {
     /// carry the same value through `list_events_in_range`.
     #[serde(default)]
     pub recurrence_rule: Option<String>,
+    /// v1.4: notification mode for this event. None = no
+    /// notification. Otherwise one of "all_day" | "urgent" |
+    /// "ahead". The notification bell synthesises reminder rows
+    /// from these on every poll.
+    #[serde(default)]
+    pub notify_mode: Option<String>,
+    /// v1.4: lead time in minutes for `notify_mode = "ahead"`.
+    /// Ignored otherwise.
+    #[serde(default)]
+    pub notify_lead_minutes: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -4744,6 +4766,8 @@ fn expand_recurrence(master: &Event, window_start: i64, window_end: i64) -> Vec<
                 created_at: master.created_at,
                 updated_at: master.updated_at,
                 recurrence_rule: master.recurrence_rule.clone(),
+                notify_mode: master.notify_mode.clone(),
+                notify_lead_minutes: master.notify_lead_minutes,
             });
         }
     };
@@ -4973,6 +4997,8 @@ fn create_event(
     status: String,
     body: String,
     recurrence_rule: Option<String>,
+    notify_mode: Option<String>,
+    notify_lead_minutes: Option<i64>,
 ) -> Result<Event, String> {
     if title.trim().is_empty() {
         return Err("Event title is empty".to_string());
@@ -4984,13 +5010,19 @@ fn create_event(
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let cleaned_mode = clean_notify_mode(notify_mode.as_deref());
+    let cleaned_lead = if cleaned_mode.as_deref() == Some("ahead") {
+        notify_lead_minutes.filter(|n| *n >= 0)
+    } else {
+        None
+    };
     let conn = open_or_init_db(&vault_path)?;
     let now = unix_now();
     let date_iso = today_iso_date();
     let id = next_event_id(&conn, &date_iso)?;
     conn.execute(
-        "INSERT INTO events (id, title, start_at, end_at, all_day, category, status, body, created_at, updated_at, recurrence_rule)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO events (id, title, start_at, end_at, all_day, category, status, body, created_at, updated_at, recurrence_rule, notify_mode, notify_lead_minutes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             title,
@@ -5003,6 +5035,8 @@ fn create_event(
             now,
             now,
             cleaned_rule,
+            cleaned_mode,
+            cleaned_lead,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -5018,7 +5052,22 @@ fn create_event(
         created_at: now,
         updated_at: now,
         recurrence_rule: cleaned_rule,
+        notify_mode: cleaned_mode,
+        notify_lead_minutes: cleaned_lead,
     })
+}
+
+/// Whitelist the notify_mode value so a frontend bug can't poison
+/// the table. Anything outside the allowed set becomes None.
+fn clean_notify_mode(s: Option<&str>) -> Option<String> {
+    let trimmed = s?.trim();
+    if trimmed.is_empty() || trimmed == "none" {
+        return None;
+    }
+    match trimmed {
+        "all_day" | "urgent" | "ahead" => Some(trimmed.to_string()),
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -5033,6 +5082,8 @@ fn update_event(
     status: String,
     body: String,
     recurrence_rule: Option<String>,
+    notify_mode: Option<String>,
+    notify_lead_minutes: Option<i64>,
 ) -> Result<Event, String> {
     if title.trim().is_empty() {
         return Err("Event title is empty".to_string());
@@ -5044,6 +5095,12 @@ fn update_event(
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let cleaned_mode = clean_notify_mode(notify_mode.as_deref());
+    let cleaned_lead = if cleaned_mode.as_deref() == Some("ahead") {
+        notify_lead_minutes.filter(|n| *n >= 0)
+    } else {
+        None
+    };
     let conn = open_or_init_db(&vault_path)?;
     let now = unix_now();
     let affected = conn
@@ -5051,7 +5108,8 @@ fn update_event(
             "UPDATE events
              SET title = ?2, start_at = ?3, end_at = ?4, all_day = ?5,
                  category = ?6, status = ?7, body = ?8, updated_at = ?9,
-                 recurrence_rule = ?10
+                 recurrence_rule = ?10, notify_mode = ?11,
+                 notify_lead_minutes = ?12
              WHERE id = ?1",
             params![
                 id,
@@ -5064,6 +5122,8 @@ fn update_event(
                 body,
                 now,
                 cleaned_rule,
+                cleaned_mode,
+                cleaned_lead,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -5089,6 +5149,8 @@ fn update_event(
         created_at,
         updated_at: now,
         recurrence_rule: cleaned_rule,
+        notify_mode: cleaned_mode,
+        notify_lead_minutes: cleaned_lead,
     })
 }
 
@@ -5313,7 +5375,8 @@ fn collect_events_in_window(
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, start_at, end_at, all_day, category, status, body,
-                        created_at, updated_at, recurrence_rule
+                        created_at, updated_at, recurrence_rule,
+                        notify_mode, notify_lead_minutes
                  FROM events
                  WHERE recurrence_rule IS NULL
                    AND start_at < ?1 AND end_at > ?2
@@ -5334,6 +5397,8 @@ fn collect_events_in_window(
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                     recurrence_rule: row.get(10)?,
+                    notify_mode: row.get(11)?,
+                    notify_lead_minutes: row.get(12)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -5345,7 +5410,8 @@ fn collect_events_in_window(
         let mut stmt = conn
             .prepare(
                 "SELECT id, title, start_at, end_at, all_day, category, status, body,
-                        created_at, updated_at, recurrence_rule
+                        created_at, updated_at, recurrence_rule,
+                        notify_mode, notify_lead_minutes
                  FROM events
                  WHERE recurrence_rule IS NOT NULL",
             )
@@ -5364,6 +5430,8 @@ fn collect_events_in_window(
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                     recurrence_rule: row.get(10)?,
+                    notify_mode: row.get(11)?,
+                    notify_lead_minutes: row.get(12)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -5480,6 +5548,78 @@ fn regenerate_calendar_section(
 }
 
 // -----------------------------------------------------------------------------
+// Cluster 15 — Reminders (v1.0)
+// -----------------------------------------------------------------------------
+//
+// Single-file reminder system. The file lives at
+// `<vault>/Reminders.md`. Each non-empty, non-header line is a
+// reminder; the parser (frontend) extracts a leading YYYY-MM-DD
+// and/or HH:MM token, treating the rest as the description.
+//
+// Resolve = remove the matching line from the file. We match by
+// trimmed-content equality rather than line index so the operation
+// stays correct even if the user has hand-edited the file between
+// the modal/bell render and the resolve click.
+
+const REMINDERS_FILENAME: &str = "Reminders.md";
+
+fn reminders_path(vault_path: &str) -> PathBuf {
+    PathBuf::from(vault_path).join(REMINDERS_FILENAME)
+}
+
+#[tauri::command]
+fn read_reminders(vault_path: String) -> Result<String, String> {
+    let path = reminders_path(&vault_path);
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    fs::read_to_string(&path).map_err(|e| format!("Failed to read reminders: {}", e))
+}
+
+#[tauri::command]
+fn write_reminders(vault_path: String, content: String) -> Result<(), String> {
+    let path = reminders_path(&vault_path);
+    fs::write(&path, content).map_err(|e| format!("Failed to write reminders: {}", e))?;
+    let path_str = path.to_string_lossy().to_string();
+    // Reindex so the file shows up in the FTS5 / metadata tables
+    // alongside other markdown notes.
+    index_single_file(vault_path, path_str)?;
+    Ok(())
+}
+
+/// Remove the first line whose trimmed content matches the given
+/// `line_content` (also trimmed). Idempotent — returns Ok(()) if no
+/// match exists, so a stale notification panel resolving an already-
+/// removed reminder doesn't surface an error.
+#[tauri::command]
+fn delete_reminder_line(vault_path: String, line_content: String) -> Result<(), String> {
+    let path = reminders_path(&vault_path);
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let target = line_content.trim();
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let mut found = false;
+    let mut out_lines: Vec<&str> = Vec::with_capacity(lines.len());
+    for line in &lines {
+        if !found && line.trim() == target {
+            found = true;
+            continue;
+        }
+        out_lines.push(line);
+    }
+    if !found {
+        return Ok(());
+    }
+    let new_content = out_lines.join("\n");
+    fs::write(&path, &new_content).map_err(|e| e.to_string())?;
+    let path_str = path.to_string_lossy().to_string();
+    index_single_file(vault_path, path_str)?;
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // App entry
 // -----------------------------------------------------------------------------
 
@@ -5540,6 +5680,9 @@ pub fn run() {
             upsert_event_category,
             delete_event_category,
             regenerate_calendar_section,
+            read_reminders,
+            write_reminders,
+            delete_reminder_line,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

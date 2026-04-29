@@ -18,6 +18,10 @@ export interface CalendarEvent {
    *  recurring series. null on standalone events. Expanded
    *  occurrences carry the master's rule through. */
   recurrence_rule?: string | null;
+  /** v1.4: notification mode ('all_day' | 'urgent' | 'ahead') or null. */
+  notify_mode?: string | null;
+  /** v1.4: lead time in minutes when notify_mode === 'ahead'. */
+  notify_lead_minutes?: number | null;
 }
 
 export interface EventCategory {
@@ -169,6 +173,8 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
     payload: Omit<CalendarEvent, "id" | "created_at" | "updated_at"> & {
       id?: string;
       recurrence_rule?: string | null;
+      notify_mode?: string | null;
+      notify_lead_minutes?: number | null;
     },
   ) {
     try {
@@ -184,6 +190,8 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
           status: payload.status,
           body: payload.body,
           recurrenceRule: payload.recurrence_rule ?? null,
+          notifyMode: payload.notify_mode ?? null,
+          notifyLeadMinutes: payload.notify_lead_minutes ?? null,
         });
       } else {
         await invoke("create_event", {
@@ -196,6 +204,8 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
           status: payload.status,
           body: payload.body,
           recurrenceRule: payload.recurrence_rule ?? null,
+          notifyMode: payload.notify_mode ?? null,
+          notifyLeadMinutes: payload.notify_lead_minutes ?? null,
         });
       }
       closeEdit();

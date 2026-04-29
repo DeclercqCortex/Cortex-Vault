@@ -18,6 +18,11 @@ const ALWAYS: Row[] = [
   { keys: "Ctrl+Shift+B", action: "Insert ::experiment block in editor" },
   { keys: "Ctrl+Shift+T", action: "Insert a table at the cursor" },
   { keys: "Ctrl+Shift+G", action: "Insert today's GitHub summary at cursor" },
+  { keys: "Ctrl+Shift+C", action: "Switch active slot to the Calendar view" },
+  {
+    keys: "Ctrl+Shift+M",
+    action: "Open Reminders overlay (memo / quick-capture)",
+  },
   { keys: "Ctrl+,", action: "Open Integrations settings (GitHub)" },
   { keys: "Click", action: "(Tree) Open file in slot 1 (single/dual layout)" },
   { keys: "Ctrl+Click", action: "(Tree) Open file in slot 2 (dual layout)" },

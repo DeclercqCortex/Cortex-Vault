@@ -1978,3 +1978,346 @@ slots in multi-slot mode.
 - `verify-cluster-10.ps1` — bumped to tag
   `cluster-10-v1.2-complete` + `cluster-6-v1.7-complete` on the
   same commit, preserving v1.0 / v1.1 / v1.6 checkpoints.
+
+---
+
+## Phase 3 — Cluster 15 v1.0 — Reminders (+ Cluster 11 v1.3 calendar shortcut)
+
+User-driven feature in a single message: pop-up reminder overlay
+(modal-style, like the command palette — not a slot view), a
+notification bell with a count badge + sound + red urgency, line-
+based parser that splits date / time / description, and resolve =
+remove from disk.
+
+### Architectural choices
+
+- **Single file at `<vault>/Reminders.md`.** Visible in the file
+  tree, hand-editable as a regular markdown note, indexed in FTS5
+  alongside everything else. No SQLite table — overkill for this
+  shape of data and would invite a UI-only edit path that the
+  user couldn't fix with their text editor when needed.
+- **Line-based, not YAML or JSON.** The user's spec is "each line
+  is a reminder." The parser stays tolerant: anything it can't
+  parse (no leading date, no leading time) becomes a "no date / no
+  time / always-pending" reminder with the line as its
+  description. There's no failure mode where a line is silently
+  dropped.
+- **Markdown headings + checkboxes recognised.** Lines starting
+  with `#`/`##`/etc. are skipped (so users can group reminders
+  under sections without those headings becoming bogus reminders).
+  Checkbox prefixes (`- [ ]`, `- [x]`) and bare list-item prefixes
+  (`-`, `*`, `+`) are stripped before parsing — pasting a
+  Markdown todo list into Reminders.md "just works."
+- **Resolve = delete the line.** Per the user's spec ("once it
+  has been marked as resolved in the notification, remove that
+  reminder line from the reminder document"). Simpler than a
+  per-line `[x]` flag and matches the user's mental model. The
+  Tauri command matches on trimmed-content equality so a stale
+  notification panel resolving an already-edited line either
+  removes the right one or no-ops gracefully.
+- **WebAudio beep, no asset.** A 120ms 440Hz tone with a quick
+  fade-out, generated lazily per call. No `.wav` to ship, no
+  audio file in the binary, no licensing footnote. The
+  AudioContext is created and torn down each time so we don't
+  hold an open audio session indefinitely.
+- **30-second poll cadence.** Same precedent as the calendar's
+  "now" line. Cheap, and gives at most 30s of latency between a
+  reminder entering the 1-hour window and the bell reacting. Plus
+  the overlay's `onChanged` callback bumps a `refreshTick` prop
+  so the bell refreshes immediately after a save without waiting
+  for the next poll.
+- **Alerted state in `localStorage`.** Keyed on a 32-bit FNV-1a
+  hash of `(date, time, normalised description)`. Editing any of
+  those three fields produces a different hash and re-arms the
+  alert. Re-launching Cortex preserves the alerted state — so the
+  user doesn't get re-alerted at lunchtime for the morning's
+  approaching reminders. The alerted-state-key is removed when
+  the reminder is resolved, so re-creating an identical line
+  later behaves like a fresh reminder.
+- **Status bucket semantics.**
+  | Bucket | Meaning |
+  |---|---|
+  | `anytime` | No date, no time. Always in the bell badge. |
+  | `all-day-active` | Date == today, no time. In the bell badge for the whole day. |
+  | `approaching` | Date+time scheduled within the next 1 hour. Triggers a beep on transition. |
+  | `future` | Date+time more than 1 hour away. NOT in the bell badge — just lives in the file. |
+  | `past-due` | Date+time has passed (or all-day with date < today). In the bell badge AND forces the bell colour to red. |
+
+  Time-only entries (`14:30 Quick errand` with no date) are
+  interpreted as today; once the day rolls past, they re-classify
+  as past-due.
+- **Two adjacent UIs, not one.** The `ReminderOverlay`
+  (Ctrl+Shift+M) is a scrim-modal for editing the file as a
+  whole; the `NotificationBell` is for at-a-glance count + per-
+  reminder resolve. The user explicitly asked for both surfaces;
+  combining them would force a tab UI that didn't add anything.
+
+### Files touched (Cluster 15 + Cluster 11 v1.3)
+
+- `src-tauri/src/lib.rs`
+  - New constant `REMINDERS_FILENAME = "Reminders.md"`.
+  - New helper `reminders_path(vault_path)`.
+  - Three Tauri commands: `read_reminders`, `write_reminders`,
+    `delete_reminder_line`. The last one matches by trimmed-
+    content equality.
+  - `write_reminders` and `delete_reminder_line` both call
+    `index_single_file` so the file participates in FTS5.
+  - All three registered in the `invoke_handler!` macro.
+- `src/utils/reminders.ts` — new utility module:
+  - `parseReminderFile`, `parseReminderLine`.
+  - `computeStatus(r, now)`.
+  - `isActiveReminder`, `sortByUrgency`.
+  - `reminderHash` (32-bit FNV-1a of date|time|description).
+  - `playBeep` (WebAudio).
+  - `localIsoDate(d)` helper.
+- `src/components/ReminderOverlay.tsx` — new modal.
+  - Quick-add input that prepends a new line on Enter.
+  - Textarea showing the file verbatim.
+  - "Save & close" / "Cancel" / "Open in pane" actions.
+  - Click on the scrim → save-and-close (mirrors the rest of
+    Cortex's modal idiom).
+- `src/components/NotificationBell.tsx` — new top-bar button.
+  - 30-second poll + reload from disk + classify.
+  - Count badge with red urgency on past-due, accent otherwise.
+  - Click → dropdown panel with Resolve buttons.
+  - Plays a beep on approaching/past-due transitions; alerted
+    state in localStorage.
+  - Click-outside closes the dropdown.
+- `src/App.tsx`
+  - Imports + render of `ReminderOverlay` and `NotificationBell`.
+  - `reminderOverlayOpen` state, `reminderRefreshTick` state.
+  - `Ctrl+Shift+C` keyboard handler → active slot's
+    `setActiveView("calendar")` (Cluster 11 v1.3).
+  - `Ctrl+Shift+M` keyboard handler → `setReminderOverlayOpen(true)`.
+  - Esc clears the overlay along with other modals.
+  - `<NotificationBell>` rendered immediately to the LEFT of the
+    `LayoutPicker` in the main top bar (per the user's spec).
+- `src/components/ShortcutsHelp.tsx` — Ctrl+Shift+C and
+  Ctrl+Shift+M rows added.
+- `cluster_15_reminders.md` (repo root) — new cluster doc.
+- `phase_2_overview.md` — index updated.
+- `verify-cluster-15.ps1` — new.
+
+### Known rough edges (v1.0)
+
+- **Time-only with no date crosses midnight inelegantly.** A line
+  like `23:30 Wrap up` opened at 23:45 reads as past-due
+  (23:30 today already passed), but at 00:15 the next day it'd
+  re-read as "approaching" (23:30 today, ~22 hours away — wait,
+  that's "future"). The interpretation "today" can drift across
+  midnight. Acceptable for v1.0; the user can add a date to pin.
+- **Hand-editing the file while the overlay is open** is fine
+  for the bell (next poll picks it up, ≤30s) but the overlay
+  caches its own copy — if the user edits the file in another
+  pane while the overlay is open, the overlay won't reflect the
+  external change. Closing + reopening the overlay re-reads.
+  v1.1 candidate: a "refresh from disk" button.
+- **Sound played on app startup if a reminder is already past-due
+  and hasn't been alerted-for-past-due yet.** This is intended
+  (you should be reminded), but if the user has a long list of
+  unresolved past-due items, only one beep fires (we don't beep
+  N times for N transitions in the same render). Per-reminder
+  alerted tracking still works; the visual badge shows them all.
+- **AudioContext "needs user interaction" warning on first beep**
+  is theoretically possible but unlikely in practice — opening
+  Cortex IS a user interaction, and even a single click into the
+  app counts. Documented for the rare case where the first beep
+  is silent; subsequent ones work.
+- **The bell's `error` state** ("Couldn't read reminders: …") is
+  the diagnostic we surface when the Tauri binary doesn't yet
+  have the new commands. Same pattern as Cluster 11's "restart
+  pnpm tauri dev" hint.
+- **Dropdown panel position is anchored to the bell.** With the
+  bell next to the LayoutPicker in the top bar, the dropdown
+  reaches down into the calendar / editor area. If a TabPane has
+  modals open above the dropdown's z-index, the dropdown could
+  occlude them. v1's z-index is 1100 — below the modal scrims at
+  1300+ — so this should be fine. Worth checking if a future
+  modal overlaps awkwardly.
+- **Resolving a recurring task** (e.g., a daily standup written
+  as a single line) deletes the line entirely. v1.1 candidate:
+  recognise patterns like `daily 09:00 Standup` or
+  `weekly MON 10:00 1:1` and re-anchor instead of deleting.
+  Until then, recurring commitments belong on the Cluster 11
+  calendar with a real RRULE.
+
+---
+
+## Phase 3 — Cluster 11 v1.4 — per-event notifications
+
+User-driven feature: each calendar event can carry a notification
+config (none / all-day / urgent / ahead-of-time with user-specified
+lead). The notification bell merges these alongside the existing
+file-source reminders, so a single bell + dropdown surfaces both
+"things you typed in Reminders.md" and "events with notify enabled."
+
+### Architectural decision: synthetic, not file-side-effect
+
+Two ways to surface event notifications:
+
+**A.** When an event is saved, also write a corresponding line into
+   `Reminders.md` (with a hidden marker linking back to the event
+   id). Save/edit/delete of the event keeps that line in sync.
+**B.** When the bell polls, also fetch events with `notify_mode` set
+   and synthesise reminder rows from them on the fly. Nothing is
+   written to `Reminders.md` as a side effect.
+
+I went with B. Two reasons:
+
+- `Reminders.md` stays the user-typed truth source; events stay the
+  calendar truth source. There's no "find-and-update-by-marker"
+  logic to maintain when an event time moves. No risk of phantom
+  lines accumulating in `Reminders.md` if the linkage breaks.
+- Recurring events get notifications for free.
+  `list_events_in_range` already expands the master into instances
+  with their own `start_at`; each expanded instance generates its
+  own synthetic reminder. Approach A would have required either
+  N reminder lines per recurring event or an in-place lookup
+  scheme, both worse.
+
+The trade-off: synthetic reminders aren't visible in the
+`ReminderOverlay`'s textarea, and the user can't hand-edit them
+(the way they can hand-edit a line in `Reminders.md`). To "snooze"
+or change an event notification you go back to the calendar event
+modal. Acceptable — these are two surfaces with two purposes.
+
+### Status semantics per mode
+
+| mode      | trigger time           | bell visibility | bell colour            | beep when                        |
+|-----------|------------------------|-----------------|------------------------|----------------------------------|
+| all_day   | event date all day     | event date only (past-due if event date is in the past) | accent (today) / red (past)  | first poll where status crosses to past-due  |
+| urgent    | n/a                    | always (until dismissed) | red (forced past-due)  | first poll where the synthetic appears       |
+| ahead     | event_start - lead     | from trigger to event_start (approaching), thereafter past-due | accent then red       | first poll where now ≥ trigger              |
+
+The `future` bucket (status hasn't reached the trigger yet) is
+filtered out of the bell so users don't see scheduled-but-not-yet-
+fired notifications cluttering the panel. Once the trigger is
+reached, the synthetic appears, the badge increments, and the
+beep fires on the same render cycle (via the existing alerted-
+once tracking in `localStorage`).
+
+### Resolution semantics
+
+Resolve dispatches by source:
+
+- `source === "file"`: existing path. `delete_reminder_line`
+  removes the line from `Reminders.md`. The localStorage alerted
+  flag is cleared so re-creating an identical line later behaves
+  like a fresh reminder.
+- `source === "event"`: new path. `localStorage.setItem(
+  "cortex:event-notif-dismissed:<eventId>@<instanceStart>", "1")`.
+  No backend call. The event itself stays untouched on the
+  calendar. A `dismissTick` state in the bell forces an immediate
+  re-derive so the dismissed entry vanishes without waiting for
+  the next 30s poll.
+
+Per-instance keying (`eventId@instanceStart`) means dismissing
+this Monday's "Standup" doesn't silence Tuesday's. For non-
+recurring events it just degrades to one key.
+
+### Schema migration
+
+```sql
+ALTER TABLE events ADD COLUMN notify_mode TEXT;            -- NULL / 'all_day' / 'urgent' / 'ahead'
+ALTER TABLE events ADD COLUMN notify_lead_minutes INTEGER; -- only for 'ahead'
+```
+
+Same idempotent `let _ = conn.execute(...)` pattern as the existing
+`recurrence_rule` and `injected_at` migrations. Old vaults pick up
+the columns on first open with no migration step.
+
+A new `clean_notify_mode` helper whitelists the three valid mode
+strings server-side, so a frontend bug can't poison the table with
+an unknown value. `notify_lead_minutes` is auto-cleared to NULL
+when the mode isn't `ahead`.
+
+### UI
+
+`EventEditModal` gains a Notification block between the Repeat
+section and the Notes textarea. Mode dropdown (None / All day /
+Urgent / Ahead of time…). When mode === "ahead", a sub-row appears
+with a preset selector (5 / 10 / 15 / 30 / 60 / 120 / 1440 minutes
++ Custom) and a number input (the same field — the preset
+selector just snaps the number). A short hint text below explains
+what the picked mode does ("Notification fires 15 min before…").
+
+Existing events round-trip the saved values back into the UI on
+edit. Clearing the mode (back to "None") nulls both columns on
+save.
+
+### Files touched (v1.4)
+
+- `src-tauri/src/lib.rs`
+  - Schema migration: two `ALTER TABLE events ADD COLUMN` calls.
+  - `Event` struct: `notify_mode: Option<String>`,
+    `notify_lead_minutes: Option<i64>`, both with `#[serde(default)]`.
+  - `clean_notify_mode(s)` helper to whitelist the value.
+  - `create_event` / `update_event` signatures gain the two
+    parameters; INSERT and UPDATE statements include the new
+    columns.
+  - Both `collect_events_in_window` SELECT statements include the
+    new columns; the row-mapping closures construct the new fields.
+  - `expand_recurrence`'s `push_instance` closure carries the
+    notify fields through to expanded instances.
+- `src/components/Calendar.tsx`
+  - `CalendarEvent` interface gains `notify_mode?: string | null`,
+    `notify_lead_minutes?: number | null`.
+  - `saveEdit` payload type extended; both `update_event` and
+    `create_event` invoke calls forward
+    `notifyMode` / `notifyLeadMinutes`.
+- `src/components/EventEditModal.tsx`
+  - `NotifyMode` type; `LEAD_PRESETS` constant.
+  - `notifyMode` / `notifyLead` state.
+  - Round-trip from `existingEvent.notify_mode` /
+    `notify_lead_minutes` in the open-state effect.
+  - New Notification block in the JSX (between Repeat and Notes).
+  - `submit()` includes the two fields in the onSave payload.
+  - `formatLeadLabel(minutes)` helper.
+- `src/components/NotificationBell.tsx`
+  - Imports `CalendarEvent`, `localIsoDate`.
+  - `EVENT_DISMISSED_LS_PREFIX`, `EVENT_LOOKBACK_DAYS`,
+    `EVENT_LOOKAHEAD_DAYS` constants.
+  - `BellReminder` extends `ReminderWithStatus` with `source`,
+    `eventId`, `instanceStart`.
+  - `synthesizeEventReminders(events, now)` — three branches.
+  - `eventDismissKey`, `isEventDismissed`.
+  - State: `events`, `dismissTick`.
+  - `reload` now fetches events alongside reminders content.
+  - `eventReminders` memo + merged into `active`.
+  - `resolve` dispatches by source.
+  - List `key=` per row composed from source + identifier.
+
+### Known rough edges (v1.4)
+
+- **Editing notify_mode on a recurring event affects all
+  instances** — same whole-series-edit limitation as v1.1
+  recurrence. Per-instance notification overrides are reserved
+  for the same v1.5+ pass that adds per-instance event
+  modifications.
+- **Dismissed urgent events stay dismissed across reloads** —
+  good for the user (won't re-alert tomorrow) but slightly
+  surprising if they expect "urgent" to mean "always re-warn me."
+  The intent is "remind me until I acknowledge"; once
+  acknowledged it's silent.
+- **No "snooze" on event notifications.** Resolve is permanent
+  (per instance). Same v1.5 candidate as the reminder snooze.
+- **Event with `notify_mode = "ahead"` and a lead longer than
+  EVENT_LOOKAHEAD_DAYS (14 days)** would never appear in the
+  bell — the event isn't fetched into the polling window. The
+  default 14-day lookahead covers the LEAD_PRESETS up to 1 day,
+  which covers the realistic cases. Bumping the lookahead is a
+  one-line constant change if needed.
+- **EVENT_LOOKBACK_DAYS = 1** means past-due events stay in the
+  bell only while their date is within the last day; older
+  past-due events drop off. For urgent mode that's relevant —
+  an urgent flag on an event 3 weeks ago would not surface.
+  Document; v1.5 candidate to either bump the lookback or use a
+  separate query for urgent events specifically.
+- **The synthetic's React key** uses `eventId@instanceStart`
+  which is stable across renders. If the user moves the event's
+  start_at, the synthetic gets a new key — React unmounts and
+  remounts the row, the dismissed flag (also keyed on
+  instanceStart) is independent. This means moving the event's
+  start_at by even one minute creates a "fresh" notification
+  surface. Acceptable; matches users' mental model that "moving
+  the meeting" is a real change worth re-warning on.
