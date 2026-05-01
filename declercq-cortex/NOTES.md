@@ -2513,3 +2513,1989 @@ v1.4 shipped. The cluster doc walked the design before code (cluster
   Graph API for events. Estimated 1-2 days extension since the
   loopback listener + state validation + token refresh patterns
   are already established here.
+
+---
+
+## Phase 3 — Cluster 16 v1.0 — QoL pack
+
+Frontend-only ship: six small features the user reported as daily
+friction, bundled into a single 1.5-day cluster. Each item is too
+small to deserve its own cluster but big enough to need a doc and a
+paper trail. The cluster doc (`cluster_16_qol_pack.md`) explicitly
+slices the bigger original ask into Cluster 16 (this) +
+Cluster 17 (block widget rewrite) + Cluster 18 (Excel layer for
+tables); user picked Cluster 16 first.
+
+### Architectural choices worth flagging
+
+- **Ctrl+S scroll fix is on the comparison side, not via
+  scrollTop snapshot/restore.** The original symptom was
+  "Ctrl+S jumps to the bottom of the doc." Diagnosis: when
+  `saveCurrentFile` runs, the post-save effect re-derives
+  `editedBody` and pushes it to `Editor.tsx`'s `content` prop;
+  the editor's content effect compares `getMarkdown()` against
+  `content`, sees them as different (because tiptap-markdown
+  *escaped* the `[[…]]` brackets to `\[\[…\]\]` in `getMarkdown()`
+  but `editedBody` had unescaped brackets), fires `setContent`
+  with `emitUpdate: false`, and ProseMirror's content swap resets
+  scrollTop to 0. The fix applies `unescapeWikilinkBrackets()`
+  to `getMarkdown()` before the comparison, so identical content
+  *is* recognised as identical and `setContent` doesn't fire.
+  This is approach B from the cluster doc — fixing the cause
+  rather than papering over it with a snapshot/restore. The
+  fallback (snapshot) was kept on the table but didn't end up
+  needed.
+- **Wikilink shortcut is `Ctrl+Shift+W`, editor-mode only.**
+  `Ctrl+L` is taken (legend), `Ctrl+K` is taken (palette / PDF
+  search), no editor-markdown convention claims `Ctrl+Shift+W`.
+  Mnemonic ("W for wikilink"). The App-level keyboard handler
+  gates it on editor focus so it doesn't fire inside other modal
+  inputs.
+- **Wikilink wrap delegates through TabPaneHandle, not directly
+  through a global ref.** New methods `wrapSelectionInWikilink():
+  boolean` and `insertWikilinkAt(title: string): void` on
+  `TabPaneHandle`, mirroring the existing `insertExperimentBlock`
+  / `insertTable` / `insertGitHubMarkdown` API. The wrap method
+  returns a boolean so App.tsx can fall through to pick-mode when
+  the selection is empty; the insert method is fire-and-forget
+  for the palette callback.
+- **Palette pick-mode is a single optional prop.**
+  `<CommandPalette onPickResult>` — when provided, replaces the
+  default `onOpenFile` behaviour for result clicks and Enter.
+  App.tsx passes `onPickResult` only when `wikilinkPickMode`
+  state is true. A small banner across the top of the panel
+  surfaces the mode so the user knows what clicking a result will
+  do. Esc closes the palette and clears `wikilinkPickMode` in one
+  step.
+- **Multi-paragraph selections collapse to text-only on wrap.**
+  `editor.state.doc.textBetween(from, to, "\n", "\n").trim()`
+  flattens any structural content. v1 acceptable; the wikilink
+  syntax doesn't accept multi-line names, so squashing to spaces
+  is correct. Edge case noted in verify smoke-test.
+- **Column resize is `Table.configure({ resizable: true,
+  handleWidth: 5 })`.** This was disabled in an earlier table
+  fix because of a pointer-events conflict; revisited in this
+  cluster and the conflict is gone (the table-context-menu
+  click handler stops propagation correctly). If the bug
+  resurfaces, it'll likely show up as drag-flicker or
+  ghost-divider artifacts and should be diagnosed against the
+  Tauri WebView2 build version.
+- **Equalize columns walks `tr.doc.descendants` once and sets
+  each cell's `colwidth` via `tr.setNodeMarkup`.** Target width
+  is `floor(table_width / column_count)` — `table_width` is
+  read off the table node's wrapper if present, otherwise
+  estimated from the sum of existing cell widths. Merged cells
+  (`colspan > 1`) get their `colwidth` array filled with N
+  copies of the target so the merged cell stays merged-width
+  across the equalisation. ProseMirror's table layout takes
+  care of the actual rendering.
+- **Vertical alignment is a per-cell custom attr on extended
+  TableCell + TableHeader nodes**, not a CSS class. The
+  `verticalAlign` attr defaults to `null` (not `top`!) so
+  existing tables that have no attr render at the browser
+  default (typically baseline). Only newly-aligned cells
+  emit the inline `style="vertical-align: …"` HTML; everything
+  else round-trips through tiptap-markdown's `html:true`
+  parser unchanged. No retroactive migration touched existing
+  tables.
+- **`ValignTableCell` extends `TableCell` and `ValignTableHeader`
+  extends `TableHeader`** (separate extensions because TipTap's
+  `Table` extension references both base types separately). The
+  `addAttributes` body is identical between them, but factoring
+  it out into a shared mixin would have crossed the
+  diminishing-returns line for a 20-line duplicate.
+- **Multi-type blocks share the v1 plain-paragraph format.**
+  `::experiment NAME / iter-N` was the only header v1.0 of
+  Cluster 4 introduced. Cluster 16 widens the recognised
+  prefixes to `::experiment | ::protocol | ::idea | ::method`
+  but keeps the same paragraph-level decoration approach (no
+  custom node — that's Cluster 17). The decoration regex split
+  into two: `EXPERIMENT_HEADER_RE` for the iter-bearing flavour
+  and `SIMPLE_HEADER_RE` for `protocol | idea | method`. The
+  loop tries both and builds the data-title overlay
+  accordingly ("name · iter N" vs "Capitalized · name").
+- **Cluster 4's Rust-side `route_experiment_blocks` is
+  unchanged.** Only `::experiment` blocks route into iteration
+  daily-log auto-sections on save. `::protocol` / `::idea` /
+  `::method` are visual conveniences in v1 — they decorate the
+  same way but don't trigger any server-side splice. Cluster 17
+  may extend the routing if the v2 widget makes it natural; for
+  now the user gets a consistent affordance without semantic
+  routing for the simpler types.
+- **`ExperimentBlockModal` keeps its filename and component
+  name** even though it now handles four types. Renaming to
+  `BlockModal` was on the table but the import-fanout cost
+  outweighed the clarity benefit for a single-cluster ship.
+  Cluster 17's widget rewrite is the natural moment to rename.
+  Same logic for `ExperimentBlockDecoration.ts` — renamed file
+  was on the table; deferred for the same reason.
+- **`Ctrl+Shift+W` documented in `ShortcutsHelp.tsx`** under
+  "Editor mode" with the dual-mode action description ("wrap
+  selected text in [[…]], or open palette pick-mode if nothing
+  selected"). Discoverability is part of shipping.
+
+### Files touched (Cluster 16 v1.0)
+
+- `cluster_16_qol_pack.md` (repo root) — new cluster doc.
+- `src/components/Editor.tsx`
+  - Content effect: `unescapeWikilinkBrackets(getMarkdown())`
+    on the comparison side before deciding to call
+    `setContent` (Pass 1 fix).
+  - `Table.configure({ resizable: true, handleWidth: 5 })`
+    re-enabled (Pass 4).
+  - New `ValignTableCell` and `ValignTableHeader` extensions
+    extending `TableCell` / `TableHeader` with a
+    `verticalAlign` attr; replaced the base `TableCell` /
+    `TableHeader` in the `extensions` array (Pass 6).
+  - `runTableAction` switch handles new cases:
+    `equalizeColumns`, `valignTop`, `valignMiddle`,
+    `valignBottom` (Pass 5 + 6).
+  - `equalizeColumnWidths(editor)` helper: walks descendants
+    inside the active table, computes target width, sets each
+    cell's `colwidth` via `tr.setNodeMarkup`.
+- `src/components/TableContextMenu.tsx`
+  - `TableAction` type extended with `equalizeColumns`,
+    `valignTop`, `valignMiddle`, `valignBottom`.
+  - New "Equalize column widths" item.
+  - New "Cell alignment" header + Top/Middle/Bottom indented
+    items.
+  - New `MenuItemHeader` component, new `indented` prop on
+    `MenuItem`, new `itemHeader` style.
+- `src/components/TabPane.tsx`
+  - `TabPaneHandle` interface gains
+    `wrapSelectionInWikilink(): boolean` and
+    `insertWikilinkAt(title: string): void`.
+  - `useImperativeHandle` implements both: wrap reads
+    `editor.state.doc.textBetween` and replaces the selection
+    with `[[trimmed]]`; insert uses
+    `editor.chain().focus().insertContent('[[trimmed]]')`.
+  - `insertExperimentBlock` signature widens to
+    `(type, name, iter?)` and the header line is built per
+    type.
+- `src/components/ExperimentBlockModal.tsx`
+  - Exports `BlockType` union (`"experiment" | "protocol" |
+    "idea" | "method"`).
+  - `onConfirm` signature is now
+    `(type: BlockType, name: string, iterNumber?: number) => void`.
+  - New `blockType` + `genericName` state.
+  - JSX: Type dropdown at top; conditional render of the
+    experiment branch (existing experiment dropdown + iter
+    input) vs. a single name input for protocol/idea/method.
+  - `submit()` branches on type and dispatches the right
+    `onConfirm` shape.
+- `src/editor/ExperimentBlockDecoration.ts`
+  - Regex split: `EXPERIMENT_HEADER_RE` keeps the original
+    `::experiment NAME / iter-N` shape;
+    `SIMPLE_HEADER_RE` matches
+    `::(protocol|idea|method)\s+NAME`.
+  - Decoration loop tries both regexes, builds data-title
+    accordingly ("name · iter N" or "Capitalized · name").
+  - Same green-strip class names for both — visual treatment
+    is uniform.
+- `src/components/CommandPalette.tsx`
+  - New optional `onPickResult?: (path, title) => void` prop.
+  - Pick-mode = `!!onPickResult`; banner UI surfaces the mode.
+  - Enter / click handlers branch by mode.
+- `src/App.tsx`
+  - New `wikilinkPickMode` state.
+  - `Ctrl+Shift+W` keyboard branch: calls
+    `wrapSelectionInWikilink`; falls through to
+    `setWikilinkPickMode(true)` when wrap returns `false`.
+  - `Esc` clears pick-mode.
+  - `<CommandPalette>` render passes `onPickResult` only in
+    pick-mode and clears the mode on close.
+  - `<ExperimentBlockModal onConfirm={(type, name, iter) => …}>`
+    — call site updated to pass `type` through to
+    `handle.insertExperimentBlock(type, name, iter)`.
+- `src/components/ShortcutsHelp.tsx`
+  - New row under "Editor mode": `Ctrl+Shift+W` —
+    "Wikilink: wrap selected text in [[…]], or open palette
+    pick-mode if nothing selected".
+
+No Rust changes. The cluster touches frontend exclusively and the
+verify script runs `cargo fmt + check` only as a sanity guard.
+
+### Known rough edges (v1.0)
+
+- **Multi-paragraph wikilink wrap collapses structure.** A
+  selection that spans paragraphs becomes
+  `[[paragraph1 paragraph2]]` (newlines → spaces). The wikilink
+  syntax doesn't accept multi-line names so this is correct, but
+  if the user expected separate links per paragraph they'd be
+  surprised. v1.1 candidate: per-paragraph wrap mode.
+- **Equalize columns ignores the wrapper's `style="width: …"` if
+  it's set in `em` or `%`** — only `px` widths are parsed for the
+  total. Falls back to summing existing cell widths if the parse
+  fails. Practically all tables in Cortex are pixel-sized so this
+  hasn't bitten yet.
+- **Vertical-align HTML inside markdown** depends on
+  tiptap-markdown's `html:true` setting, which is on. If a future
+  ship turns it off (e.g. for safer markdown export) the
+  per-cell alignment attr won't round-trip and would need its
+  own serialisation hook.
+- **Right-click `Cell alignment` operates only on the
+  right-clicked cell**, not on a multi-cell selection. v1
+  acceptable; "align all selected cells" is a Cluster 18-era
+  feature when the table model gets richer.
+- **Block decoration regex is anchored at line start** (`^::`),
+  so a leading space breaks recognition. If the user types
+  ` ::experiment Foo / iter-1` (note the space) the green strip
+  doesn't render. Acceptable rough edge — the raw text is still
+  there and Save/Routing still works server-side.
+- **`Ctrl+Shift+W` inside a code block** wraps the code-text
+  content in `[[…]]`. Acceptable in v1 but flagged: a future
+  pass could gate the shortcut on the active mark/node type.
+- **Pick-mode banner uses inline styles**, not a separate
+  styled component. Consistent with the rest of CommandPalette,
+  but the palette is overdue for a CSS-vars sweep.
+- **No telemetry on shortcut usage**, so we won't know if users
+  reach for `Ctrl+Shift+W` more than the existing
+  `[[` autocomplete or vice versa. Manual observation only.
+
+### Sequenced follow-ups
+
+- **Cluster 17 — Block widget rewrite.** Convert `::TYPE NAME`
+  blocks to a real custom TipTap node so they hold bullets +
+  tables, render as a non-editable widget, and right-click
+  delete is atomic. Same on-disk markers, schema change is
+  editor-side only. Estimated 2 days.
+- **Cluster 18 — Excel layer for tables.** Formula parser
+  (`=MEAN(C1:C3)`, `=SUM(…)`, …), cell-type formatting (money /
+  date / percent / number), freeze rows / columns. Builds on
+  the column-resize foundation here. Estimated 3-4 days; the
+  formula evaluator is the bulk of it (lexer + parser + a small
+  set of stdlib fns + cell-reference resolver).
+
+---
+
+## Phase 3 — Cluster 16 v1.1 — QoL pack patch + typed-block routing
+
+User reported v1.0 bugs after a day of dogfooding:
+1. Column widths weren't persisted across save/reload.
+2. Vertical alignment wasn't persisted across save/reload.
+3. Hovering a column boundary made the title row visibly grow.
+4. Equalize column widths shrank tables narrower than the page.
+5. Equalize had no way to scope to specific columns.
+6. Click-and-drag cell selection didn't appear to work, so the
+   "Merge cells" affordance never appeared in the right-click menu.
+7. The right-click menu wasn't scrollable and bled off the bottom of
+   the app when right-clicking near the viewport edge.
+
+…plus one new feature ask:
+8. `::protocol` / `::idea` / `::method` blocks should route the same
+   way `::experiment` blocks do — pick from existing log entries,
+   splice the block content into the chosen document on save.
+
+The user explicitly chose to bundle all of this into a single ship
+(Cluster 16 v1.1) rather than slice into multiple patches. v1.1 is
+~1.5 days of work — at the high end of the project's "split if
+more than 1.5 days" rule, but the bug fixes and the routing
+feature genuinely interleave (both touch the BlockModal, both
+update the routing-on-save call site in TabPane).
+
+### Architectural choices worth flagging
+
+- **HTML tables in markdown, always.** The root cause of bugs 1
+  and 2 is that GFM pipe-table syntax has no slot for
+  `colwidth` or `style="vertical-align: …"` — those attributes
+  were silently dropped on every save. Rather than invent a
+  per-attribute side-channel (HTML comment block, frontmatter
+  metadata, etc.) we serialize tables as `<table>…</table>`
+  HTML inside markdown. tiptap-markdown's `html: true` parser
+  preserves the HTML on reload; markdown-it follows the
+  CommonMark "type-6 HTML block" rule which doesn't re-parse
+  content inside `<table>` as markdown, so the cell innards
+  round-trip cleanly. Implementation uses ProseMirror's
+  `DOMSerializer.fromSchema(node.type.schema)` so we don't have
+  to reimplement each cell's rendering — the schema's `toDOM`
+  rules emit the right HTML (including `data-colwidth` for
+  column widths, `style="vertical-align: …"` for valign,
+  `colspan`/`rowspan` for merges, and inline `<strong>` /
+  `<em>` / `<mark>` for cell content marks). Old pipe-table
+  files keep loading because markdown-it's GFM table plugin
+  parses them on first open; on next save they migrate to HTML
+  format. This is a one-way migration and was an explicit
+  trade-off (user picked "always emit HTML" over "emit HTML
+  only when needed").
+- **Resize-handle is permanently `pointer-events: none`.** v1.0
+  had `pointer-events: auto` on hover so the col-resize cursor
+  would activate. The actual hit-detection for column dragging
+  is handled inside prosemirror-tables's columnResizing
+  plugin via cell-coordinate comparisons — NOT by attaching
+  listeners to the visible handle DOM. Setting the handle to
+  `pointer-events: auto` was actively harmful: it absorbed
+  mousemove events during a cross-cell drag, silently
+  preventing prosemirror-tables from extending the
+  CellSelection across the column boundary, which then
+  silently broke the "Merge cells" affordance because
+  `editor.can().mergeCells()` requires a CellSelection.
+- **Right-click handler preserves active CellSelection.** v1.0
+  unconditionally called `setTextSelection(pos)` on every
+  right-click, which collapsed any drag-selected range back to
+  a single caret — making `editor.can().mergeCells()` always
+  return false even after a successful drag. v1.1 only re-aims
+  the selection when the current selection isn't already a
+  `CellSelection`. Together with the pointer-events fix above,
+  cross-cell drag-and-merge now works.
+- **CellSelection background is accent-tinted, not bg-elev.**
+  v1.0 used `var(--bg-elev)` which on zebra-striped even rows
+  was indistinguishable from the row's existing background.
+  v1.1 uses `color-mix(in srgb, var(--accent) 18%, var(--bg))`
+  plus an inset 1px accent border so a CellSelection is
+  visually unmistakable — half of the v1.0 "drag doesn't work"
+  perception was actually "drag works but is invisible".
+- **Equalize reads `view.nodeDOM(tablePos).getBoundingClientRect()`
+  for the table's actual rendered width.** v1.0 hardcoded
+  TARGET = 150 with the comment "the rendered measurement is
+  racy with the dispatch." It isn't — `view.nodeDOM` is sync
+  and returns the live DOM node, and we use the measurement
+  read-only (we dispatch a transaction with computed colwidths,
+  and ProseMirror lays out from those — no race). Fallbacks:
+  sum of existing colwidths, then `colCount * 150`.
+- **Equalize is column-scoped via TableMap.** When the
+  selection is a `CellSelection`, the helper calls
+  `TableMap.get(tableNode)` and `map.findCell(cellPos)` to
+  resolve each selected cell's column rect, collecting the
+  set of column indices to scope the equalisation to. When no
+  CellSelection (just a caret), the helper falls back to whole-
+  table equalize. The column-scoped target width is computed
+  from the *sum of selected columns' current widths* divided
+  by their count, so equalising a 2-column slice doesn't
+  globally shrink the table — the slice's total stays the
+  same.
+- **TableContextMenu uses `useLayoutEffect` to measure-then-
+  clamp.** v1.0 used a static `menuHeightEstimate = 360` for
+  the off-screen check, which was wrong for the new "Cell
+  alignment" subgroup and didn't account for genuinely tall
+  menus. v1.1 renders at the requested coords first, then in a
+  layout effect measures the menu's actual `getBoundingClient
+  Rect()` and clamps `top` / `left` so the menu fully fits in
+  the viewport. `max-height: 80vh; overflow-y: auto` adds
+  scroll for genuinely-too-tall menus. `z-index: 5000` (up
+  from 1100) places the menu above bell/palette/all other
+  floats.
+- **Typed-block routing mirrors Cluster 4 architecture.** New
+  `typed_block_routings` table (separate from
+  `experiment_routings` so each table's queries stay simple),
+  new `extract_typed_blocks` parser (handles all three types
+  via a small per-line `parse_typed_header` helper), new
+  `find_typed_target_path` resolver (walks the `notes` table
+  for matches in `04-Ideas/`, `05-Methods/`, or `06-Protocols/`
+  by title or filename-stem), new
+  `regenerate_typed_target_auto_section` splicer, new
+  `route_typed_blocks` Tauri command. The on-disk auto-section
+  uses `<!-- TYPED-DAILY-NOTES-AUTO-START -->` / `-END` markers
+  bracketing a `## From daily notes` heading — so the user can
+  freely edit the surrounding document without losing the
+  routing block, and re-save with no changes is idempotent.
+- **Routing call site in TabPane.tsx is a parallel invoke**.
+  After save, both `route_experiment_blocks` and
+  `route_typed_blocks` are called with independent
+  `.then` / `.catch` chains. A failure in one doesn't mask
+  warnings from the other. Both surface their first warning
+  via `setError` so the user sees the most recent un-routed
+  block.
+- **Modal dropdown + free-text name input both supported.**
+  The protocol/idea/method branch of the BlockModal exposes an
+  "Existing protocol/idea/method" dropdown loaded from
+  `query_notes_by_type`, plus a "Name to insert in block
+  header" text input that auto-populates from the dropdown on
+  pick. Typing a name that doesn't match any existing entry
+  still inserts the block — Cluster 4's "soft-failure"
+  philosophy: the block decoration is purely visual and
+  doesn't depend on routing succeeding; on save the unmatched
+  name produces a "X not found" warning, which goes away once
+  the user creates the matching log entry via the
+  IdeaLog/ProtocolsLog/MethodsArsenal creator.
+- **`route_typed_blocks` doesn't take a date_iso argument.**
+  Unlike `route_experiment_blocks` which uses `date_iso` for
+  auto-creating missing iteration files, the typed router
+  doesn't auto-create protocol/idea/method documents — the
+  user explicitly creates those through their respective log
+  views. The argument was unneeded and dropped from the v1.1
+  signature.
+
+### Files touched (Cluster 16 v1.1)
+
+- `src-tauri/src/lib.rs`
+  - Schema: new `typed_block_routings` table + index.
+  - `TypedBlock` struct (block_type / name / content).
+  - `extract_typed_blocks(body)` — line walker handling
+    blockquote-prefixed `::protocol|idea|method NAME` headers
+    paired with `::end`.
+  - `find_typed_target_path(conn, vault_path, block_type,
+    name)` — resolves to a path under 04-Ideas/, 05-Methods/,
+    or 06-Protocols/ via the notes table (title-match then
+    filename-stem fallback).
+  - `regenerate_typed_target_auto_section(conn, target_path)`
+    — splices a `## From daily notes` block bracketed by
+    TYPED_AUTO_START/END comment markers; preserves manual
+    content above and below.
+  - `route_typed_blocks(vault_path, daily_note_path)` Tauri
+    command — mirrors `route_experiment_blocks` shape.
+  - `capitalize_ascii` small helper for the type-name in
+    warning strings ("Protocol \"Foo\" not found …").
+  - Registered `route_typed_blocks` in `invoke_handler!`.
+- `src/components/Editor.tsx`
+  - Imports `DOMSerializer` from `@tiptap/pm/model` and
+    `CellSelection`, `TableMap` from `@tiptap/pm/tables`.
+  - New `HtmlTable = Table.extend(...)` with a
+    `addStorage().markdown.serialize` override that emits the
+    table as raw HTML via `DOMSerializer.fromSchema`. Replaces
+    the bare `Table.configure(...)` in the extensions array.
+  - `equalizeColumnWidths` rewritten to read real rendered
+    width and accept a `CellSelection`-derived column scope.
+    Per-cell `colwidth` is rebuilt entry-by-entry when the
+    user has a multi-column selection.
+  - `handleContextMenu` preserves an active CellSelection
+    (only re-aims via `setTextSelection` if the current
+    selection isn't already a `CellSelection`).
+- `src/index.css`
+  - `.column-resize-handle` is now `pointer-events: none`
+    permanently; hover only changes opacity + cursor. Width
+    tightened to 2px, `right: -1px`, height pinned to `100%`.
+  - `.tableWrapper` forced to `overflow: visible`.
+  - `.selectedCell` background uses `color-mix(in srgb,
+    var(--accent) 18%, var(--bg))` plus an inset 1px accent
+    border via `::after` so CellSelections are visually
+    unmistakable.
+- `src/components/TableContextMenu.tsx`
+  - Imports `useLayoutEffect`, `useState`.
+  - Replaces static height-estimate clamp with measure-then-
+    clamp in a layout effect.
+  - Menu style gains `maxHeight: 80vh; overflow-y: auto;
+    overflow-x: hidden`.
+  - `zIndex: 5000` (was 1100).
+- `src/components/ExperimentBlockModal.tsx`
+  - Adds `NoteWithMetadata` interface + `protocols` /
+    `ideas` / `methods` state arrays, all loaded in parallel
+    on open via `query_notes_by_type`.
+  - New `genericPath` state for the dropdown selection.
+  - Replaces the protocol/idea/method "free-text name only"
+    JSX with an "Existing X" dropdown + a "Name to insert"
+    text input that auto-populates from the dropdown.
+  - `submit()` prefers the dropdown's selected entry,
+    falling back to the typed name.
+- `src/components/TabPane.tsx`
+  - After save, invokes `route_typed_blocks` alongside
+    `route_experiment_blocks` (independent failure paths).
+
+### Known rough edges (v1.1)
+
+- **Old pipe-tables migrate to HTML on first re-save.** This
+  is a one-way migration. If the user reads the file in an
+  external markdown viewer (Obsidian, GitHub preview), HTML
+  tables render correctly. But if a vault has tables that
+  were carefully formatted as pipe markdown for compatibility
+  with another tool, those are now HTML. v1.0 tables that
+  haven't been re-saved are unaffected.
+- **`<table>` HTML in markdown breaks markdown-it's tightLists
+  setting near tables.** Specifically: a list immediately
+  following a table can render with extra spacing because the
+  HTML block's blank-line boundary forces a paragraph break.
+  Acceptable for v1.1; the alternative is a custom serializer
+  that's careful about block boundaries (which would re-
+  introduce the kind of complexity we're avoiding by using
+  DOMSerializer).
+- **Cross-cell drag selection still ignores the column-resize
+  hit area.** If the user starts a drag within ~5px of a
+  column boundary, prosemirror-tables interprets it as a
+  column-resize drag instead of a cell-select drag. The
+  workaround is to start the drag in the middle of a cell.
+  v1.1 didn't reduce `handleWidth` from 5 to 3 because that
+  would also reduce the resize affordance precision; the
+  trade-off is acceptable.
+- **Equalize with `colCount * 30 > totalWidth` falls through
+  to the per-column constant.** This protects against a
+  zero-width measurement (rare; happens if the table is
+  inside a hidden parent). The threshold is conservative
+  enough that practical narrow tables still measure
+  correctly.
+- **Right-click in a CellSelection that doesn't include the
+  click-target cell.** The handler preserves the existing
+  selection (correct), but the menu's `inTable` check is
+  computed from `editor.isActive("table")` which is true so
+  the table options appear. Equalize-scoped works as
+  expected; per-cell valign updates only the cells in the
+  CellSelection. Hover discoverability of which cells will be
+  affected isn't there in v1.1; user has to trust the visual
+  selectedCell tint.
+- **`route_typed_blocks` doesn't fire on FIRST save of a
+  daily note that already has typed blocks.** Reason: blocks
+  in just-loaded files are technically routed on the *next*
+  save (the call is hooked into the post-save effect). This
+  matches `route_experiment_blocks`'s behaviour and is a
+  Cluster 4-era trade-off; not worth changing for this
+  cluster.
+- **The auto-section markers are visible in raw markdown.**
+  `<!-- TYPED-DAILY-NOTES-AUTO-START -->` / `-END` show up if
+  the user opens the protocol/idea/method file outside
+  Cortex. Markdown viewers won't render the comments, but
+  they're plain HTML comment text in the raw file. Cluster
+  17's widget rewrite may want to revisit how routed sections
+  surface.
+- **Schema additions are idempotent.** `CREATE TABLE IF NOT
+  EXISTS typed_block_routings` is safe on existing vaults;
+  no migration needed for users upgrading from v1.0.
+
+---
+
+## Phase 3 — Cluster 16 v1.1.1 → v1.1.4 — Bug-fix iterations
+
+User-driven patch series after dogfooding v1.1. Four sub-versions
+ship in this same span; tagging only the final state as
+`cluster-16-v1.1.4-complete` because the earlier intermediates were
+work-in-progress around a still-not-fully-resolved layout bug. The
+chronology and reasoning are kept here verbatim because the bug
+hunt itself is the takeaway — three different "fixes" landed and
+the user kept seeing the same symptom, which is informative for
+whoever picks this up next.
+
+### What user reported between v1.1 and v1.1.4
+
+1. *(v1.1)* Hovering over a column boundary makes the title row
+   grow vertically.
+2. *(v1.1.1 reproduction)* Same growth, now visibly affecting all
+   rows in the table — empty cells especially "doubled" in size on
+   hover near a boundary.
+3. The col-resize cursor (double-arrow) wasn't appearing at column
+   boundaries.
+4. Edits to a routed protocol/idea/method document's auto-section
+   weren't propagating back to the source daily note's block
+   ("creates a new block instead of updating in place").
+5. Drag-to-resize columns was needed (regressed when columnResizing
+   was disabled in v1.1.3 as a workaround for the growth bug).
+6. The calendar's month view showed events that were missing from
+   the week view.
+
+### What was tried, in order
+
+**v1.1.1 — first cell-growth attempt:**
+
+- Tightened `.column-resize-handle` styling (`right: -1px → 0`,
+  added `box-sizing`, `z-index`, etc.).
+- Restored handle to `pointer-events: none` always.
+- Added `.ProseMirror.resize-cursor { cursor: col-resize }` so the
+  cursor reflects prosemirror-tables's near-boundary state class
+  (the standard pattern; the plugin sets the class on `view.dom`
+  whenever `activeHandle > -1`).
+- Added the **two-way sync** for typed blocks (Cluster 16 v1.1.1
+  feature): per-block `<!-- CORTEX-BLOCK src="…" idx="…" -->`
+  markers in the auto-section, plus a new `propagate_typed_block
+  _edits` Tauri command that runs on every save. The command
+  parses the saved file's auto-section, compares each block's
+  current content against `typed_block_routings`, and for any
+  changed block updates the routing AND surgically replaces the
+  matching `::TYPE NAME … ::end` block in the source daily note.
+  Bidirectional editing now works WITHOUT creating new blocks —
+  the original `::TYPE NAME` markers are preserved on both sides.
+  Race condition documented: if the user edits the document but
+  doesn't save it before saving the daily note, the daily-note
+  regen wins. Acceptable v1 behaviour.
+
+  Result: cursor change works. Two-way sync works. Cell growth
+  on hover persists.
+
+**v1.1.2 — `display: none` on the resize handle:**
+
+- Theory: the prosemirror-tables widget (the visible
+  `<div class="column-resize-handle">`) being inserted into / removed
+  from the active cell's DOM on hover triggers a layout pass that
+  shifts cells.
+- Set `.column-resize-handle { display: none }` so the widget never
+  participates in layout. Cursor change still works (it's set on
+  view.dom, not the handle). Drag-to-resize still works
+  (prosemirror-tables's hit-detection is in JS, not via the handle
+  DOM).
+
+  Result: handle invisible. Cursor change works. Cell growth
+  STILL persists. So the widget DOM mutation isn't the cause.
+
+**v1.1.3 — disable columnResizing entirely:**
+
+- Set `Table.configure({ resizable: false })`. The columnResizing
+  plugin doesn't load. No widgets, no `resize-cursor` class, no
+  `TableView.update()` per-hover.
+
+  Result: cell growth gone. But drag-to-resize is gone too.
+
+**v1.1.4 — re-enable + auto-equalize on insert:**
+
+- Diagnosed via reading prosemirror-tables 1.8.5 source: the
+  cell-growth root cause is `updateColumnsOnResize()` running on
+  every per-hover ProseMirror view update, and falling back to
+  `defaultCellMinWidth = 100px` for cells without explicit
+  `data-colwidth`. With every cell having an explicit `colwidth`,
+  `fixedWidth = true` and the function sets `table.style.width =
+  totalWidth + "px"`; subsequent runs assign the same value, and
+  the browser detects no change and skips the layout pass.
+- `resizable: true` is back. Handle is visible again (a 3px accent
+  bar on the cell's right edge, fading in to 0.45 opacity on
+  hover, with a smooth 80ms transition).
+- `TabPane.insertTable` now calls `equalizeTableColumnWidths(editor)`
+  on `requestAnimationFrame` after the insert so a freshly-created
+  table immediately has explicit colwidths everywhere.
+- Calendar all-day row added to the WeekView (between header and
+  hour grid) so events created in MonthView as all-day no longer
+  appear missing in the week view. Mirrors the month-view chip
+  styling for visual continuity.
+
+  Result: drag-to-resize works again. Auto-equalize-on-insert
+  prevents new tables from hitting the 100px-fallback path.
+  Calendar parity restored. **Cell growth still reported by user
+  on existing tables that haven't been equalized.**
+
+### Architectural notes worth flagging
+
+- **Two-way sync uses surgical block replacement, not file
+  rewrite.** `replace_daily_note_typed_block` walks the daily note
+  line-by-line, counts typed blocks in document order, and replaces
+  only the body lines of the Nth block (between header and `::end`),
+  preserving everything else. No re-serialization through tiptap-
+  markdown; no chance of clobbering unrelated edits.
+- **Per-block markers carry the routing's primary key.** Format:
+  `<!-- CORTEX-BLOCK src="<daily_note_path>" idx="<block_index>"
+   -->\ncontent\n<!-- /CORTEX-BLOCK -->`. The `(src, idx)` pair
+  matches `typed_block_routings`'s composite PK. Chosen over a
+  separate UUID column because (a) it requires no schema change
+  and (b) it lets the user inspect raw markdown and immediately
+  see which daily note a block came from.
+- **Migration: existing v1.1.0 documents work but don't propagate
+  yet.** v1.1.0's auto-section format (`### From [[X]]` + `---`
+  separators, no per-block markers) won't parse into routing
+  tuples. The propagator returns 0 and is a no-op. The migration
+  is automatic: the next time the user saves the corresponding
+  daily note, `route_typed_blocks` regenerates the document's
+  auto-section in the new per-block-marker format, and bi-
+  directional sync starts working from that point on. One-time,
+  invisible.
+- **Auto-equalize-on-insert is a `requestAnimationFrame` deferral.**
+  TipTap's `insertTable().run()` dispatches the transaction
+  synchronously, but the resulting DOM (including the new table's
+  cell positions) isn't queryable inside the same tick. Deferring
+  to the next animation frame ensures `equalizeColumnWidths` finds
+  the table via the editor's selection.
+- **`equalizeTableColumnWidths` is exported from Editor.tsx** so
+  TabPane can call it without re-importing TipTap pm internals.
+  The internal implementation is unchanged from v1.1.0; only the
+  export wrapper is new.
+- **WeekView all-day row sits sticky below the day-header.** The
+  weekHeader uses `position: sticky; top: 0` so the day labels
+  remain visible when the user scrolls hours; the all-day row uses
+  `top: 56px` (height of the day-header) so it sits just below.
+  Click on an empty cell creates a new event template with start
+  = midnight, end = next-midnight; the user toggles "All day" in
+  the modal.
+- **Calendar code path is single-source-of-truth for events.** Both
+  WeekView and MonthView consume the same `events` array filtered
+  per-day. The previous all-day-hidden-in-week bug was a filtering
+  oversight (`!e.all_day` in the body filter, no other render path
+  for all-day) — not a sync issue. Adding the all-day row was
+  purely a render fix.
+- **Calendar.tsx month vs week date ranges differ on purpose.**
+  Week range = anchor → anchor + 7 days. Month range = Monday of
+  week containing the 1st of focus month → +42 days. Switching
+  views recomputes the range and re-fetches events. Both pulls go
+  through the same `list_events_in_range` Rust command which
+  expands recurrence rules. So the SAME events appear in both
+  views when their range overlaps; the bug was in the WeekView
+  render, not the data layer.
+
+### Known issues / unresolved (for the next iteration)
+
+- **🔴 Cell-height growth on hover STILL reproduces on tables
+  without explicit colwidths.** The auto-equalize-on-insert in
+  v1.1.4 only covers tables created from now on. Pre-existing
+  tables in the user's vault still lack `data-colwidth` and hit
+  the `defaultCellMinWidth = 100px` fallback in
+  `updateColumnsOnResize`. Workaround: the user right-clicks →
+  Equalize Column Widths once on each pre-existing table to give
+  every cell a `colwidth`. After that, hover is stable.
+
+  **Proper fix candidates (not yet built):**
+  1. *Auto-equalize on first edit of a stale table.* When the
+     editor encounters a table where any cell lacks `colwidth`,
+     dispatch an equalize transaction immediately. Risk: surprising
+     the user with a layout shift on first edit.
+  2. *Auto-equalize on document load if any table lacks colwidths.*
+     Same idea, just earlier in the lifecycle. Only fires once
+     per document because subsequent saves include the colwidths.
+  3. *Custom drag-resize that doesn't go through prosemirror-
+     tables's `columnResizing` plugin.* A small ProseMirror plugin
+     that detects mousedown near a cell border and dispatches a
+     `setNodeMarkup` transaction directly. No `TableView.update`
+     in the hot path, so no per-hover layout shifts at all,
+     regardless of whether cells have widths. ~1 day of work.
+  4. *Default-width injection at parse time.* When the HTML table
+     parser sees a `<td>` without `data-colwidth`, inject a
+     reasonable default (e.g. equal share of the table width).
+     Hooks into ValignTableCell's `parseHTML`. Requires knowing
+     the table's column count at parse time, which is awkward.
+
+  Option 3 is the cleanest long-term fix and is captured in the
+  cluster-17/18 follow-ups.
+
+- **CORTEX-BLOCK markers visible in raw markdown.** Same situation
+  as v1.1's TYPED_AUTO_START/END markers: HTML comments don't
+  render in markdown viewers but are visible if the user opens the
+  file in a plain text editor. Acceptable; Cluster 17's widget
+  rewrite is the right place to revisit how auto-sections surface.
+
+- **Two-way sync race on simultaneous edits.** If the user has the
+  daily note open in pane A and the protocol document open in pane
+  B, edits to both, and saves the daily note FIRST: the document
+  regen (via `regenerate_typed_target_auto_section`) overwrites
+  pane B's unsaved-but-typed content. The propagator only fires on
+  document save, and an unsaved buffer never makes it to disk for
+  comparison. Mitigation: encourage the user to save documents
+  before saving daily notes, or only have one of the two open. A
+  proper fix would require pane-level dirty-buffer awareness in
+  the propagator, which is overkill for v1.
+
+- **All-day row in WeekView doesn't auto-set `all_day: true` on
+  click.** Clicking an empty all-day cell opens the EventEditModal
+  with `start = midnight, end = next-midnight` but `all_day` is
+  not pre-toggled. The user has to flip the All-day checkbox.
+  Trivial fix in a future ship: extend `onSlotDraft` to accept an
+  `allDayHint` flag.
+
+### Files touched (Cluster 16 v1.1.1 → v1.1.4)
+
+- `src-tauri/src/lib.rs`
+  - New constants: `TYPED_AUTO_START` / `TYPED_AUTO_END` are
+    repurposed; per-block markers are inline (no constant).
+  - New helpers: `extract_typed_auto_section`,
+    `parse_auto_section_blocks`, `replace_daily_note_typed_block`.
+  - New Tauri command: `propagate_typed_block_edits`.
+  - `regenerate_typed_target_auto_section` rewritten to emit
+    per-block `<!-- CORTEX-BLOCK src=… idx=… -->` markers.
+  - SQL query updated to `SELECT br.daily_note_path, br.block_index,
+    br.content, COALESCE(n.title, …)` (added `block_index`).
+  - `propagate_typed_block_edits` registered in `invoke_handler!`.
+- `src/components/Editor.tsx`
+  - `equalizeTableColumnWidths` exported wrapper around the
+    internal `equalizeColumnWidths`.
+  - Table extension config bounced through three states:
+    `resizable: true` → `false` → `true` again (final).
+- `src/components/TabPane.tsx`
+  - `insertTable` calls `equalizeTableColumnWidths(editor)` on
+    `requestAnimationFrame` post-insert.
+  - Save flow invokes `propagate_typed_block_edits` after every
+    save (Rust short-circuits when no typed-auto section).
+- `src/index.css`
+  - Iterated handle styling: tightened (v1.1.1) → `display: none`
+    (v1.1.2) → restored visible 3px bar with `pointer-events: none
+    always` and `transition: opacity 80ms` (v1.1.4).
+  - `.ProseMirror.resize-cursor` rule added (v1.1.1).
+  - `.selectedCell::after` removed (v1.1.1) — was a layout-shift
+    suspect; turned out not to be the cause but stayed removed
+    because the background tint alone is sufficient.
+- `src/components/Calendar.tsx`
+  - New all-day row in WeekView (above the hour grid).
+  - New styles: `allDayRow`, `allDayLabel`, `allDayCol`,
+    `allDayChip`.
+
+### What ships under tag `cluster-16-v1.1.4-complete`
+
+- Drag-to-resize columns (working for tables created post-v1.1.4
+  and for pre-existing tables that have been Equalized once).
+- Two-way sync for `::protocol` / `::idea` / `::method` blocks via
+  per-block CORTEX-BLOCK markers + `propagate_typed_block_edits`.
+- Calendar all-day events visible in both WeekView and MonthView.
+- col-resize cursor at column boundaries.
+
+### What remains open
+
+- The cell-height-growth-on-hover bug for tables without explicit
+  colwidths (workaround: Equalize once).
+- Cluster 17 — Block widget rewrite (custom TipTap node).
+- Cluster 18 — Excel layer for tables (formulas, cell types, freeze
+  rows / columns) — would also be the natural home for the custom
+  drag-resize plugin that fully eliminates the layout-shift bug.
+
+## Phase 3 — Cluster 17 v1.0 — Block widget rewrite
+
+User-driven follow-up to Cluster 16. The `::TYPE NAME … ::end` blocks
+that Cluster 4 introduced (and Cluster 16 v1.1 widened from
+experiment-only to all four types) lived as a paragraph-decoration
+extension over plain-text content. That worked for the v1.0 ask
+(visual treatment + routing) but couldn't:
+
+  - hold rich content in the body (bullets, ordered lists, code
+    blocks, tables) — the decoration painted over flat paragraphs
+    only;
+  - prevent the user from putting a caret in the `::experiment`
+    title and accidentally breaking the parse on save;
+  - support a one-click atomic delete (the user had to hand-select
+    header + body + ::end and press Backspace).
+
+Cluster 17 converts the blocks to a real ProseMirror custom node.
+
+### What ships
+
+A new `typedBlock` ProseMirror node (`src/editor/TypedBlockNode.tsx`)
+with:
+
+  - `name = "typedBlock"`, `group = "block"`, `defining: true`,
+    `isolating: true`.
+  - Content rule:
+    `(paragraph|bulletList|orderedList|codeBlock|table)+` —
+    deliberately excludes headings (would break the document outline),
+    images (image handling is its own future cluster), nested
+    typedBlocks (no block-in-block), and blockquotes.
+  - Attrs `blockType` (experiment / protocol / idea / method),
+    `name`, `iterNumber` (only meaningful for experiment).
+  - parseHTML / renderHTML for a `<div data-typed-block>` element so
+    HTML round-trips work for completeness, even though the markdown
+    serializer below emits plain text.
+
+A React NodeView (`src/components/TypedBlockNodeView.tsx`) that:
+
+  - Renders a `contentEditable={false}` title bar across the top
+    with the formatted title (`Method · NAME` or `Experiment · NAME
+    · iter N`), a pencil button (Edit name), and a trash button
+    (Delete block).
+  - On Edit name, swaps the title text for a small `<input>` that
+    auto-focuses and selects. Enter or blur commits (committing
+    via `updateAttributes`); Escape cancels. For experiment blocks
+    a second input lets the user change the iter number; Tab moves
+    focus from name to iter.
+  - On Delete, calls `deleteNode` from NodeViewProps.
+  - Listens for a `cortex:edit-typed-block` CustomEvent on
+    `editor.view.dom`. The BlockContextMenu's "Edit name" action
+    dispatches that event with the block's doc position; the
+    NodeView whose `getPos()` matches flips into edit mode.
+  - Wraps the body in `<NodeViewContent />` so TipTap handles all
+    body rendering and editing natively — bullet lists, code blocks,
+    tables all work without special-casing.
+
+A markdown serializer (`src/editor/TypedBlockSerializer.ts`) that
+extends `TypedBlockNode` with a `markdown.serialize` hook (matching
+the existing HtmlTable / AlignmentAwareParagraph pattern). Emits:
+
+```
+::TYPE NAME [/ iter-N]
+
+<body content rendered through tiptap-markdown's normal pipeline>
+
+::end
+```
+
+The same on-disk format the v1.0/v1.1 inserter wrote. **This is the
+critical design choice** — the Rust-side parsers
+(`extract_experiment_blocks`, `extract_typed_blocks`,
+`parse_auto_section_blocks`, `replace_daily_note_typed_block`) and
+the routing pipelines (`route_experiment_blocks`,
+`route_typed_blocks`, `propagate_typed_block_edits`) all keep working
+unchanged. Cluster 17 is an editor-only refactor.
+
+A markdown parser transform (`src/editor/TypedBlockTransform.ts`)
+named `liftTypedBlocks`. tiptap-markdown has no token for our custom
+node, so on load every `::TYPE NAME` paragraph in the file becomes a
+plain paragraph in the doc. The transform:
+
+  - Walks the doc's top-level children.
+  - Finds paragraphs whose textContent matches a typed-block header
+    regex.
+  - Walks forward (across any child node type — paragraphs, lists,
+    code blocks, tables) until finding a paragraph matching `::end`.
+  - Filters the inner nodes against the typedBlock content rule
+    (logs warnings on dropped node types — should be rare).
+  - Replaces the `[header_pos, end_pos+1]` range with a typedBlock
+    node containing the inner nodes.
+  - Applies in reverse order so positions stay stable across
+    multiple replacements.
+
+The transform runs inside `Editor.tsx`'s post-setContent useEffect,
+unconditionally — initial load (where the editor's seeded content
+matches our compare-side `content` prop and no setContent is called)
+still needs the lift. Idempotent: a doc with already-lifted regions
+passes through untouched. The dispatched transaction is gated with
+`setMeta("addToHistory", false)` so the user can't Ctrl+Z back to
+the pre-lifted state.
+
+A BlockContextMenu (`src/components/BlockContextMenu.tsx`) that
+opens when right-click lands inside a typedBlock node and not inside
+a nested table. Mirrors `TableContextMenu`'s structure (positioned
+float, click-outside-to-close, viewport clamping via
+`useLayoutEffect`). Two actions: Edit name (dispatches the
+`cortex:edit-typed-block` event) and Delete block (dispatches
+`tr.delete` over the block's range via an editor.chain command —
+single history step).
+
+### Migration
+
+Cluster 17 ships with no migration UI. The lift transform handles
+v1.0/v1.1 documents on first open: their `::TYPE NAME … ::end`
+paragraph runs become typedBlock nodes immediately. First save
+re-emits the same on-disk text. From the user's perspective, blocks
+just look better and behave better starting the moment Cluster 17
+ships.
+
+For any document touched while Cluster 17 is in place, fresh blocks
+are born as typedBlock nodes (TabPane.insertExperimentBlock now
+inserts a typedBlock directly via `insertContentAt` rather than four
+paragraphs). The lift transform isn't on the critical path for
+those.
+
+### Why no Rust changes
+
+The cluster doc anticipated a "Pass 5" Rust update to dual-format
+the propagator (recognise both new node-attr-based markers and
+legacy CORTEX-BLOCK comments). On closer reading, the doc's locked-in
+constraint — *"The on-disk format stays exactly the same as v1.1.x"*
+— means the existing CORTEX-BLOCK comment format continues to be
+emitted by `regenerate_typed_target_auto_section` and parsed by
+`parse_auto_section_blocks` with no code change. The only Rust-side
+edit was a comment in lib.rs documenting the design choice so a
+future reader doesn't expect a parser overhaul that isn't there.
+
+The "drop the markers entirely" goal in the cluster doc would
+require introducing a per-routed-entry custom node for the
+auto-section in target documents (so the source path + block index
+could live as node attrs instead of HTML comments). That's a bigger
+change than v1.0 of Cluster 17 needs and is left as a follow-up.
+
+### Why the click-detection routes table-first
+
+When a typedBlock contains a table and the user right-clicks inside
+a cell, two ancestors match (typedBlock, table). The handler walks
+`$pos` from the deepest depth to the doc root and tracks the
+**first** typedBlock ancestor seen, but if any ancestor is a table
+the BlockContextMenu is suppressed. Rationale: the immediate
+context (a table cell) is the more specific surface; the user's
+intent is almost certainly a table action. Right-clicking inside
+the body but outside the table still opens the block menu.
+
+### Architectural decisions worth carrying forward
+
+- **Editor representation can change without touching on-disk
+  format.** When a custom node serializes to text identical to what
+  the user could have typed by hand, the Rust side stays unaware of
+  the editor's internal model. This is a clean boundary; preserve
+  it for any future block-like feature.
+- **Lift-on-load is the right migration shape for plain-text-marker
+  formats.** The on-disk `::TYPE NAME … ::end` syntax is
+  human-readable and tool-agnostic; the editor's job is to lift it
+  into a richer in-memory representation. Don't invent an HTML
+  variant of the format unless there's a reason the plain-text
+  form actively breaks something.
+- **CustomEvent on view.dom for cross-component editor signals.**
+  The Edit-name dispatch from the right-click menu to the matching
+  NodeView is naturally pane-local without any extra state plumbing
+  (each pane has its own view.dom). Reuse this pattern for similar
+  one-off "talk to the active node by position" needs.
+- **The body content rule is small on purpose.** Excluding headings
+  and nested blocks keeps the schema validations tight and removes
+  whole classes of edge cases (a heading inside a block confusing
+  the document outline; a block-in-block recursion that would need
+  special migration handling). Add to the content rule only when a
+  user-visible feature explicitly asks for it.
+
+### Files touched
+
+#### New files
+
+- `src/editor/TypedBlockNode.tsx` — node schema + parseHTML /
+  renderHTML / addNodeView, plus header-format / header-parse
+  helpers.
+- `src/editor/TypedBlockSerializer.ts` — TypedBlockNode extended
+  with a tiptap-markdown serialize hook.
+- `src/editor/TypedBlockTransform.ts` — `liftTypedBlocks` and
+  `docContainsLegacyTypedBlocks`.
+- `src/components/TypedBlockNodeView.tsx` — React NodeView with
+  inline edit-name input + delete button + Edit-name event listener.
+- `src/components/BlockContextMenu.tsx` — right-click menu for
+  typedBlock nodes.
+- `verify-cluster-17.ps1` — verify script with full smoke checklist.
+
+#### Modified files
+
+- `src/components/Editor.tsx`
+  - Drop `ExperimentBlockDecoration`; add `SerializingTypedBlockNode`.
+  - Add `liftTypedBlocks` call in the post-setContent useEffect.
+  - Add typedBlock-detection branch in `handleContextMenu` (walks
+    `$pos` ancestors; routes to BlockContextMenu when a typedBlock
+    is found without an intervening table ancestor).
+  - Add `runBlockAction` (editName / deleteBlock).
+  - Render `<BlockContextMenu>` in JSX.
+- `src/components/TabPane.tsx`
+  - `insertExperimentBlock` inserts a typedBlock node directly via
+    `insertContentAt` (vs. four plain paragraphs in v1.0/v1.1).
+- `src/index.css`
+  - New `.cortex-typed-block` rules: card chrome, title-bar layout,
+    edit-name input focus styling, danger-coloured trash button,
+    body first/last-child margin tightening for paragraphs / lists
+    / code blocks / tables.
+  - Legacy `.cortex-experiment-block-*` rules kept (the deprecated
+    decoration class names are no longer applied, so the rules are
+    inert; left in tree for any old build artefacts).
+- `src/editor/ExperimentBlockDecoration.ts`
+  - Deprecated to a no-op stub. Header points to the typedBlock
+    files. Live extension list no longer registers this.
+- `src-tauri/src/lib.rs`
+  - Comment-only addition in the propagator section explaining
+    that the on-disk format is unchanged so the parsers don't need
+    changes.
+
+### Known issues carried forward (unchanged from Cluster 16 v1.1.4)
+
+- 🔴 Cell-height growth on hover for tables without explicit
+  `data-colwidth`. Cluster 18's custom drag-resize plugin is the
+  proper fix. Workaround: right-click → Equalize once per affected
+  table.
+- 🟡 CORTEX-BLOCK markers visible in raw markdown viewers. Cluster
+  17 v1.0 doesn't address this — the markers continue to be emitted
+  by `regenerate_typed_target_auto_section` because dropping them
+  requires a separate custom node for routed auto-section entries
+  (out of scope for v1.0).
+
+### What ships under tag `cluster-17-v1.0-complete`
+
+- typedBlock custom node with non-editable title bar.
+- Inline rename + atomic delete via title-bar buttons or right-click.
+- Body holds bullets, ordered lists, code blocks, and tables.
+- BlockContextMenu (right-click inside a typedBlock).
+- Invisible migration of v1.0/v1.1 documents via lift-on-load.
+- Cluster 4 + Cluster 16 routing pipelines unaffected.
+
+## Phase 3 — Cluster 17 v1.1 — Ctrl+Click block title navigates to the referenced document
+
+User-asked follow-up immediately after v1.0 shipped. The typedBlock
+node renders a clean title bar ("Method · Foo", "Experiment · Bar ·
+iter 3"), but clicking that title did nothing — to navigate to the
+referenced document the user had to scroll, find a wikilink to it
+elsewhere, or open the file tree. v1.1 adds Ctrl/Cmd+Click on the
+title bar as a one-shot navigation chord.
+
+### What ships
+
+- **NodeView title-bar handler** (`src/components/TypedBlockNodeView.tsx`).
+  The title bar div now has an `onClick` that, when Ctrl/Cmd is held
+  and the rename input isn't open, dispatches a
+  `cortex:follow-typed-block` CustomEvent on `editor.view.dom` with
+  `{ blockType, name, iterNumber }` in detail. Same DOM-event-on-
+  view-dom pattern as the v1.0 edit-name signal (pane-local scope,
+  no global emitter). Native `title=""` tooltip ("Ctrl/Cmd+Click to
+  open the referenced document") gives the user a discoverability
+  hint on hover.
+
+- **Editor-side listener** (`src/components/Editor.tsx`). New prop
+  `onFollowTypedBlock?: (attrs) => void`. The editor listens for the
+  follow event and forwards the detail upward. Editor stays free of
+  vault-path knowledge — the host handles the resolve+open.
+
+- **App handler** (`src/App.tsx`). Wires onFollowTypedBlock per pane:
+  activates the originating pane, invokes the new
+  `resolve_typed_block_target` Tauri command, and — when the
+  resolver returns a path — passes it to `selectFileInSlot(path, i)`.
+  No-op (with a console.info log) on null resolution; a console.warn
+  on Rust errors. No toast / banner for v1; the user sees it didn't
+  navigate.
+
+- **Rust resolver** (`src-tauri/src/lib.rs`). New
+  `resolve_typed_block_target(vaultPath, blockType, name, iterNumber)`
+  Tauri command. For experiment blocks, walks the hierarchy table to
+  find the experiment's index file, then prefers the matching
+  iteration's path when iterNumber is set; falls back to the
+  experiment's index when the iteration doesn't exist. For
+  protocol/idea/method, delegates to the existing
+  `find_typed_target_path`. Read-only — no auto-creation of missing
+  files (route_experiment_blocks's find_or_create_iteration is the
+  right place for that; clicking shouldn't have side effects).
+
+- **CSS hover affordance** (`src/index.css`). On hover of the title
+  bar, the title text gets an accent-coloured underline and the
+  cursor flips to pointer. CSS can't directly observe the Ctrl key
+  state, so the affordance is "this title is interactive" rather
+  than "Ctrl held → click target"; the title attribute clarifies the
+  chord.
+
+- **Shortcut docs** (`src/components/ShortcutsHelp.tsx`). New rows:
+  Ctrl+Click on a block title, and the right-click block menu (which
+  v1.0 missed mentioning).
+
+### Why route through onFollowTypedBlock instead of onFollowWikilink
+
+The simplest implementation would have been: dispatch
+`onFollowWikilink(name)` and let the existing wikilink resolver
+(`resolve_wikilink`) find the file. That works for protocol/idea/method
+because their files are typically named after the block (filename
+stem or H1 title match). It DOESN'T work for experiments because:
+
+  - Iteration files are named `iter-NN - <date>.md`, not after the
+    experiment name.
+  - The wikilink resolver finds the experiment's index file at best,
+    leaving the user one extra navigation step away from the
+    iteration the block actually feeds into.
+
+A small Rust resolver that knows the typed-block-to-file mapping is
+worth the dozen lines. It also documents the navigation contract:
+"the document a typed block references" is well-defined for all four
+types and can evolve (e.g., land on iteration when present, fall
+back gracefully when not).
+
+### Architectural decisions worth carrying forward
+
+- **DOM events are the pane-local signal pattern.** v1.0 introduced
+  `cortex:edit-typed-block`, v1.1 adds `cortex:follow-typed-block`.
+  Both fire on the editor's `view.dom`, both stay scoped to the
+  pane that owns the editor. If you need NodeView → host
+  communication for any future feature, reach for this pattern
+  first; it composes with TipTap's existing structure without any
+  state management.
+
+- **Editor.tsx stays free of vault knowledge.** The host (App)
+  knows vaultPath, sessions, and how to route opens. Editor takes
+  callbacks. This boundary keeps Editor reusable and easy to test.
+
+- **Read-only navigation.** `resolve_typed_block_target` never
+  creates files. Clicking is a query; it should never modify the
+  vault. Auto-creation of missing iterations is reserved for
+  routing flows where the user has actively typed a block and the
+  iteration absence is meaningful.
+
+### Files touched (v1.1 only)
+
+- `src/components/TypedBlockNodeView.tsx` — exported
+  `FOLLOW_TYPED_BLOCK_EVENT`, added `handleTitleClick`, attached to
+  the title bar's onClick + native title attribute.
+- `src/components/Editor.tsx` — new optional `onFollowTypedBlock`
+  prop, listener on view.dom forwarding the event.
+- `src/components/TabPane.tsx` — pass-through prop.
+- `src/App.tsx` — handler that invokes Rust resolver and routes
+  through `selectFileInSlot`.
+- `src-tauri/src/lib.rs` — new `resolve_typed_block_target` Tauri
+  command + invoke_handler! registration.
+- `src/index.css` — hover affordance on the title text.
+- `src/components/ShortcutsHelp.tsx` — Ctrl+Click and right-click
+  rows.
+
+### What ships under tag `cluster-17-v1.1-complete`
+
+- Ctrl/Cmd+Click on a typedBlock title bar opens the referenced
+  document in the active pane.
+- Experiment blocks land on the matching iteration file when one
+  exists; otherwise on the experiment's index file.
+- Protocol / idea / method blocks land on their corresponding
+  document under 06-Protocols / 04-Ideas / 05-Methods.
+- Hover tooltip + underline affordance signal the chord.
+- Read-only — no file creation on click.
+
+## Phase 3 — Cluster 18 v1.0 — Excel layer for tables: custom drag-resize + formulas
+
+User-driven follow-up to Cluster 16 v1.1.4 + Cluster 17. Two things land
+in v1.0: a custom column-resize plugin that replaces prosemirror-tables's
+built-in (closing the long-standing cell-height-growth bug from
+v1.1.4), and a small formula engine that lets the user write
+`=SUM(A1:A5)` directly in a cell. Cell-type formatting, freeze panes,
+and sort/filter are deferred to v1.1+.
+
+### What ships
+
+**CortexColumnResize plugin** (`src/editor/CortexColumnResize.ts`).
+Pure-DOM-event drag, never subscribes to view updates, so there's no
+per-hover `updateColumnsOnResize` call and no `defaultCellMinWidth =
+100px` fallback path. Hit zone: 5px inside the cell's right border + 3px
+overshoot to cover the visible accent strip. Visible 3px-wide handle on
+each cell's right edge (CSS), hover-driven via a body-level
+`.cortex-resize-hover` class that the plugin's mousemove handler sets.
+30px minimum column-width clamp prevents dragging a column to
+invisibility. Shipped as a TipTap Extension wrapper
+(`CortexColumnResize`) registered in Editor.tsx alongside
+`HtmlTable.configure({ resizable: false })`. Auto-equalize-on-insert
+from v1.1.4 stays as a defensive measure for fresh tables.
+
+**🟢 The v1.1.4 known issue is closed.** Tables without explicit
+`colwidth` attributes no longer grow vertically on hover. No workaround
+needed — both fresh and pre-existing tables behave correctly.
+
+**Formula engine** (`src/editor/formulaEngine.ts`, ~670 lines). Three
+phases:
+
+  - **Lexer** — tokenises numbers (with scientific notation), strings
+    (single or double quotes), identifiers (function names + cell
+    refs in A1 form, distinguished by regex match), operators
+    (`+ - * / ^`), parens, commas, colons.
+  - **Parser** — precedence climbing: `expr` (`+ -`) → `term` (`* /`)
+    → `power` (`^`, right-associative) → `unary` (`-`) → `primary`
+    (number / string / cell-or-range / function call / parens).
+    Recursive-descent class with a position cursor.
+  - **Evaluator** — walks the AST. `Value` is `number | string |
+    Value[]` (arrays for ranges). Cell refs resolve via a
+    `TableContext` interface the host implements; the host's
+    `cellAt(col, row, visited)` reads cell text and recursively
+    follows formulas if the target cell itself starts with `=`,
+    threading the visited set so circular refs throw a clear
+    "Circular reference at A1" error rather than overflowing the
+    stack.
+
+Function set: `SUM`, `AVG` (alias `MEAN`), `COUNT`, `MIN`, `MAX`,
+`MEDIAN`, `IF`. `IF` uses lazy evaluation of the unused branch so
+`=IF(0, 1/0, 42)` returns 42 instead of erroring (Excel-compat).
+`COUNT` only counts numerically-coercible values, matching Excel's
+`COUNT` (vs `COUNTA` which counts all non-empty).
+
+Tagged result type: `{ kind: "ok", value, displayed }` or
+`{ kind: "error", message }`. The `displayed` field is the
+human-friendly format for the cell — integers stay integer-looking
+(no `.00`), floats get up to 6 decimal places trimmed of trailing
+zeros to dodge the classic `0.1 + 0.2 = 0.30000000000000004` noise.
+
+**FormulaCells extension** (`src/editor/FormulaCells.ts`). Three
+pieces in one file:
+
+  - `FormulaTableCell` + `FormulaTableHeader` extend the v1.1.4
+    `ValignTableCell` / `ValignTableHeader` with `formula` and
+    `formulaResult` attributes. `parseHTML` reads `data-formula` and
+    `data-formula-result`; `renderHTML` writes them back. The
+    inline-style `vertical-align` attr from Cluster 16 stays alive
+    in the same node (chained via `addAttributes` returning all
+    three).
+  - `FormulaEvaluator` TipTap Extension installs a ProseMirror
+    plugin that walks every table cell on every appendTransaction.
+    Skips the cell currently containing the cursor (so the user can
+    type `=` without flickering through intermediate parse errors).
+    For other cells whose text starts with `=`, evaluates against
+    the table's `TableContext` (built from `TableMap.get(table)` so
+    `(col, row)` maps to a cell pos in O(1)), and stores the result
+    in `data-formula-result`. Re-entry guarded by a plugin-key meta
+    flag on the dispatched transactions.
+  - `buildTableContext` constructs the `TableContext` interface from
+    a table node + its doc position. `cellAt` returns the cell's
+    raw text, OR (if the cell itself contains a formula) recursively
+    evaluates it with the same visited set — so `A1 = =B1`,
+    `B1 = 5`, `C1 = =A1*2` all work transitively.
+
+**CSS display swap** (`src/index.css`). Cells with
+`data-formula-result`:
+
+  - Body color → transparent (on the contained `<p>`) when not
+    focused, hiding the raw formula text.
+  - `::after` pseudo-element overlays the result text in italic via
+    `content: attr(data-formula-result)`. `position: absolute` over
+    the cell, `pointer-events: none` so right-click and hover still
+    target the underlying `<td>`.
+  - `:focus-within` (cursor inside) reveals the raw formula text and
+    hides the pseudo. Click-to-edit comes free.
+  - Errors with the `Error:` prefix render the `::after` content in
+    `--danger` via attribute substring matching
+    (`[data-formula-result^="Error:"]`).
+  - Formula-bearing cells (`[data-formula]`) get an `--accent-bg`
+    background tint so the user can spot which cells are computed at
+    a glance.
+
+Visible 3px accent strip on each cell's right edge for the resize
+affordance — opacity 0 by default, 0.45 on hover when the
+`.cortex-resize-hover` body class is set, also 0.45 during an active
+drag.
+
+### Architectural decisions worth carrying forward
+
+- **Replace, don't coexist.** The cluster doc considered keeping
+  prosemirror-tables's columnResizing alongside ours. We replaced it
+  fully (`Table.configure({ resizable: false })`). Coexistence
+  risks the original layout-shift bug coming back when both plugins
+  fight for the same events. Replace is cleaner.
+
+- **Formulas stored AS cell text + cached AS attribute.** The cell's
+  body text IS the formula (`=SUM(A1:A5)`). The attribute caches the
+  evaluated result. CSS handles the display swap via `::after`. This
+  is simpler than keeping the result as text and the formula in an
+  attribute (which would need NodeView-level swap logic for the
+  click-to-edit path). Cost: every load re-evaluates because the
+  cached `data-formula-result` is also written to disk; on reload
+  the FormulaEvaluator plugin verifies it and updates if necessary.
+  In practice the verify is a no-op when the inputs haven't changed.
+
+- **Selection-change re-evaluation.** The plugin runs on every
+  transaction, not just on save. Snappier than the cluster doc's
+  "on save" alternative; the cost is microsecond-scale per
+  transaction (one walk over cells, no doc rewrites unless something
+  changed). `appendTransaction` is the right hook because it fires
+  on selection moves AND doc changes, and dispatching a follow-up
+  transaction in `appendTransaction` is officially supported and
+  groups cleanly with the originating transaction.
+
+- **Visited-set threaded through cell resolution.** Circular ref
+  detection lives in the engine, not the evaluator. The host's
+  `TableContext.cellAt(col, row, visited)` is responsible for
+  passing the set through any nested formula evaluation. The engine
+  adds and removes the cell's `(col,row)` key to `visited` around
+  each `cellAt` call so siblings can both reference the same target
+  without false positives.
+
+### Files touched
+
+#### New files
+
+- `src/editor/CortexColumnResize.ts` — drag-resize plugin + Extension
+  wrapper.
+- `src/editor/formulaEngine.ts` — lexer / parser / evaluator.
+- `src/editor/FormulaCells.ts` — FormulaTableCell, FormulaTableHeader,
+  FormulaEvaluator plugin, buildTableContext helper.
+- `verify-cluster-18.ps1` — verify script with 8-pass smoke checklist.
+
+#### Modified files
+
+- `src/components/Editor.tsx`
+  - Drop inline `ValignTableCell` / `ValignTableHeader` (replaced by
+    imports from FormulaCells).
+  - `HtmlTable.configure({ resizable: false })`.
+  - Register `FormulaTableCell`, `FormulaTableHeader`,
+    `CortexColumnResize`, `FormulaEvaluator` in extensions list.
+- `src/index.css`
+  - New rules for `data-formula-result` display swap, error colour,
+    formula-cell tint, resize-handle accent strip.
+
+### Known issues / unresolved
+
+- 🟡 No comparison operators in formulas (`>`, `<`, `=`, `!=`). `IF`
+  works but the condition has to be derived from arithmetic
+  (e.g. `=IF(A1-10, "big", "small")` to test "is A1 > 10"). Adding
+  comparison operators is a v1.1 follow-up.
+
+- 🟡 Date arithmetic isn't supported. Cells with date strings
+  (`2026-04-29`) coerce to NaN in numeric contexts. Cell-type
+  formatting (v1.1) is the natural home for date semantics.
+
+- 🟡 The `data-formula-result` cache on disk can drift if the user
+  edits the file in an external editor between sessions. The
+  FormulaEvaluator plugin re-evaluates on load, so the cell's
+  displayed result self-corrects on next open + first transaction.
+  Acceptable.
+
+### What ships under tag `cluster-18-v1.0-complete`
+
+- CortexColumnResize plugin replacing prosemirror-tables's built-in.
+- Cell-height-growth-on-hover bug from v1.1.4 fully resolved.
+- Formula engine: `=SUM/AVG/COUNT/MIN/MAX/MEDIAN/IF`, A1 refs,
+  A1:B5 ranges, circular-ref detection, error reporting.
+- Display swap: result italic when not focused, raw formula on focus.
+- Round-trips via `data-formula` and `data-formula-result` HTML
+  attributes.
+
+## Phase 3 — Cluster 18 v1.0.1 — Three bug fixes after v1.0 dogfooding
+
+User reports surfaced three regressions in v1.0:
+
+1. Cell-width changes (drag and equalize) didn't appear live — only on
+   next file reload.
+2. Removing a column left a white-line artifact where the deleted
+   column had been.
+3. Clicking into a formula cell didn't reveal the raw formula text.
+
+All three trace to two root causes:
+
+### Root cause #1: Lost TableView nodeView
+
+When v1.0 set `Table.configure({ resizable: false })` to disable
+prosemirror-tables's `columnResizing` plugin (the source of the
+v1.1.4 cell-height-growth-on-hover bug), it also took out the
+`TableView` nodeView that prosemirror-tables installs. That
+nodeView is what reads each cell's `colwidth` attribute and writes
+matching `<col style="width:Xpx">` entries into the table's
+`<colgroup>`.
+
+Without the nodeView, cell colwidth changes (from drag, equalize,
+or column delete) updated the doc but never re-rendered the
+colgroup. The browser kept using its previous layout decisions
+until something forced a fresh render — which only happened on
+file reload.
+
+### Fix: CortexTableView
+
+`src/editor/CortexTableView.ts` is a minimal stand-in for
+prosemirror-tables's TableView. ~160 lines. Owns:
+
+  - The outer `.tableWrapper` div, the `<table>`, the `<colgroup>`,
+    and the `<tbody>` (which becomes `contentDOM` for ProseMirror
+    to write rows into).
+  - An `update(node)` method that re-runs `updateColgroup()` on
+    every transaction-driven node update.
+  - An `ignoreMutation(record)` method that tells ProseMirror to
+    skip rebuilds for our own colgroup writes and table-style
+    updates.
+
+`updateColgroup()` walks the first row's cells, expands each by
+colspan, and writes a matching `<col>` for each spanned column. If
+the colgroup already has more `<col>`s than the new column count
+needs (column was just deleted), it trims the extras — closing
+bug #2.
+
+Cells with explicit colwidths sum to the table's `style.width`
+(fixed-layout). Cells without explicit colwidths fall back to
+browser auto-sizing with a sensible `min-width`.
+
+Wired into Editor.tsx via `HtmlTable.extend({ addNodeView })`. One
+view instance per `<table>` node.
+
+### Root cause #2: :focus-within doesn't fire on the cell
+
+The v1.0 CSS used `:not(:focus-within)` to detect "cursor is inside
+this cell" and reveal the raw formula text. But `:focus-within`
+matches only when `document.activeElement` is a *descendant* of
+the element. In ProseMirror, the cursor's `activeElement` is the
+`.ProseMirror` editor root — an *ancestor* of every cell. So
+`:focus-within` on a `<td>` ancestor of the cursor never matches.
+
+### Fix: Focused-cell decoration
+
+New plugin `buildFocusedCellPlugin` in `FormulaCells.ts`. Uses
+ProseMirror's `props.decorations` hook to attach a
+`Decoration.node` carrying a `cortex-cell-editing` class on the
+cell currently containing the cursor. ProseMirror re-runs
+decorations on every selection change, so the class moves with
+the cursor exactly the way `:focus-within` would have.
+
+The `FormulaEvaluator` extension's `addProseMirrorPlugins` now
+returns both the appendTransaction-based evaluator AND this new
+decoration plugin, bundled under the same Extension wrapper for
+clean registration.
+
+CSS swaps four selectors from `:not(:focus-within)` to
+`:not(.cortex-cell-editing)`. Behaviour matches the original
+intent: text visible only when the cursor is in the cell, ::after
+result overlay shown otherwise.
+
+### Architectural notes worth carrying forward
+
+- **NodeView lives at the Extension level, not the plugin level.**
+  Plugins and nodeViews are different ProseMirror concepts.
+  Plugins can install nodeViews via `props.nodeViews` BUT for
+  TipTap extensions the cleaner home is `addNodeView` on the
+  extending node itself. This keeps node-shape concerns local to
+  the node definition.
+
+- **Decorations are the correct way to attach state-derived
+  classes to nodes.** Whenever we want CSS to react to ProseMirror
+  state (selection, cursor position, transaction-driven flags),
+  Decoration.node is the right tool. It composes with existing
+  classes via `class: "..."` semantics — ProseMirror merges them
+  with whatever the node's renderHTML produces.
+
+- **`:focus-within` is unsafe for ProseMirror cell-level state.**
+  Anywhere we want a "this cell has the cursor" CSS hook, reach
+  for a Decoration.node with a class. Don't trust focus-within.
+
+### Files touched (v1.0.1 only)
+
+- **NEW** `src/editor/CortexTableView.ts` — the minimal nodeView.
+- `src/editor/FormulaCells.ts` — added `Decoration` /
+  `DecorationSet` imports, `buildFocusedCellPlugin`,
+  `focusedCellKey`. FormulaEvaluator now bundles both plugins.
+- `src/components/Editor.tsx` — `HtmlTable.extend` now adds
+  `addNodeView` returning a CortexTableView; CortexTableView import.
+- `src/index.css` — four selectors swapped from
+  `:not(:focus-within)` to `:not(.cortex-cell-editing)`. Header
+  comment updated to flag the v1.0.1 fix.
+- `verify-cluster-18-v1.0.1.ps1` — verify script with 5-pass smoke
+  checklist.
+
+### What ships under tag `cluster-18-v1.0.1-complete`
+
+- 🟢 Drag-resize and equalize column widths apply LIVE.
+- 🟢 No white-line artifact on column delete.
+- 🟢 Click-to-edit on formula cells reveals raw formula text.
+- v1.1.4 cell-height-growth-on-hover fix is intact (CortexColumnResize
+  plugin still owns drag input, never subscribes to view updates).
+
+## Phase 3 — Cluster 18 v1.1 — Cell type formatting + freeze rows/cols
+
+User-driven follow-up to v1.0.1. Two features land in v1.1: per-cell
+type formatting (number / money / percent / date) and table-level
+freeze rows / freeze columns (0–3 each). Sort and filter remain
+deferred to v1.2.
+
+### What ships
+
+**cellTypeFormat module** (`src/editor/cellTypeFormat.ts`, ~150
+lines). Pure registry: `formatCellValue(raw, type) → string` for the
+five v1.1 types. Empty / unparseable input passes through unchanged
+so the user can see and fix typos rather than getting `NaN` or a
+silent hide. Date parsing uses UTC components to dodge timezone
+shifts near midnight. Percent uses Excel-style semantics (0.5 →
+50.00%) per the v1.1 scoping decision — composes correctly with
+formulas like `=A1+0.1` between percent-typed cells.
+
+**Cell attributes** (`src/editor/FormulaCells.ts`). Two new attrs
+layered onto `FormulaTableCell` / `FormulaTableHeader`:
+
+  - `cellType: CellType | null` — round-trips via
+    `data-cell-type`. Defaults to `null` (≡ "text" passthrough).
+  - `cellDisplay: string | null` — round-trips via
+    `data-cell-display`. Caches the formatted display string for
+    non-formula cells with cellType. Formula cells store the
+    formatted result in `formulaResult` instead.
+
+The `FormulaEvaluator` plugin's appendTransaction pass extended:
+
+  - For **non-formula cells with cellType**: applies
+    `formatCellValue(cellText, cellType)` and writes to
+    `cellDisplay`.
+  - For **formula cells with cellType**: applies the formatter to
+    the formula's evaluated result, stores in `formulaResult` (so
+    the existing CSS path renders the cellType-formatted result
+    without needing new selectors).
+  - For cells without either: clears any stale attrs to `null`.
+
+The plugin's re-entry guard (transaction-meta flag) keeps the
+recursive update loop bounded.
+
+**Freeze panes** (`src/editor/FormulaCells.ts`,
+`src/components/Editor.tsx`). Two table-level attrs on `HtmlTable`:
+
+  - `frozenRows: number` (0–3 in v1.1).
+  - `frozenCols: number` (0–3 in v1.1).
+
+Round-trip via `data-frozen-rows` / `data-frozen-cols` HTML attrs.
+
+A new `buildFrozenCellsPlugin` walks every table on every state
+change, reads the freeze attrs, and uses `TableMap.findCell` to
+compute each cell's grid rect. Cells inside the frozen region get
+a `Decoration.node` carrying `data-frozen-row="<rowIdx>"` and/or
+`data-frozen-col="<colIdx>"` attributes.
+
+CSS uses these data-* attrs with `position: sticky` and z-index
+layering:
+
+  - Cells in frozen rows pin to `top: 0`, z-index 2.
+  - Cells in frozen columns pin to `left: 0`, z-index 2.
+  - Corner cells (both row and col frozen) z-index 3 so they
+    overlay scrolled content from both axes.
+
+`.tableWrapper` gains `overflow: auto; max-height: 70vh` so a
+scroll surface exists. Without this, sticky has nothing to stick
+to.
+
+**Right-click menu** (`src/components/TableContextMenu.tsx`). Three
+new submenus:
+
+  - **Cell type** — Text / Number / Money / Percent / Date.
+  - **Freeze rows** — Off / 1 row / 2 rows / 3 rows.
+  - **Freeze columns** — Off / 1 column / 2 columns / 3 columns.
+
+Selection sets the corresponding action; `Editor.tsx`
+`runTableAction` dispatches via TipTap's `updateAttributes` chain
+on `tableCell` / `tableHeader` (for cellType) or on `table` (for
+freeze).
+
+### Architectural decisions worth carrying forward
+
+- **Decorations for grid-position-derived state.** Cell freeze
+  status depends on (a) the cell's grid position (computed from
+  TableMap) and (b) the table's frozen* attrs. Neither lives on
+  the cell node itself, so we compute them in a plugin and emit
+  Decoration.node attrs. CSS selectors target `[data-frozen-*]`.
+  Same pattern as the focused-cell decoration from v1.0.1; reuse
+  this any time CSS needs to react to derived state.
+
+- **Display caching via attributes.** Both formula evaluation and
+  cell-type formatting cache their display in attributes
+  (`data-formula-result`, `data-cell-display`). On reload, the
+  cache is read from disk and re-displayed instantly; the
+  FormulaEvaluator plugin re-validates and updates if anything
+  has shifted. Avoids recomputing every formula on every render.
+
+- **Excel-style percent.** Critical for math composability. Letting
+  formulas operate on raw fractions and the formatter add the % at
+  display time means `=A1/B1` or `=A1+0.1` does the right thing in
+  a percent-typed cell without surprises.
+
+- **CellType passthrough on parse failures.** When the formatter
+  can't parse the input (non-numeric in a number cell, unparseable
+  date, etc.), it returns the raw text unchanged. The user sees
+  exactly what they typed and can fix it. No `NaN`, no silent
+  empty-cell.
+
+### Files touched (v1.1 only)
+
+- **NEW** `src/editor/cellTypeFormat.ts` — formatter registry +
+  CellType union + coerceCellType helper.
+- `src/editor/FormulaCells.ts` — added `cellType` and
+  `cellDisplay` attrs; FormulaEvaluator plugin extended to call
+  formatCellValue; new buildFrozenCellsPlugin; FormulaEvaluator
+  Extension now bundles three plugins.
+- `src/components/Editor.tsx` — HtmlTable.addAttributes (frozenRows
+  / frozenCols); runTableAction handles 9 new actions.
+- `src/components/TableContextMenu.tsx` — TableAction union extended
+  with 13 new members; new menu items rendered in three submenus.
+- `src/index.css` — cell-display swap selectors; subtle accent on
+  typed cells; .tableWrapper overflow: auto / max-height; sticky
+  positioning for data-frozen-* cells with z-index layering.
+- `verify-cluster-18-v1.1.ps1` — verify script with 10-pass smoke
+  checklist.
+
+### Known issues / unresolved
+
+- 🟡 `attr()` in CSS `top: calc(var(--cortex-row-h, 1.8em) *
+  attr(data-frozen-row number, 0))` is a relatively new syntax
+  (CSS attr() Module Level 5). It works in current Chromium but
+  older WebView versions may fall back to `top: 0` for all frozen
+  rows, causing rows beyond the first to overlap. If users hit
+  this, switch to a JS-side computation that writes inline
+  `top: ${row * height}px` in the decoration.
+
+- 🟡 `position: sticky` interacts oddly with `border-collapse:
+  collapse` — frozen cells may show a faint gap or border doubling
+  on some browsers. Acceptable for v1.1 (the cluster doc decision
+  was "use sticky + accept the border quirks").
+
+- 🟡 Cell types beyond the v1.1 set (currency code, custom regex
+  formatter) deferred to v1.2.
+
+### What ships under tag `cluster-18-v1.1-complete`
+
+- Cell types: text / number / money / percent / date with
+  Excel-style percent semantics.
+- Per-cell formatting composes with formulas — `=SUM(...)` in a
+  money cell shows `$X.XX`.
+- Freeze rows / freeze columns at 0/1/2/3 depths via right-click
+  submenus.
+- Frozen cells stay visible while the rest of the table scrolls;
+  corner cells layered correctly via z-index.
+- Round-trips on disk through HtmlTable's data-* attribute path.
+- All v1.0 + v1.0.1 fixes carried forward unchanged.
+
+## Phase 3 — Cluster 18 v1.2 — Sort + filter + comparison operators
+
+User-driven follow-up to v1.1. Three things land in v1.2:
+
+  1. Comparison operators in the formula engine.
+  2. Sort columns ascending / descending.
+  3. Filter rows by matching a cell's value.
+
+### What ships
+
+**Comparison operators in formulas** (`src/editor/formulaEngine.ts`).
+The lexer learned to peek-ahead for two-character operators: `<=`,
+`>=`, `==`, `!=`, plus the bare single-char `<` and `>`. Bare `=`
+mid-formula is also accepted as `==` (Excel-compat — the leading
+`=` of the formula is consumed before the lexer runs).
+
+The parser gained a new `comparison` precedence level sitting above
+`add`:
+
+```
+expr        := comparison
+comparison  := add ( (== | != | < | <= | > | >=) add )?  -- non-chainable
+add         := term (+|- term)*
+```
+
+Non-chainable was a deliberate design call: `1 < 2 < 3` would be
+ambiguous (Python-style chained vs C-style left-associative), so we
+error out and let the user be explicit with `IF`/`AND` later. Excel
+errors on this too.
+
+The evaluator returns `1` (true) or `0` (false) numerically, which
+composes naturally with arithmetic (`=(A1>10) * 5` yields 5 when
+A1>10 else 0) and feeds `IF` cleanly (IF treats non-zero as truthy).
+Closes the v1.0 limitation where `IF(condition, …)` could only use
+arithmetic-derived booleans.
+
+**Sort columns** (`src/components/Editor.tsx` `sortTableColumn`
+helper). Right-click in a cell → Sort column ▸ Ascending /
+Descending. Implementation:
+
+  - Find the cursor's enclosing cell + table.
+  - Compute the column index via `TableMap.findCell`.
+  - Pull `cellType` from the clicked cell to choose the comparator.
+  - Walk every row, partition into header rows + frozen rows
+    (skipped) vs body rows (sortable). Header detection: any cell
+    in the row is a `tableHeader`. Frozen detection: row index <
+    `frozenRows`.
+  - For each body row, find the cell at the target column via a
+    colspan-aware scan; build a sort key.
+  - Sort body rows with cell-type-aware comparison:
+    - `number` / `money` / `percent` → strip `$`, `%`, `,` then
+      `Number()`. NaN-safe: unparseable numerics bubble to the end
+      regardless of direction.
+    - `date` → `new Date(text).getTime()`. NaN-safe.
+    - text or null → `String.localeCompare` with `sensitivity:
+      "base"` and `numeric: true` (so "10" sorts after "9" in
+      mixed-text columns).
+  - Reassemble row list (headers + frozen first, sorted body
+    after), check for no-op (already in this order), build a new
+    table node via `tableNode.copy(content.constructor.from(rows))`,
+    dispatch one transaction.
+
+The sort modifies the doc — sorted order persists on save and is
+reflected in formulas referencing cell positions (`A1`, `B5`, etc.).
+This was the v1.2 scoping-question pick. Stable sort (V8/Chromium's
+`Array.sort` is stable).
+
+**Filter rows** (`src/editor/FormulaCells.ts`
+`buildFilteredRowsPlugin` + `Editor.tsx` `setTableFilter`). Two
+table-level attrs:
+
+  - `filterCol: number | null` — 0-based column index to filter on.
+  - `filterValue: string | null` — case-insensitive substring rows
+    must contain in that column to remain visible.
+
+Round-trip via `data-filter-col` / `data-filter-value` on the
+`<table>` element through HtmlTable's parseHTML / renderHTML.
+
+A new `buildFilteredRowsPlugin` runs as a `props.decorations` hook.
+On every state change it walks every table; when a filter is
+active, it walks each row, finds the cell at `filterCol` via a
+colspan-aware scan, compares the cell's text (lowercase-trimmed)
+against the filter (lowercase-trimmed) for substring containment.
+Rows that don't match get a `Decoration.node` carrying
+`data-filtered="true"`. Header rows + frozen rows are exempt — the
+plugin never tags them, so they always remain visible. CSS
+(`tr[data-filtered="true"] { display: none }`) does the hiding.
+
+Right-click menu: Filter rows ▸ Match this cell sets the filter
+using the clicked cell's column + text. Clear filter resets both
+attrs to `null`.
+
+### Architectural decisions worth carrying forward
+
+- **Comparisons return 1/0, not boolean.** Spreadsheet idiom — lets
+  comparisons compose with arithmetic and slot into IF without a
+  separate boolean type. If we ever add explicit boolean values
+  (TRUE/FALSE keywords), they should also coerce to 1/0 numerically.
+
+- **Sort modifies the doc.** The v1.2 scoping question pick. Sort-
+  as-view-state was the alternative — would have required plumbing
+  a sortKey/sortDir attr through CortexTableView and the freeze
+  decoration, breaking formulas that reference cell positions, and
+  losing the sorted order on close. Doc-modifying sort is what
+  Excel does and what the user expects.
+
+- **Filter is decoration-only.** Opposite of sort: filter doesn't
+  touch the doc, just paints attributes ProseMirror's CSS picks up.
+  Reason: filter is a transient view state ("show me only rows
+  with X today"); the user shouldn't have to undo to see the full
+  table again. Round-tripping via the table's attrs preserves the
+  setting across reloads.
+
+- **Header + frozen rows are special-cased identically across
+  features.** Sort skips them; filter never tags them. This gives
+  the user a consistent mental model: the top N rows (header +
+  frozen) are "labels", the rest are "data".
+
+- **Cell-type-aware comparators.** The v1.1 cellType attr now
+  drives sort comparison — number-typed columns sort numerically,
+  date-typed sort chronologically. The user can fix sort behaviour
+  by setting the right cellType, which is also the same thing they
+  do to fix display formatting. Single source of truth.
+
+### Files touched (v1.2 only)
+
+- `src/editor/formulaEngine.ts`
+  - Lexer: two-char operator branch with peek-ahead; new tokens
+    `<=`, `>=`, `==`, `!=`, plus bare `<`, `>`, `=`.
+  - Parser: new `parseComparison` level above `parseAdd`;
+    `parseExpr` now delegates to `parseComparison`. Old
+    `parseExpr` body renamed to `parseAdd`.
+  - Evaluator: new switch cases for `==`, `!=`, `<`, `<=`, `>`,
+    `>=` returning 1 / 0.
+- `src/components/Editor.tsx`
+  - `HtmlTable.addAttributes` extended with `filterCol` /
+    `filterValue` round-tripping via `data-filter-col` /
+    `data-filter-value`.
+  - New `sortTableColumn(editor, direction)` helper +
+    `setTableFilter(editor, col, value)` helper.
+  - New `computeSortKey(text, cellType)` internal that mirrors
+    `cellTypeFormat`'s parsing logic for sort key derivation.
+  - `runTableAction` switch adds 4 cases:
+    `sortAsc / sortDesc / filterMatch / filterClear`.
+- `src/editor/FormulaCells.ts`
+  - New `buildFilteredRowsPlugin` decoration plugin.
+  - `FormulaEvaluator` extension's `addProseMirrorPlugins` now
+    returns five plugins (formula evaluator, focused-cell,
+    frozen-cells, preserve-cell-selection, filtered-rows).
+- `src/components/TableContextMenu.tsx`
+  - `TableAction` union extended with `sortAsc / sortDesc /
+    filterMatch / filterClear`.
+  - Two new menu sections at the bottom of the in-table block.
+- `src/index.css`
+  - New rule `tr[data-filtered="true"] { display: none }`.
+- `verify-cluster-18-v1.2.ps1` — verify script with 9-pass smoke
+  checklist.
+
+### What ships under tag `cluster-18-v1.2-complete`
+
+- Comparison operators in formulas (`>`, `>=`, `<`, `<=`, `==`,
+  `!=`, plus bare `=` as Excel-compat `==`).
+- `IF(condition, …)` with natural numeric and string comparisons.
+- Sort columns ascending / descending, cell-type-aware, doc-
+  modifying.
+- Filter rows by matching a cell's value, decoration-only,
+  round-tripping via table attrs.
+- Header + frozen rows exempt from sort and filter.
+- All v1.0 + v1.0.1 + v1.1 features carry forward unchanged.
+
+## Phase 3 — Cluster 14 v1.0 — Time tracking / planned-vs-actual analytics
+
+User-driven follow-up to the calendar (Cluster 11) once the Excel layer
+shipped. Composes naturally with the events the user has already been
+recording — the analytics layer just asks one extra field on save.
+
+### What ships
+
+**Schema migration** — `events.actual_minutes INTEGER` (nullable),
+idempotent ALTER TABLE in `open_or_init_db`. NULL means "no actual
+recorded yet"; non-null means "how long this event actually took, in
+minutes, post-hoc". Existing events default to NULL and pass through
+without modification on next migration.
+
+**Event struct + create/update commands** — `Event` gains
+`actual_minutes: Option<i64>`. `create_event` and `update_event` accept
+the field as their last positional argument; both clean it (rejects
+negatives → None). `collect_events_in_window` adds the column to its
+SELECT and to the row mapping in both branches (standalone events +
+recurring masters). `Calendar.tsx`'s `saveEdit` and the two
+`invoke()` calls (`create_event` / `update_event`) thread
+`actualMinutes` through.
+
+**EventEditModal field** — new numeric input under Notes with hint
+"(post-hoc — how long it really took)". State held as a string
+(`actualMinutes` / `setActualMinutes`) so empty input is preserved as
+"no actual yet" rather than coerced to 0. On submit:
+`parseInt(actualMinutes.trim(), 10)` with `Number.isFinite` +
+non-negative check; empty string → `null` on disk. Disabled for
+read-only (Google-synced) events.
+
+**Tauri command — `get_time_tracking_aggregates`**
+
+```rust
+fn get_time_tracking_aggregates(
+    vault_path: String,
+    range_start_unix: i64,
+    range_end_unix: i64,
+) -> Result<Vec<TimeTrackingRow>, String>
+```
+
+Returns `Vec<TimeTrackingRow>` with `category`,
+`planned_minutes_total`, `actual_minutes_total`, `events_count`,
+`events_with_actual_count`. SQL groups by `COALESCE(category,
+'uncategorized')` over `start_at >= range_start AND start_at <
+range_end`. Planned minutes derived from `MAX(0, (end_at - start_at)
+/ 60)` so backwards events don't blow up the aggregate. Actual minutes
+is a straight `SUM(actual_minutes)` (NULL contributes 0 to the sum
+but doesn't increment `events_with_actual_count`, which uses
+`SUM(CASE WHEN actual_minutes IS NOT NULL THEN 1 ELSE 0 END)`).
+
+Recurring events (`recurrence_rule IS NOT NULL`) are excluded in
+v1.0. Reasoning: `expand_recurrence` generates instances on the fly
+without persisting them, so there's no row to attach an
+`actual_minutes` to per occurrence. v1.1 candidate if recurring time
+tracking surfaces as a daily-friction need.
+
+**TimeTracking.tsx view** — new structured view, ~440 lines.
+Mirrors the IdeaLog / MethodsArsenal pattern. Date range presets
+(7d / 30d / 90d / All), with All using `[0, 253402300800]` to span
+year 9999. Overall stats card: Planned / Actual / Ratio / Events
+counts. Per-category table: Category | Planned | Actual | Ratio |
+Events. Ratio is colour-cued via `ratioColour()`:
+
+  - planned == 0 OR no actuals recorded → muted
+  - actual / planned < 0.9 → success (green)
+  - actual / planned > 1.2 → danger (red)
+  - 0.9–1.2 inclusive → text colour (on track)
+
+`formatMinutes` collapses 0 → "0m", <60 → "Xm", else "Xh Ym" with
+trailing-zero trimming. Counts in parentheses are events with an
+`actual_minutes` recorded.
+
+**Sidebar button + ActiveView wiring** — `time-tracking` added to the
+`ActiveView` union in `TabPane.tsx`. Render branch in TabPane invokes
+`<TimeTracking vaultPath refreshKey={indexVersion} onClose=
+{closeStructuredView} />`. Sidebar button "⏱ Time" added next to
+"Cal" in `App.tsx`'s sidebar, calling `paneRefs.current[
+activeSlotIdx]?.setActiveView("time-tracking")`.
+
+### Architectural decisions worth carrying forward
+
+- **Single field, derived everything else.** `actual_minutes` is a
+  flat scalar. Planned is derived from the existing start/end. Ratio
+  is computed at display time. No redundant fields, no
+  recompute-on-write costs. The data shape stays minimal; analytics
+  emerge from queries.
+
+- **Empty input ≠ zero.** The input is a string, and the empty
+  string maps to `null` on disk. Setting it to "0" would mean "this
+  event took 0 minutes" (probably an error or a cancellation). The
+  distinction matters for `events_with_actual_count` — only events
+  the user has explicitly recorded an actual for participate in
+  ratio-meaningful counts.
+
+- **Recurring events are out of scope for v1.** Recurring instances
+  aren't persisted as rows, so there's no place to hang an
+  `actual_minutes` per instance. Adding instance-level overrides is
+  a meaningful schema change (a new `event_instance_overrides`
+  table keyed by master id + occurrence date) and only worth it if
+  the user starts asking about meeting time-spend. Document the
+  limitation, defer to v1.1.
+
+- **Aggregates over ranges, not over individual events.** The Rust
+  command does the GROUP BY. The frontend never sees individual
+  events — just the per-category rollup. This keeps the network
+  surface small and makes future granularity additions (per-day,
+  per-week) just a different SQL query.
+
+- **Colour cues are display-side only.** No "calibration target"
+  stored anywhere. The user reads the ratios and adjusts their
+  estimates by hand. v1.1 could add a "target ratio" preference
+  per category, but that's premature without data on whether
+  users actually want to override the 0.9 / 1.2 thresholds.
+
+### Known issues / open follow-ups
+
+- 🟡 Recurring events excluded (see above).
+
+- 🟡 No per-day rollup. The cluster doc question asked about
+  per-category vs per-day vs per-event granularity; v1.0 ships
+  per-category only. Per-day or per-event are reasonable v1.1
+  additions.
+
+- 🟡 No automatic "I forgot to fill in actual_minutes" prompt. An
+  event ends, the user moves on, the actual stays NULL. v1.1 could
+  surface a count of "completed events without actuals" somewhere
+  (notification bell? subtle toast on next calendar open?).
+
+- 🟡 The TimeTracking view's `refreshKey` comes from `indexVersion`
+  which bumps on file changes, not on event edits. Editing an
+  event's actual in another slot won't auto-refresh the view; the
+  user has to switch range presets or close+reopen. Acceptable
+  for v1.0 but worth flagging if it bites.
+
+### Files touched
+
+- `src-tauri/src/lib.rs`
+  - `actual_minutes INTEGER` migration line in `open_or_init_db`.
+  - `Event` struct gains `actual_minutes: Option<i64>`.
+  - `create_event` / `update_event` signatures + INSERT/UPDATE +
+    return Event literal.
+  - `collect_events_in_window` SELECT + row map (both branches).
+  - New `TimeTrackingRow` struct + `get_time_tracking_aggregates`
+    command + invoke_handler! registration.
+- `src/components/Calendar.tsx`
+  - `CalendarEvent` interface gains `actual_minutes?: number | null`.
+  - `saveEdit` payload type extension.
+  - Both `invoke()` calls pass `actualMinutes`.
+- `src/components/EventEditModal.tsx`
+  - `onSave` payload type extension.
+  - `actualMinutes` state + load from existingEvent + reset on new.
+  - Submit serialisation to int-or-null.
+  - New `<input type="number">` rendered under Notes.
+- **NEW** `src/components/TimeTracking.tsx` — structured view.
+- `src/components/TabPane.tsx`
+  - `ActiveView` union gains `"time-tracking"`.
+  - `TimeTracking` import.
+  - Render branch.
+- `src/App.tsx`
+  - "⏱ Time" sidebar button next to "Cal".
+- `verify-cluster-14.ps1` — verify script with 7-pass smoke
+  checklist.
+
+### What ships under tag `cluster-14-v1.0-complete`
+
+- Post-hoc actual-minutes capture on calendar events.
+- Per-category planned-vs-actual aggregate view.
+- Date range presets (7d / 30d / 90d / All).
+- Colour-cued ratio (green / red / neutral).
+- Composes with the existing calendar stack — no new data the user
+  hasn't already been entering, just one extra field.

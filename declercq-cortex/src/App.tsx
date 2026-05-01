@@ -202,6 +202,11 @@ function App() {
   // immediately rather than waiting for its 30s poll.
   const [reminderOverlayOpen, setReminderOverlayOpen] = useState(false);
   const [reminderRefreshTick, setReminderRefreshTick] = useState(0);
+  // Cluster 16 — wikilink shortcut (Ctrl+Shift+W). When the editor
+  // has no selection, we open the existing CommandPalette in this
+  // pick-mode: clicking a result inserts `[[Title]]` at the cursor
+  // instead of opening the file. The palette UI is unchanged.
+  const [wikilinkPickMode, setWikilinkPickMode] = useState(false);
 
   // Cluster 12 — auto-sync Google Calendar on startup + every 5 min.
   // Re-fetches event rows from Google → upserts into the events
@@ -783,6 +788,22 @@ function App() {
         // Cluster 15 — open the Reminders overlay (modal, not a slot).
         e.preventDefault();
         setReminderOverlayOpen(true);
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key === "W" || e.key === "w")
+      ) {
+        // Cluster 16 — wikilink shortcut. With editor focus + a
+        // non-empty selection, wrap the selection with [[...]] in
+        // place. Otherwise open the command palette in pick-mode so
+        // the user can choose a note to wikilink to.
+        e.preventDefault();
+        const handle = paneRefs.current[activeSlotIdx];
+        const wrapped = handle?.wrapSelectionInWikilink?.() ?? false;
+        if (!wrapped) {
+          setWikilinkPickMode(true);
+          setPaletteOpen(true);
+        }
       } else if (e.key === "Escape") {
         setPaletteOpen(false);
         setHelpOpen(false);
@@ -790,6 +811,7 @@ function App() {
         setTableModalOpen(false);
         setIntegrationsOpen(false);
         setReminderOverlayOpen(false);
+        setWikilinkPickMode(false);
         setPendingSlotChoice(null);
       }
     };
@@ -1240,6 +1262,16 @@ function App() {
                     Cal
                   </button>
                   <button
+                    onClick={() => {
+                      const handle = paneRefs.current[activeSlotIdx];
+                      if (handle) handle.setActiveView("time-tracking");
+                    }}
+                    style={baseStyles.changeBtn}
+                    title="Time tracking — planned vs actual"
+                  >
+                    ⏱ Time
+                  </button>
+                  <button
                     onClick={() => setIntegrationsOpen(true)}
                     style={baseStyles.changeBtn}
                     title="Integrations settings (Ctrl+,)"
@@ -1344,7 +1376,13 @@ function App() {
       <CommandPalette
         vaultPath={vaultPath}
         isOpen={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
+        onClose={() => {
+          setPaletteOpen(false);
+          // Always clear wikilink pick-mode when the palette closes,
+          // so a subsequent plain Ctrl+K isn't accidentally still in
+          // pick-mode.
+          setWikilinkPickMode(false);
+        }}
         onOpenFile={(p) => {
           setPaletteOpen(false);
           // Multi-slot: ask the user which slot to open in. Single
@@ -1355,6 +1393,18 @@ function App() {
             selectFileInSlot(p, 0);
           }
         }}
+        onPickResult={
+          wikilinkPickMode
+            ? (_path, title) => {
+                const handle = paneRefs.current[activeSlotIdx];
+                if (handle?.insertWikilinkAt) {
+                  handle.insertWikilinkAt(title);
+                }
+                setWikilinkPickMode(false);
+                setPaletteOpen(false);
+              }
+            : undefined
+        }
       />
       <SlotPicker
         isOpen={!!pendingSlotChoice}
@@ -1397,10 +1447,10 @@ function App() {
         vaultPath={vaultPath}
         isOpen={blockModalOpen}
         onClose={() => setBlockModalOpen(false)}
-        onConfirm={(name, iter) => {
+        onConfirm={(type, name, iter) => {
           setBlockModalOpen(false);
           const handle = paneRefs.current[activeSlotIdx];
-          if (handle) handle.insertExperimentBlock(name, iter);
+          if (handle) handle.insertExperimentBlock(type, name, iter);
         }}
       />
       <InsertTableModal

@@ -383,6 +383,409 @@ mark.mark-purple {
 }
 
 /* -----------------------------------------------------------------------
+ * Cluster 17 — typedBlock custom node
+ * -----------------------------------------------------------------------
+ * Replaces the v1.0/v1.1 paragraph-decoration approach (above) with a
+ * real ProseMirror node. Visual treatment is the same accent-tinted
+ * card, but now the title bar is its own DOM element (rendered by the
+ * NodeView's React component) and the body is a contiguous editable
+ * region that holds paragraphs, lists, code blocks, and tables.
+ */
+.prose .cortex-typed-block {
+  margin: 14px 0;
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.prose .cortex-typed-block-title {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--accent-bg);
+  border-bottom: 1px solid var(--border-2);
+  padding: 6px 10px 6px 12px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  user-select: none;
+  line-height: 1.4;
+  caret-color: transparent;
+}
+
+/* Cluster 17 v1.1 — Ctrl/Cmd+Click affordance on title text. */
+.prose .cortex-typed-block-title:hover .cortex-typed-block-title-text {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.prose .cortex-typed-block-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  font-size: 11px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.prose .cortex-typed-block-title-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prose .cortex-typed-block-title-editing {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.prose .cortex-typed-block-kind {
+  color: var(--accent);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.prose .cortex-typed-block-name-input,
+.prose .cortex-typed-block-iter-input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  padding: 2px 6px;
+  outline: none;
+}
+.prose .cortex-typed-block-name-input {
+  flex: 1 1 auto;
+  min-width: 60px;
+}
+.prose .cortex-typed-block-name-input:focus,
+.prose .cortex-typed-block-iter-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.prose .cortex-typed-block-iter-sep {
+  color: var(--text-muted);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.prose .cortex-typed-block-iter-input {
+  width: 4ch;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.prose .cortex-typed-block-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.prose .cortex-typed-block-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  transition:
+    background 80ms ease,
+    border-color 80ms ease;
+}
+.prose .cortex-typed-block-btn:hover {
+  background: var(--bg-card);
+  border-color: var(--border-2);
+}
+.prose .cortex-typed-block-btn-danger {
+  color: var(--danger, #c43c3c);
+}
+.prose .cortex-typed-block-btn-danger:hover {
+  background: var(--bg-card);
+  border-color: var(--danger, #c43c3c);
+}
+
+.prose .cortex-typed-block-body {
+  padding: 8px 14px 4px 14px;
+}
+.prose .cortex-typed-block-body > p:first-child {
+  margin-top: 0;
+}
+.prose .cortex-typed-block-body > p:last-child {
+  margin-bottom: 4px;
+}
+.prose .cortex-typed-block-body > ul:first-child,
+.prose .cortex-typed-block-body > ol:first-child,
+.prose .cortex-typed-block-body > pre:first-child,
+.prose .cortex-typed-block-body > table:first-child {
+  margin-top: 0;
+}
+.prose .cortex-typed-block-body > ul:last-child,
+.prose .cortex-typed-block-body > ol:last-child,
+.prose .cortex-typed-block-body > pre:last-child,
+.prose .cortex-typed-block-body > table:last-child {
+  margin-bottom: 4px;
+}
+
+/* -----------------------------------------------------------------------
+ * Cluster 18 v1.0 — formula cells + custom drag-resize affordances
+ * -----------------------------------------------------------------------
+ *
+ * v1.0.1 fix: replaced :focus-within with :not(.cortex-cell-editing).
+ * :focus-within doesn't match on a <td> ancestor of the cursor because
+ * ProseMirror's document.activeElement is the .ProseMirror editor root
+ * (an ancestor of the cell, not a descendant). The buildFocusedCellPlugin
+ * in FormulaCells.ts now adds a `cortex-cell-editing` class to whichever
+ * cell contains the cursor via Decoration.node, so click-to-edit works.
+ *
+ * -----------------------------------------------------------------------
+ *
+ * Formula display swap
+ * --------------------
+ * A cell with `data-formula-result` has the formula text in its body
+ * (so click-to-edit works natively — the cursor lands on the raw text).
+ * We hide the body color and overlay the result via a ::after
+ * pseudo-element. When the cell is focused (cursor inside), the
+ * pseudo-element disappears and the raw formula text becomes visible
+ * for editing. On blur, the FormulaEvaluator plugin re-evaluates the
+ * formula and updates `data-formula-result`, which the CSS picks up.
+ *
+ * The pseudo-element uses `pointer-events: none` so right-click and
+ * hover still hit the underlying td.
+ */
+.prose .cortex-table td[data-formula-result],
+.prose .cortex-table th[data-formula-result] {
+  position: relative;
+}
+.prose .cortex-table td[data-formula-result]:not(.cortex-cell-editing) > p,
+.prose .cortex-table th[data-formula-result]:not(.cortex-cell-editing) > p {
+  color: transparent;
+  user-select: none;
+}
+.prose .cortex-table td[data-formula-result]:not(.cortex-cell-editing)::after,
+.prose .cortex-table th[data-formula-result]:not(.cortex-cell-editing)::after {
+  content: attr(data-formula-result);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  font-style: italic;
+  color: var(--text);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Error results render in danger colour. The plugin prefixes "Error: " so
+   we can target them via attribute substring matching. */
+.prose
+  .cortex-table
+  td[data-formula-result^="Error:"]:not(.cortex-cell-editing)::after,
+.prose
+  .cortex-table
+  th[data-formula-result^="Error:"]:not(.cortex-cell-editing)::after {
+  color: var(--danger);
+  font-weight: 500;
+}
+/* Subtle accent on cells that carry a formula attribute, so the user
+   can spot which cells are computed at a glance. */
+.prose .cortex-table td[data-formula],
+.prose .cortex-table th[data-formula] {
+  background: var(--accent-bg);
+}
+
+/* -----------------------------------------------------------------------
+ * Cluster 18 v1.1 — cell type formatting display swap
+ * -----------------------------------------------------------------------
+ * Mirrors the formula display swap above, but for non-formula cells
+ * that carry a `data-cell-display` attr (set by the FormulaEvaluator
+ * plugin's appendTransaction pass when the cell has a cellType but no
+ * formula). Formula cells use the existing data-formula-result path
+ * (which is itself cellType-aware on the plugin side).
+ *
+ * We exclude cells that already have data-formula-result so the two
+ * display paths don't fight when a cell has both a formula and a
+ * cellType (formula wins; its result is already cellType-formatted).
+ */
+.prose
+  .cortex-table
+  td[data-cell-display]:not([data-formula-result]):not(.cortex-cell-editing),
+.prose
+  .cortex-table
+  th[data-cell-display]:not([data-formula-result]):not(.cortex-cell-editing) {
+  position: relative;
+}
+.prose
+  .cortex-table
+  td[data-cell-display]:not([data-formula-result]):not(.cortex-cell-editing)
+  > p,
+.prose
+  .cortex-table
+  th[data-cell-display]:not([data-formula-result]):not(.cortex-cell-editing)
+  > p {
+  color: transparent;
+  user-select: none;
+}
+.prose
+  .cortex-table
+  td[data-cell-display]:not([data-formula-result]):not(
+    .cortex-cell-editing
+  )::after,
+.prose
+  .cortex-table
+  th[data-cell-display]:not([data-formula-result]):not(
+    .cortex-cell-editing
+  )::after {
+  content: attr(data-cell-display);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  color: var(--text);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Subtle accent on typed cells so the user can spot which columns are
+   formatted at a glance. Slightly weaker than the formula tint to
+   visually distinguish the two. */
+.prose .cortex-table td[data-cell-type],
+.prose .cortex-table th[data-cell-type] {
+  background: rgba(108, 160, 220, 0.04);
+}
+
+/* -----------------------------------------------------------------------
+ * Cluster 18 v1.1 — freeze rows / freeze columns
+ * -----------------------------------------------------------------------
+ * The frozenCellsPlugin emits Decoration.node attrs (data-frozen-row /
+ * data-frozen-col) on cells inside the frozen region. CSS uses
+ * `position: sticky` so the frozen cells stay visible while the rest of
+ * the table scrolls. The table's wrapper allows horizontal/vertical
+ * overflow so the scroll surface exists.
+ *
+ * Border-collapse: collapse interacts oddly with sticky positioning, so
+ * we leave Tailwind Typography's default in place but add a background
+ * fill that hides bleed-through from scrolled-past content.
+ *
+ * z-index layering:
+ *   - Frozen row only: 2
+ *   - Frozen col only: 2
+ *   - Both (top-left corner): 3
+ */
+/* Cluster 18 v1.1.1 fix: do NOT clamp the wrapper. The original v1.1
+   rule applied `overflow: auto; max-height: 70vh` here so freeze
+   sticky positioning would have an internal scroll container. But
+   that turned every table into a viewport-height scroll box, which
+   meant a 50-row table's bottom rows were trapped inside the wrapper
+   and never registered in the document's scroll height — the user
+   couldn't scroll the document past the table. Removing the rule
+   lets each table grow to its natural height, which the document
+   scrolls through normally. position: sticky on frozen cells now
+   uses the editor's scroll ancestor (TabPane scroll area) rather
+   than a per-table internal scroll container, so frozen rows pin
+   to the viewport top when they would otherwise scroll out of
+   view (Excel-style behaviour). */
+.prose .cortex-table td[data-frozen-row],
+.prose .cortex-table th[data-frozen-row] {
+  position: sticky;
+  /* Stack rows: row 0 at top: 0, row 1 at top: 1.6em, etc. We approximate
+     row height with a CSS custom property; users can override per-table
+     by setting --cortex-row-h. */
+  top: calc(var(--cortex-row-h, 1.8em) * attr(data-frozen-row number, 0));
+  z-index: 2;
+  background: var(--bg-elev);
+}
+.prose .cortex-table td[data-frozen-col],
+.prose .cortex-table th[data-frozen-col] {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--bg-elev);
+}
+/* Cells that are BOTH frozen-row AND frozen-col sit at the highest
+   z-index so they overlay scrolled content from both axes. */
+.prose .cortex-table td[data-frozen-row][data-frozen-col],
+.prose .cortex-table th[data-frozen-row][data-frozen-col] {
+  z-index: 3;
+}
+
+/* -----------------------------------------------------------------------
+ * Cluster 18 v1.2 — filtered rows
+ * -----------------------------------------------------------------------
+ * The filtered-rows decoration plugin emits data-filtered="true" on
+ * rows whose cell at filterCol doesn't contain filterValue (case-
+ * insensitive substring match). CSS hides those rows entirely. The
+ * filter survives reload via data-filter-col + data-filter-value
+ * attrs on the <table> element itself.
+ *
+ * Frozen rows + header rows are exempt from filtering (the plugin
+ * never tags them with data-filtered) so column labels stay visible
+ * regardless of filter state.
+ */
+.prose .cortex-table tr[data-filtered="true"] {
+  display: none;
+}
+
+/* -----------------------------------------------------------------------
+ * Custom drag-resize affordances (CortexColumnResize)
+ * -----------------------------------------------------------------------
+ *
+ * The plugin sets two body-level classes on the editor's view DOM:
+ *   - .cortex-resize-hover  → mouse is in a cell-border drag zone
+ *   - .cortex-resize-active → drag in progress
+ *
+ * The visible 3px handle on the right edge of every cell is decorative
+ * — its hit-detection is geometric in the plugin, not via this DOM.
+ */
+.cortex-resize-hover {
+  cursor: col-resize;
+}
+.prose .cortex-table td,
+.prose .cortex-table th {
+  position: relative;
+}
+.prose .cortex-table td::before,
+.prose .cortex-table th::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 80ms ease;
+}
+.cortex-resize-hover .prose .cortex-table td:hover::before,
+.cortex-resize-hover .prose .cortex-table th:hover::before,
+.cortex-resize-active .prose .cortex-table td::before,
+.cortex-resize-active .prose .cortex-table th::before {
+  opacity: 0.45;
+}
+
+/* -----------------------------------------------------------------------
  * Tables (Cluster 8 v2.1 — protocol Reagents/Parts + method aggregations)
  * -----------------------------------------------------------------------
  * Without these rules TipTap renders tables with no visible borders
@@ -424,28 +827,68 @@ mark.mark-purple {
   background: var(--bg-elev, var(--bg));
 }
 
-/* TipTap's resizable column drag-handle. Default is invisible; give it
- * a faint hairline so users discover it. */
+/* TipTap's resizable column drag-handle.
+ *
+ * Cluster 16 v1.1.4: the handle is visible again now that v1.1.4's
+ * auto-equalize-on-insert prevents the cell-height growth (root
+ * cause was prosemirror-tables's `defaultCellMinWidth = 100px`
+ * fallback for cells without explicit `colwidth`; with explicit
+ * widths the plugin's per-hover `updateColumnsOnResize` is a no-op).
+ *
+ * The handle is rendered by prosemirror-tables as a Decoration.widget
+ * inside the active cell. We keep it `pointer-events: none` so it
+ * never absorbs mousemove events that a cross-cell drag-select needs.
+ * prosemirror-tables's hit-detection for resize is in JS, not via the
+ * handle DOM, so this doesn't break drag-to-resize.
+ */
 .prose .column-resize-handle {
   position: absolute;
-  right: -2px;
+  right: 0;
   top: 0;
   bottom: 0;
-  width: 4px;
+  width: 3px;
   background: var(--accent);
   opacity: 0;
   pointer-events: none;
+  transition: opacity 80ms ease-out;
 }
 .prose td:hover .column-resize-handle,
 .prose th:hover .column-resize-handle {
-  opacity: 0.35;
-  pointer-events: auto;
+  opacity: 0.45;
+}
+
+/* Cluster 16 v1.1.1: prosemirror-tables's columnResizing plugin sets
+ * the `resize-cursor` class on the editor's root DOM element when the
+ * mouse is within a few pixels of a column boundary. This rule turns
+ * that signal into the col-resize cursor (the double-arrow). Applies
+ * to `.ProseMirror.resize-cursor` (the canonical class+selector) plus
+ * the descendant variant in case TipTap ever wraps the editor.
+ */
+.ProseMirror.resize-cursor,
+.prose .ProseMirror.resize-cursor,
+.prose.resize-cursor {
   cursor: col-resize;
 }
 
-/* Selection highlight inside a cell when the cursor is there. */
+/* Cluster 16 v1.1: keep the prosemirror-tables wrapper from clipping
+ * the resize-handle (default browser behaviour for div is overflow:
+ * visible, but ProseMirror's columnResizing plugin sometimes injects
+ * `overflow-x: auto` which both clips the handle and triggers a
+ * scrollbar that shifts header alignment). Forcing visible keeps the
+ * handle visible and the table predictable.
+ */
+.prose .tableWrapper {
+  overflow: visible;
+}
+
+/* Selection highlight inside a cell when the cursor is there.
+ * Cluster 16 v1.1.1: dropped the ::after inset-shadow overlay (a
+ * potential layout-shift trigger when the browser flipped between
+ * hover and selected states on the same cell). The accent-tinted
+ * background alone is plenty visible against both even and odd
+ * zebra-stripe rows. */
 .prose .selectedCell {
-  background: var(--bg-elev, var(--bg-deep)) !important;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg)) !important;
 }
 
 /* PDF reader page-layout containers. The wrappers themselves no longer

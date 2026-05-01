@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { CalendarEvent, EventCategory } from "./Calendar";
 
 interface EventEditModalProps {
   isOpen: boolean;
+  /** Cluster 14 v1.3 — needed for the override CRUD calls when the
+   *  user saves an override for a single recurring instance. */
+  vaultPath: string;
   /** Existing event to edit, or null to create a new one. */
   existingEvent: CalendarEvent | null;
   /** When creating new, the start/end the click-and-drag (or the
@@ -17,9 +21,31 @@ interface EventEditModalProps {
       recurrence_rule?: string | null;
       notify_mode?: string | null;
       notify_lead_minutes?: number | null;
+      // Cluster 14 v1.0
+      actual_minutes?: number | null;
     },
   ) => void;
   onDelete: (id: string) => void;
+  /** Cluster 14 v1.3 — upsert / clear a per-instance override for a
+   *  single occurrence of a recurring series. Passing `clear: true`
+   *  deletes the row (revert to series default). */
+  onSaveInstanceOverride: (args: {
+    masterId: string;
+    instanceStartUnix: number;
+    skipped: boolean;
+    actualMinutes: number | null;
+    clear?: boolean;
+  }) => void;
+}
+
+/** Cluster 14 v1.3 — shape returned by `get_event_instance_override`. */
+interface InstanceOverride {
+  master_event_id: string;
+  instance_start_unix: number;
+  skipped: boolean;
+  actual_minutes: number | null;
+  created_at_unix: number;
+  updated_at_unix: number;
 }
 
 type NotifyMode = "none" | "all_day" | "urgent" | "ahead";
@@ -60,6 +86,7 @@ type EndCondition =
  */
 export function EventEditModal({
   isOpen,
+  vaultPath,
   existingEvent,
   defaultStart,
   defaultEnd,
@@ -67,6 +94,7 @@ export function EventEditModal({
   onClose,
   onSave,
   onDelete,
+  onSaveInstanceOverride,
 }: EventEditModalProps) {
   const [title, setTitle] = useState("");
   const [startLocal, setStartLocal] = useState(""); // datetime-local string
@@ -85,8 +113,29 @@ export function EventEditModal({
   // v1.4 notification UI state.
   const [notifyMode, setNotifyMode] = useState<NotifyMode>("none");
   const [notifyLead, setNotifyLead] = useState<number>(15);
+  // Cluster 14 v1.0 — empty when no actual recorded.
+  const [actualMinutes, setActualMinutes] = useState<string>("");
+  // Cluster 14 v1.3 — instance-override state. Only meaningful when the
+  // user is editing a recurring instance (existingEvent.recurrence_rule
+  // != null). `instanceOverride` reflects the saved override from the
+  // backend (null = no override → default behaviour). The two below
+  // are working values that the user is editing before pressing the
+  // override save / skip buttons.
+  const [instanceOverride, setInstanceOverride] =
+    useState<InstanceOverride | null>(null);
+  const [overrideActualMinutes, setOverrideActualMinutes] =
+    useState<string>("");
+  const [overrideSkipped, setOverrideSkipped] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
+
+  /** Whether this open is editing a single occurrence of a recurring
+   *  series (vs. editing the series as a whole, or a one-off event).
+   *  We treat any opened recurring event as instance-mode by default —
+   *  list_events_in_range emits expanded instances, so the start_at
+   *  the modal sees IS the instance start. */
+  const isRecurringInstance = !!existingEvent?.recurrence_rule;
+  const instanceStartUnix = existingEvent?.start_at ?? 0;
 
   // Reset state when the modal opens for a different event / new event.
   useEffect(() => {
@@ -128,6 +177,12 @@ export function EventEditModal({
           ? existingEvent.notify_lead_minutes
           : 15,
       );
+      setActualMinutes(
+        existingEvent.actual_minutes != null &&
+          existingEvent.actual_minutes >= 0
+          ? String(existingEvent.actual_minutes)
+          : "",
+      );
     } else {
       setTitle("");
       setStartLocal(unixToLocalInputValue(defaultStart, false));
@@ -142,10 +197,53 @@ export function EventEditModal({
       setCustomRRule("");
       setNotifyMode("none");
       setNotifyLead(15);
+      setActualMinutes("");
     }
     setError(null);
     setTimeout(() => titleRef.current?.focus(), 0);
   }, [isOpen, existingEvent, defaultStart, defaultEnd, categories]);
+
+  // Cluster 14 v1.3 — load any existing override for this instance so
+  // the override-mode controls reflect the saved state. Resets to
+  // "no override" for new events / non-recurring events.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!existingEvent || !existingEvent.recurrence_rule) {
+      setInstanceOverride(null);
+      setOverrideActualMinutes("");
+      setOverrideSkipped(false);
+      return;
+    }
+    let cancelled = false;
+    invoke<InstanceOverride | null>("get_event_instance_override", {
+      vaultPath,
+      masterId: existingEvent.id,
+      instanceStartUnix: existingEvent.start_at,
+    })
+      .then((ov) => {
+        if (cancelled) return;
+        setInstanceOverride(ov);
+        setOverrideSkipped(ov?.skipped ?? false);
+        setOverrideActualMinutes(
+          ov?.actual_minutes != null && ov.actual_minutes >= 0
+            ? String(ov.actual_minutes)
+            : "",
+        );
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // Don't block the modal if the load fails; just fall back to
+        // "no override" defaults. The save commands will surface
+        // their own errors if the user attempts an override action.
+        console.warn("[EventEditModal] override load failed:", e);
+        setInstanceOverride(null);
+        setOverrideActualMinutes("");
+        setOverrideSkipped(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, vaultPath, existingEvent]);
 
   if (!isOpen) return null;
 
@@ -161,6 +259,51 @@ export function EventEditModal({
     const endUnix = parseLocalInputValue(endLocal, allDay);
     setStartLocal(unixToLocalInputValue(startUnix, next));
     setEndLocal(unixToLocalInputValue(endUnix, next));
+  }
+
+  /**
+   * Cluster 14 v1.3 — save the user's override choices for the
+   * single recurring instance currently open in the modal. Reads
+   * `overrideActualMinutes` and `overrideSkipped` and dispatches to
+   * Calendar's `saveInstanceOverride`. Validates that we're actually
+   * in instance mode before doing anything.
+   */
+  function submitInstanceOverride(skipped: boolean) {
+    setError(null);
+    if (!existingEvent || !isRecurringInstance) return;
+    let actualNum: number | null = null;
+    if (!skipped && overrideActualMinutes.trim() !== "") {
+      const n = parseInt(overrideActualMinutes.trim(), 10);
+      if (!Number.isFinite(n) || n < 0) {
+        setError(
+          "Actual minutes must be a non-negative integer (or empty to inherit auto-credit).",
+        );
+        return;
+      }
+      actualNum = n;
+    }
+    onSaveInstanceOverride({
+      masterId: existingEvent.id,
+      instanceStartUnix,
+      skipped,
+      actualMinutes: actualNum,
+    });
+  }
+
+  /**
+   * Cluster 14 v1.3 — clear any override on this instance, reverting
+   * it to the series default (counted, auto-credited).
+   */
+  function submitInstanceClear() {
+    setError(null);
+    if (!existingEvent || !isRecurringInstance) return;
+    onSaveInstanceOverride({
+      masterId: existingEvent.id,
+      instanceStartUnix,
+      skipped: false,
+      actualMinutes: null,
+      clear: true,
+    });
   }
 
   function submit() {
@@ -205,6 +348,15 @@ export function EventEditModal({
     const notify_lead_value =
       notifyMode === "ahead" ? Math.max(0, Math.round(notifyLead) || 0) : null;
 
+    // Cluster 14 v1.0 — empty input → null on disk.
+    let actual_minutes_value: number | null = null;
+    if (actualMinutes.trim() !== "") {
+      const n = parseInt(actualMinutes.trim(), 10);
+      if (Number.isFinite(n) && n >= 0) {
+        actual_minutes_value = n;
+      }
+    }
+
     onSave({
       id: existingEvent?.id,
       title: trimmedTitle,
@@ -217,6 +369,7 @@ export function EventEditModal({
       recurrence_rule,
       notify_mode: notify_mode_value,
       notify_lead_minutes: notify_lead_value,
+      actual_minutes: actual_minutes_value,
     });
   }
 
@@ -591,6 +744,106 @@ export function EventEditModal({
           />
         </label>
 
+        {/* Cluster 14 v1.0 / v1.3 — actual-minutes input. For one-off
+            events this writes to the master event's actual_minutes
+            column. For recurring instances (Cluster 14 v1.3) the input
+            switches into override-mode, writing to the per-instance
+            override row instead so the user can record a different
+            actual for one occurrence without touching the series. */}
+        {isRecurringInstance ? (
+          <div style={overrideStyles.block}>
+            <div style={overrideStyles.bannerRow}>
+              <span style={overrideStyles.bannerIcon}>↻</span>
+              <div style={overrideStyles.bannerText}>
+                <strong>Editing one occurrence.</strong> Changes here affect
+                just this instance (
+                {formatInstanceLabel(instanceStartUnix, allDay)}); use
+                <em> Save series</em> to change the whole repeating series.
+                {instanceOverride && (
+                  <span style={overrideStyles.overrideBadge}>
+                    {overrideSkipped
+                      ? "currently skipped"
+                      : `currently overridden${
+                          instanceOverride.actual_minutes != null
+                            ? ` (${instanceOverride.actual_minutes}m)`
+                            : ""
+                        }`}
+                  </span>
+                )}
+              </div>
+            </div>
+            <label style={styles.label}>
+              <span style={styles.labelText}>
+                Actual minutes for this occurrence{" "}
+                <span style={{ opacity: 0.7, fontWeight: 400 }}>
+                  (empty → keep auto-credit)
+                </span>
+              </span>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={overrideActualMinutes}
+                onChange={(e) => setOverrideActualMinutes(e.target.value)}
+                placeholder="e.g. 45"
+                disabled={isReadOnly || overrideSkipped}
+                style={{
+                  ...styles.input,
+                  ...(overrideSkipped
+                    ? { opacity: 0.55, cursor: "not-allowed" }
+                    : null),
+                }}
+              />
+            </label>
+            <label style={overrideStyles.skipRow}>
+              <input
+                type="checkbox"
+                checked={overrideSkipped}
+                onChange={(e) => setOverrideSkipped(e.target.checked)}
+                disabled={isReadOnly}
+              />
+              <span>
+                Skip this occurrence (drop from calendar and time tracking)
+              </span>
+            </label>
+            {instanceOverride && (
+              <button
+                type="button"
+                onClick={submitInstanceClear}
+                style={overrideStyles.clearBtn}
+              >
+                Clear override (revert to series default)
+              </button>
+            )}
+          </div>
+        ) : (
+          <label style={styles.label}>
+            <span style={styles.labelText}>
+              Actual minutes{" "}
+              <span style={{ opacity: 0.7, fontWeight: 400 }}>
+                {repeat !== "none"
+                  ? "(set per-occurrence by clicking an instance — see Cluster 14 v1.3)"
+                  : "(post-hoc — how long it really took)"}
+              </span>
+            </span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={actualMinutes}
+              onChange={(e) => setActualMinutes(e.target.value)}
+              placeholder={repeat !== "none" ? "(auto-credited)" : "e.g. 90"}
+              disabled={isReadOnly || repeat !== "none"}
+              style={{
+                ...styles.input,
+                ...(repeat !== "none"
+                  ? { opacity: 0.55, cursor: "not-allowed" }
+                  : null),
+              }}
+            />
+          </label>
+        )}
+
         {error && <p style={styles.error}>{error}</p>}
 
         <div style={styles.footer}>
@@ -598,15 +851,45 @@ export function EventEditModal({
             <button
               onClick={() => onDelete(existingEvent.id)}
               style={styles.btnDanger}
+              title={
+                isRecurringInstance
+                  ? "Delete the whole recurring series (use Skip this occurrence to drop just one)"
+                  : "Delete this event"
+              }
             >
-              Delete
+              {isRecurringInstance ? "Delete series" : "Delete"}
             </button>
           )}
           <div style={{ flex: 1 }} />
           <button onClick={onClose} style={styles.btnGhost}>
             {isReadOnly ? "Close" : "Cancel"}
           </button>
-          {!isReadOnly && (
+          {!isReadOnly && isRecurringInstance && (
+            <>
+              <button
+                onClick={() => submitInstanceOverride(true)}
+                style={styles.btnDanger}
+                title="Drop just this occurrence from the calendar and aggregates"
+              >
+                Skip this occurrence
+              </button>
+              <button
+                onClick={() => submitInstanceOverride(false)}
+                style={styles.btnPrimary}
+                title="Save override for this single occurrence (actual_minutes only)"
+              >
+                Save just this
+              </button>
+              <button
+                onClick={submit}
+                style={styles.btnPrimary}
+                title="Save changes to the whole recurring series"
+              >
+                Save series
+              </button>
+            </>
+          )}
+          {!isReadOnly && !isRecurringInstance && (
             <button onClick={submit} style={styles.btnPrimary}>
               {existingEvent ? "Save" : "Create"}
             </button>
@@ -616,6 +899,79 @@ export function EventEditModal({
     </div>
   );
 }
+
+/** Cluster 14 v1.3 — local-time formatter for the override banner. */
+function formatInstanceLabel(unix: number, allDay: boolean): string {
+  if (!Number.isFinite(unix) || unix <= 0) return "this instance";
+  const d = new Date(unix * 1000);
+  const dateStr = d.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+  if (allDay) return dateStr;
+  const timeStr = d.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${dateStr} ${timeStr}`;
+}
+
+const overrideStyles: Record<string, React.CSSProperties> = {
+  block: {
+    border: "1px solid var(--accent)",
+    background: "var(--accent-bg-2)",
+    borderRadius: "6px",
+    padding: "0.75rem",
+    marginBottom: "0.75rem",
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.6rem",
+  },
+  bannerRow: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "0.5rem",
+    fontSize: "0.85rem",
+  },
+  bannerIcon: {
+    color: "var(--accent)",
+    fontSize: "1.05rem",
+    lineHeight: 1,
+    paddingTop: "1px",
+  },
+  bannerText: {
+    color: "var(--text-2)",
+  },
+  overrideBadge: {
+    display: "inline-block",
+    marginLeft: "0.4rem",
+    padding: "1px 6px",
+    fontSize: "0.7rem",
+    background: "var(--accent)",
+    color: "var(--bg)",
+    borderRadius: "3px",
+    fontWeight: 600,
+  },
+  skipRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.4rem",
+    fontSize: "0.85rem",
+    color: "var(--text-2)",
+    cursor: "pointer",
+  },
+  clearBtn: {
+    alignSelf: "flex-start",
+    background: "transparent",
+    border: "1px solid var(--border)",
+    color: "var(--text-muted)",
+    padding: "3px 8px",
+    fontSize: "0.78rem",
+    borderRadius: "4px",
+    cursor: "pointer",
+  },
+};
 
 // -----------------------------------------------------------------------------
 // Date input <-> unix helpers

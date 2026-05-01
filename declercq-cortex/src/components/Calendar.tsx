@@ -32,6 +32,10 @@ export interface CalendarEvent {
    *  htmlLink). Used by the read-only modal's "Open in Google
    *  Calendar" button. */
   external_html_link?: string | null;
+  /** Cluster 14 v1.0: post-hoc actual duration in minutes. null = no
+   *  actual recorded yet. Edited via the EventEditModal's "Actual
+   *  minutes" field; consumed by the time-tracking analytics view. */
+  actual_minutes?: number | null;
 }
 
 export interface EventCategory {
@@ -185,6 +189,8 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
       recurrence_rule?: string | null;
       notify_mode?: string | null;
       notify_lead_minutes?: number | null;
+      // Cluster 14 v1.0
+      actual_minutes?: number | null;
     },
   ) {
     try {
@@ -202,6 +208,7 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
           recurrenceRule: payload.recurrence_rule ?? null,
           notifyMode: payload.notify_mode ?? null,
           notifyLeadMinutes: payload.notify_lead_minutes ?? null,
+          actualMinutes: payload.actual_minutes ?? null,
         });
       } else {
         await invoke("create_event", {
@@ -216,6 +223,7 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
           recurrenceRule: payload.recurrence_rule ?? null,
           notifyMode: payload.notify_mode ?? null,
           notifyLeadMinutes: payload.notify_lead_minutes ?? null,
+          actualMinutes: payload.actual_minutes ?? null,
         });
       }
       closeEdit();
@@ -234,6 +242,43 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
       regenerateTodaysDailyNote();
     } catch (e) {
       setError(`Delete failed: ${e}`);
+    }
+  }
+  /**
+   * Cluster 14 v1.3 — upsert / clear an override for a single recurring
+   * instance. `skipped=true` removes that one occurrence from calendar
+   * lists and aggregates; `actualMinutes` overrides the auto-credited
+   * duration when provided. Passing `clear=true` deletes the override
+   * row entirely (revert to series default).
+   */
+  async function saveInstanceOverride(args: {
+    masterId: string;
+    instanceStartUnix: number;
+    skipped: boolean;
+    actualMinutes: number | null;
+    clear?: boolean;
+  }) {
+    try {
+      if (args.clear) {
+        await invoke("delete_event_instance_override", {
+          vaultPath,
+          masterId: args.masterId,
+          instanceStartUnix: args.instanceStartUnix,
+        });
+      } else {
+        await invoke("set_event_instance_override", {
+          vaultPath,
+          masterId: args.masterId,
+          instanceStartUnix: args.instanceStartUnix,
+          skipped: args.skipped,
+          actualMinutes: args.actualMinutes,
+        });
+      }
+      closeEdit();
+      reload();
+      regenerateTodaysDailyNote();
+    } catch (e) {
+      setError(`Override failed: ${e}`);
     }
   }
 
@@ -385,6 +430,7 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
       {editing && (
         <EventEditModal
           isOpen={true}
+          vaultPath={vaultPath}
           existingEvent={editing.event}
           defaultStart={editing.defaultStart ?? nowSecs()}
           defaultEnd={editing.defaultEnd ?? nowSecs() + HOUR_SECS}
@@ -392,6 +438,7 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
           onClose={closeEdit}
           onSave={saveEdit}
           onDelete={deleteEdit}
+          onSaveInstanceOverride={saveInstanceOverride}
         />
       )}
 
@@ -511,6 +558,64 @@ function WeekView({
                 {DAYS_SHORT[d.getDay()]}
               </div>
               <div style={{ fontSize: "1rem" }}>{d.getDate()}</div>
+            </div>
+          );
+        })}
+      </div>
+      {/* Cluster 16 v1.1.4: all-day row. v1.0–v1.1.3 hid all-day events
+          from the week view entirely (filter `!e.all_day` on the body
+          rows, no separate all-day section), so an event created in
+          the month view as all-day was invisible in the week view —
+          the user perceived this as "monthly doesn't match weekly."
+          The all-day row sits between the day-header and the hour
+          grid, mirrors the month-view event-chip styling for visual
+          continuity, and supports both click-to-edit (existing
+          events) and click-to-create (empty cell → all-day draft). */}
+      <div style={styles.allDayRow}>
+        <div style={styles.allDayLabel}>all-day</div>
+        {dayStarts.map((dayStart, dayIdx) => {
+          const dayEnd = dayStart + DAY_SECS;
+          const allDayEvents = events.filter(
+            (e) => e.start_at < dayEnd && e.end_at > dayStart && e.all_day,
+          );
+          return (
+            <div
+              key={dayIdx}
+              style={styles.allDayCol}
+              onClick={(e) => {
+                if (e.target !== e.currentTarget) return;
+                // Click on empty area → new all-day event spanning
+                // this single day (start = day-start, end = next-day-
+                // start). Saving picks up `allDay` from the modal.
+                onSlotDraft(dayStart, dayStart + DAY_SECS);
+              }}
+            >
+              {allDayEvents.map((ev) => {
+                const color = colorById.get(ev.category) ?? "#888";
+                const renderKey = `${ev.id}@${ev.start_at}`;
+                return (
+                  <div
+                    key={renderKey}
+                    style={{
+                      ...styles.allDayChip,
+                      background: `${color}33`,
+                      borderLeft: `3px solid ${color}`,
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEventClick(ev);
+                    }}
+                    title={`${ev.title}${ev.source === "google" ? " — Google Calendar" : ""}`}
+                  >
+                    {ev.source === "google" && (
+                      <span style={styles.googleBadge} aria-hidden="true">
+                        G
+                      </span>
+                    )}
+                    {ev.title}
+                  </div>
+                );
+              })}
             </div>
           );
         })}
@@ -1030,6 +1135,48 @@ const styles: Record<string, React.CSSProperties> = {
     display: "grid",
     gridTemplateColumns: "60px repeat(7, 1fr)",
     flex: 1,
+  },
+  // Cluster 16 v1.1.4 — all-day row between header and hour body.
+  allDayRow: {
+    display: "grid",
+    gridTemplateColumns: "60px repeat(7, 1fr)",
+    borderBottom: "1px solid var(--border)",
+    background: "var(--bg)",
+    minHeight: "32px",
+    position: "sticky",
+    top: 56, // sits below the sticky weekHeader
+    zIndex: 1,
+  },
+  allDayLabel: {
+    borderRight: "1px solid var(--border)",
+    fontSize: "0.65rem",
+    color: "var(--text-muted)",
+    textTransform: "uppercase",
+    textAlign: "right",
+    paddingRight: "6px",
+    paddingTop: "8px",
+    boxSizing: "border-box",
+  },
+  allDayCol: {
+    borderRight: "1px solid var(--border)",
+    padding: "4px",
+    cursor: "pointer",
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+    minHeight: "32px",
+    boxSizing: "border-box",
+  },
+  allDayChip: {
+    fontSize: "0.72rem",
+    padding: "2px 6px",
+    borderRadius: "3px",
+    color: "var(--text)",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    boxSizing: "border-box",
   },
   timeCol: {
     borderRight: "1px solid var(--border)",

@@ -1280,6 +1280,29 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
          );
          CREATE INDEX IF NOT EXISTS idx_routings_iteration ON experiment_routings(iteration_path);
 
+         /* Phase 3 Cluster 16 v1.1: ::protocol / ::idea / ::method
+            block routing — same shape as experiment_routings, just
+            for the three simpler block types. The block_type column
+            distinguishes which target_path means what.
+
+            Separate table (not a block_type column on
+            experiment_routings) because experiment_routings'
+            iteration_path resolver depends on the hierarchy table
+            (project/experiment/iter triple), while the typed
+            routings resolve to a single .md file in 04-Ideas/,
+            05-Methods/, or 06-Protocols/. Keeping them separate
+            avoids adding NULLable fields and keeps each query
+            simple. */
+         CREATE TABLE IF NOT EXISTS typed_block_routings (
+             daily_note_path TEXT NOT NULL,
+             block_index INTEGER NOT NULL,
+             block_type TEXT NOT NULL,
+             target_path TEXT NOT NULL,
+             content TEXT NOT NULL,
+             PRIMARY KEY (daily_note_path, block_index)
+         );
+         CREATE INDEX IF NOT EXISTS idx_typed_routings_target ON typed_block_routings(target_path);
+
          /* Phase 3 Cluster 11: Personal Calendar.
             Events live in SQLite (not as one-file-per-event) because there
             will be hundreds and the row shape is small + uniform. Body is
@@ -1305,7 +1328,26 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
              label TEXT NOT NULL,
              color TEXT NOT NULL,              -- CSS hex
              sort_order INTEGER NOT NULL DEFAULT 0
-         );",
+         );
+
+         /* Phase 3 Cluster 14 v1.3: per-instance overrides for recurring
+            events. Keyed by (master_event_id, instance_start_unix). Only
+            written when the user diverges from the auto-credit default —
+            either to skip a single occurrence (skipped = 1) or to record
+            an actual_minutes that differs from the planned duration.
+            Absence of a row means the instance follows the default
+            (counted in aggregates, auto-credited as fully spent). */
+         CREATE TABLE IF NOT EXISTS event_instance_overrides (
+             master_event_id TEXT NOT NULL,
+             instance_start_unix INTEGER NOT NULL,
+             skipped INTEGER NOT NULL DEFAULT 0,
+             actual_minutes INTEGER,            -- NULL = inherit auto-credit
+             created_at_unix INTEGER NOT NULL,
+             updated_at_unix INTEGER NOT NULL,
+             PRIMARY KEY (master_event_id, instance_start_unix)
+         );
+         CREATE INDEX IF NOT EXISTS idx_overrides_master
+             ON event_instance_overrides(master_event_id);",
     )
     .map_err(|e| e.to_string())?;
 
@@ -1330,6 +1372,13 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
         "ALTER TABLE events ADD COLUMN notify_lead_minutes INTEGER",
         [],
     );
+
+    // Cluster 14 v1.0 schema migration: actual_minutes — how long the
+    // event ACTUALLY took, post-hoc. Nullable; null means "no actual
+    // recorded yet". The planned-vs-actual analytics view computes
+    // ratios = actual / planned, where planned = (end_at - start_at)
+    // in minutes. Same idempotent-ALTER pattern as previous migrations.
+    let _ = conn.execute("ALTER TABLE events ADD COLUMN actual_minutes INTEGER", []);
 
     // Cluster 12 v1.0 schema migration: external-source provenance
     // for calendar events. `source` is 'local' (the user created it
@@ -2659,6 +2708,684 @@ fn regenerate_iteration_auto_section(
     };
     fs::write(iteration_path, new_content).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Phase 3 Cluster 16 v1.1 — Typed block routing (protocol / idea / method)
+// -----------------------------------------------------------------------------
+//
+// Mirrors the experiment-block routing pipeline (Cluster 4) for the three
+// simpler block types introduced by Cluster 16. On save, the daily-note
+// body is scanned for `::protocol NAME … ::end`, `::idea NAME … ::end`,
+// and `::method NAME … ::end` blocks. Each block is matched to a target
+// document in 04-Ideas/, 05-Methods/, or 06-Protocols/ by name (using
+// the same hierarchy / notes title-match logic as Cluster 4's experiment
+// resolution). The block's content is then spliced into a `## From daily
+// notes` auto-section in the target file, bracketed by start/end markers
+// so the user's manual content above is preserved.
+//
+// The on-disk block format is plain text — ::protocol NAME / blank-or-
+// content lines / ::end. The decoration in src/editor/ExperimentBlockDe-
+// coration.ts already paints a green strip for these; that visual is
+// independent of routing and works whether or not a routing succeeds.
+
+const TYPED_AUTO_START: &str =
+    "<!-- TYPED-DAILY-NOTES-AUTO-START — derived from ::protocol/::idea/::method blocks; do not edit -->";
+const TYPED_AUTO_END: &str = "<!-- TYPED-DAILY-NOTES-AUTO-END -->";
+
+#[derive(Debug, Clone)]
+struct TypedBlock {
+    /// One of "protocol", "idea", "method".
+    block_type: String,
+    /// Document name as the user typed it. Looked up case-insensitively.
+    name: String,
+    /// Body text between the open and close markers.
+    content: String,
+}
+
+/// Walk a markdown body and extract every ::protocol/::idea/::method
+/// block. Blockquote-prefix tolerant (mirrors extract_experiment_blocks).
+/// Unterminated headers are dropped silently (the user is mid-typing).
+fn extract_typed_blocks(body: &str) -> Vec<TypedBlock> {
+    let mut out: Vec<TypedBlock> = Vec::new();
+    let lines: Vec<&str> = body.lines().collect();
+    let mut i = 0usize;
+
+    fn strip_quote(line: &str) -> &str {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("> ") {
+            rest
+        } else if let Some(rest) = t.strip_prefix(">") {
+            rest
+        } else {
+            t
+        }
+    }
+
+    fn parse_typed_header(line: &str) -> Option<(String, String)> {
+        for kind in ["protocol", "idea", "method"] {
+            let prefix = format!("::{} ", kind);
+            if let Some(rest) = line.strip_prefix(&prefix) {
+                let name = rest.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                return Some((kind.to_string(), name.to_string()));
+            }
+        }
+        None
+    }
+
+    while i < lines.len() {
+        let normalized = strip_quote(lines[i]);
+        if let Some((kind, name)) = parse_typed_header(normalized) {
+            let mut j = i + 1;
+            let mut content_lines: Vec<String> = Vec::new();
+            let mut closed = false;
+            while j < lines.len() {
+                let line_norm = strip_quote(lines[j]);
+                if line_norm.trim() == "::end" {
+                    closed = true;
+                    break;
+                }
+                content_lines.push(line_norm.to_string());
+                j += 1;
+            }
+            if closed {
+                let content = content_lines.join("\n").trim().to_string();
+                out.push(TypedBlock {
+                    block_type: kind,
+                    name,
+                    content,
+                });
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Resolve a typed block's `name` to the absolute path of a document in
+/// the corresponding type's directory. Matches case-insensitively against
+/// either the H1 title or the filename-without-extension.
+///
+/// Returns Ok(None) if no matching file exists. The router treats that as
+/// a soft failure (warning), same as missing-experiment in Cluster 4.
+fn find_typed_target_path(
+    conn: &Connection,
+    vault_path: &str,
+    block_type: &str,
+    name: &str,
+) -> Result<Option<String>, String> {
+    let dir_segment = match block_type {
+        "protocol" => PROTOCOLS_DIR,
+        "idea" => IDEAS_DIR,
+        "method" => METHODS_DIR,
+        _ => return Ok(None),
+    };
+    // Build a SQL LIKE pattern that catches both `<vault>\<dir>\…` and the
+    // forward-slash variant some platforms produce.
+    let vault_norm = PathBuf::from(vault_path).to_string_lossy().to_string();
+    let pat_back = format!("{}\\{}\\%", vault_norm, dir_segment);
+    let pat_fwd = format!("{}/{}/%", vault_norm, dir_segment);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, COALESCE(title, '') FROM notes
+             WHERE (path LIKE ?1 OR path LIKE ?2)",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map(params![&pat_back, &pat_fwd], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    let want_lower = name.trim().to_ascii_lowercase();
+    for (path, title) in &rows {
+        if title.trim().to_ascii_lowercase() == want_lower {
+            return Ok(Some(path.clone()));
+        }
+        // Fallback: filename-without-extension match.
+        let stem = PathBuf::from(path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if stem.to_ascii_lowercase() == want_lower {
+            return Ok(Some(path.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Splice the `## From daily notes` block into a typed target file
+/// (protocol / idea / method). Bracketed by TYPED_AUTO_START /
+/// TYPED_AUTO_END comments so the user's manual content above and below
+/// is preserved on regen. If the markers don't exist yet, the auto block
+/// is appended at the end of the file.
+fn regenerate_typed_target_auto_section(
+    conn: &Connection,
+    target_path: &str,
+) -> Result<(), String> {
+    if !PathBuf::from(target_path).exists() {
+        return Ok(());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT br.daily_note_path, br.block_index, br.content,
+                    COALESCE(n.title, '(untitled)') AS title
+             FROM typed_block_routings br
+             LEFT JOIN notes n ON n.path = br.daily_note_path
+             WHERE br.target_path = ?1
+             ORDER BY br.daily_note_path, br.block_index",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![target_path], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    // Group by display title, but preserve the (path, idx, content)
+    // triple so per-block markers can encode the routing's primary key
+    // (daily_note_path + block_index). The order WITHIN each title's
+    // bucket follows block_index thanks to the ORDER BY in the SQL.
+    let mut by_source: std::collections::BTreeMap<String, Vec<(String, i64, String)>> =
+        std::collections::BTreeMap::new();
+    for r in rows {
+        let (path, block_idx, content, title) = r.map_err(|e| e.to_string())?;
+        by_source
+            .entry(title)
+            .or_insert_with(Vec::new)
+            .push((path, block_idx, content));
+    }
+
+    let mut auto = String::new();
+    auto.push_str(TYPED_AUTO_START);
+    auto.push('\n');
+    auto.push_str("## From daily notes\n\n");
+    if by_source.is_empty() {
+        auto.push_str(
+            "_(no daily-note blocks routed here yet — write \
+             `::protocol|idea|method <name>\\n…\\n::end` in a daily note)_\n",
+        );
+    } else {
+        for (title, items) in &by_source {
+            auto.push_str(&format!("### From [[{}]]\n\n", title));
+            for (path, block_idx, content) in items {
+                // Cluster 16 v1.1.1: per-block CORTEX-BLOCK markers
+                // tag each routing's content with its (src, idx) so
+                // propagate_typed_block_edits can parse the auto-
+                // section back into a list of routings on document
+                // save and detect any user edits to the content.
+                auto.push_str(&format!(
+                    "<!-- CORTEX-BLOCK src=\"{}\" idx=\"{}\" -->\n",
+                    path, block_idx
+                ));
+                auto.push_str(content);
+                if !content.ends_with('\n') {
+                    auto.push('\n');
+                }
+                auto.push_str("<!-- /CORTEX-BLOCK -->\n\n");
+            }
+        }
+    }
+    auto.push_str(TYPED_AUTO_END);
+    auto.push('\n');
+
+    let existing = fs::read_to_string(target_path).unwrap_or_default();
+    let new_content = match (
+        existing.find(TYPED_AUTO_START),
+        existing.find(TYPED_AUTO_END),
+    ) {
+        (Some(s), Some(e)) if e > s => {
+            // Replace the existing auto block in place.
+            let before = &existing[..s];
+            let after_marker = e + TYPED_AUTO_END.len();
+            // Skip a single trailing newline after the end marker so we
+            // don't accumulate blank lines on each regen.
+            let after = if existing.as_bytes().get(after_marker) == Some(&b'\n') {
+                &existing[after_marker + 1..]
+            } else {
+                &existing[after_marker..]
+            };
+            format!(
+                "{before}{auto}{after}",
+                before = before,
+                auto = auto,
+                after = after
+            )
+        }
+        _ => {
+            // Append the auto block at the end of the file with one blank
+            // line separating it from the user's content.
+            format!(
+                "{existing}\n\n{auto}",
+                existing = existing.trim_end(),
+                auto = auto
+            )
+        }
+    };
+    fs::write(target_path, new_content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Parse typed blocks from a daily note, refresh typed_block_routings for
+/// it, and regenerate every affected target file's auto section. Returns
+/// counts + warnings, same shape as `route_experiment_blocks`. Idempotent.
+#[tauri::command]
+fn route_typed_blocks(
+    vault_path: String,
+    daily_note_path: String,
+) -> Result<RoutingResult, String> {
+    let body = fs::read_to_string(&daily_note_path).map_err(|e| e.to_string())?;
+    let blocks = extract_typed_blocks(&body);
+
+    eprintln!(
+        "[cortex] route_typed_blocks: file={}, parsed={} blocks, body_len={}",
+        daily_note_path,
+        blocks.len(),
+        body.len()
+    );
+    for (i, b) in blocks.iter().enumerate() {
+        eprintln!(
+            "[cortex]   typed-block[{}]: type={:?} name={:?} content_len={}",
+            i,
+            b.block_type,
+            b.name,
+            b.content.len()
+        );
+    }
+
+    let conn = open_or_init_db(&vault_path)?;
+    let mut affected: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Collect targets we previously routed to from this daily note —
+    // they need a refresh even if the user removed the matching block.
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT target_path FROM typed_block_routings
+                 WHERE daily_note_path = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![&daily_note_path], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            affected.insert(r.map_err(|e| e.to_string())?);
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM typed_block_routings WHERE daily_note_path = ?1",
+        params![&daily_note_path],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let mut routed = 0;
+
+    for (idx, block) in blocks.iter().enumerate() {
+        let target = find_typed_target_path(&conn, &vault_path, &block.block_type, &block.name)?;
+        let target_path = match target {
+            Some(p) => {
+                eprintln!(
+                    "[cortex]   typed-block[{}]: matched {} → {}",
+                    idx, block.block_type, p
+                );
+                p
+            }
+            None => {
+                eprintln!(
+                    "[cortex]   typed-block[{}]: {} \"{}\" NOT FOUND",
+                    idx, block.block_type, block.name
+                );
+                warnings.push(format!(
+                    "{} \"{}\" not found — block skipped.",
+                    capitalize_ascii(&block.block_type),
+                    block.name
+                ));
+                continue;
+            }
+        };
+
+        conn.execute(
+            "INSERT INTO typed_block_routings
+             (daily_note_path, block_index, block_type, target_path, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &daily_note_path,
+                idx as i64,
+                &block.block_type,
+                &target_path,
+                &block.content
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        affected.insert(target_path);
+        routed += 1;
+    }
+
+    eprintln!(
+        "[cortex] route_typed_blocks summary: routed={}, regenerating {} targets",
+        routed,
+        affected.len()
+    );
+    for target_path in affected {
+        regenerate_typed_target_auto_section(&conn, &target_path)?;
+        eprintln!("[cortex]   regenerated typed → {}", target_path);
+    }
+
+    Ok(RoutingResult { routed, warnings })
+}
+
+fn capitalize_ascii(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Cluster 16 v1.1.1 — Two-way sync: document → daily-note block
+// -----------------------------------------------------------------------------
+//
+// `route_typed_blocks` propagates daily-note → document. The other direction
+// is here. When the user saves a protocol/idea/method document, we:
+//   1. Extract the typed-auto section between TYPED_AUTO_START / TYPED_AUTO_END.
+//   2. Parse per-block markers (<!-- CORTEX-BLOCK src="…" idx="…" -->
+//      <content> <!-- /CORTEX-BLOCK -->) into (src_path, idx, content) tuples.
+//   3. For each tuple, compare its content against the stored routing row's
+//      content. If different, the user edited this block in the document.
+//   4. Update the routings table.
+//   5. Open the source daily note and surgically replace the matching
+//      ::TYPE NAME / ::end block's body with the new content. Preserves
+//      the open/close markers and surrounding paragraphs.
+//
+// Idempotent: a second call after no edits is a no-op (every comparison
+// returns "same"). Designed to be called on every save (TabPane.tsx fires
+// it unconditionally) — the function short-circuits when the saved file
+// has no typed-auto section.
+
+/// Extract the body of a typed-auto section: the text between
+/// TYPED_AUTO_START and TYPED_AUTO_END, exclusive of the markers
+/// themselves and any single trailing newline directly after the
+/// start marker. Returns None if either marker is missing.
+fn extract_typed_auto_section(body: &str) -> Option<&str> {
+    let s = body.find(TYPED_AUTO_START)?;
+    let after_start = s + TYPED_AUTO_START.len();
+    // Skip a single newline directly after the start marker — the
+    // regen always emits one.
+    let after_start = if body.as_bytes().get(after_start) == Some(&b'\n') {
+        after_start + 1
+    } else {
+        after_start
+    };
+    let rel_end = body[after_start..].find(TYPED_AUTO_END)?;
+    Some(&body[after_start..after_start + rel_end])
+}
+
+/// Parse `<!-- CORTEX-BLOCK src="<path>" idx="<n>" -->` …
+/// `<!-- /CORTEX-BLOCK -->` markers out of an auto-section body.
+/// Returns a Vec of (src_path, block_index, content) tuples in the
+/// order they appear. Content is trimmed of surrounding whitespace.
+fn parse_auto_section_blocks(section: &str) -> Vec<(String, i64, String)> {
+    let mut out: Vec<(String, i64, String)> = Vec::new();
+    let lines: Vec<&str> = section.lines().collect();
+    let mut i = 0usize;
+
+    fn parse_block_open(line: &str) -> Option<(String, i64)> {
+        let line = line.trim();
+        let prefix = "<!-- CORTEX-BLOCK src=\"";
+        let middle = "\" idx=\"";
+        let suffix = "\" -->";
+        if !line.starts_with(prefix) || !line.ends_with(suffix) {
+            return None;
+        }
+        let inner = &line[prefix.len()..line.len() - suffix.len()];
+        let split_at = inner.find(middle)?;
+        let path = inner[..split_at].to_string();
+        let idx_str = &inner[split_at + middle.len()..];
+        let idx: i64 = idx_str.parse().ok()?;
+        Some((path, idx))
+    }
+
+    let end_marker = "<!-- /CORTEX-BLOCK -->";
+
+    while i < lines.len() {
+        if let Some((path, idx)) = parse_block_open(lines[i]) {
+            let mut j = i + 1;
+            let mut content_lines: Vec<&str> = Vec::new();
+            while j < lines.len() && lines[j].trim() != end_marker {
+                content_lines.push(lines[j]);
+                j += 1;
+            }
+            if j < lines.len() {
+                let content = content_lines.join("\n").trim().to_string();
+                out.push((path, idx, content));
+                i = j + 1;
+            } else {
+                // No closing marker — give up on this open marker.
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    out
+}
+
+/// Replace the Nth typed block's body content (counted across
+/// ::protocol/::idea/::method headers in document order) inside a
+/// daily note. Preserves the open/close markers and unrelated content.
+/// Returns Ok(true) if the block was found and replaced, Ok(false)
+/// otherwise (block index out of range, or no matching ::end).
+fn replace_daily_note_typed_block(
+    daily_note_path: &str,
+    block_index: i64,
+    new_content: &str,
+) -> Result<bool, String> {
+    let body = fs::read_to_string(daily_note_path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = body.lines().collect();
+
+    fn strip_quote(line: &str) -> &str {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("> ") {
+            rest
+        } else if let Some(rest) = t.strip_prefix(">") {
+            rest
+        } else {
+            t
+        }
+    }
+
+    fn is_typed_header(line: &str) -> bool {
+        for kind in ["protocol", "idea", "method"] {
+            if line.starts_with(&format!("::{} ", kind)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // Walk the body, counting typed blocks. When we hit the matching
+    // index, splice in the new content.
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    let mut current_idx: i64 = 0;
+    let mut replaced = false;
+
+    while i < lines.len() {
+        let normalized = strip_quote(lines[i]);
+        if is_typed_header(normalized) {
+            // Output the header verbatim.
+            out_lines.push(lines[i].to_string());
+            // Find the matching ::end.
+            let mut j = i + 1;
+            while j < lines.len() && strip_quote(lines[j]).trim() != "::end" {
+                j += 1;
+            }
+            if j < lines.len() {
+                if current_idx == block_index {
+                    // This is the block we're updating. Emit new
+                    // content lines (split on \n) between header and
+                    // ::end. If new_content is empty, the body becomes
+                    // a single empty paragraph.
+                    if new_content.is_empty() {
+                        out_lines.push(String::new());
+                    } else {
+                        for nc_line in new_content.split('\n') {
+                            out_lines.push(nc_line.to_string());
+                        }
+                    }
+                    replaced = true;
+                } else {
+                    // Keep original content.
+                    for k in (i + 1)..j {
+                        out_lines.push(lines[k].to_string());
+                    }
+                }
+                // Output the ::end line verbatim.
+                out_lines.push(lines[j].to_string());
+                i = j + 1;
+            } else {
+                // Unterminated header — keep as-is, don't count it.
+                i += 1;
+                continue;
+            }
+            current_idx += 1;
+        } else {
+            out_lines.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+
+    if !replaced {
+        return Ok(false);
+    }
+
+    let mut new_body = out_lines.join("\n");
+    if body.ends_with('\n') && !new_body.ends_with('\n') {
+        new_body.push('\n');
+    }
+    fs::write(daily_note_path, new_body).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Two-way-sync entry point. Called from the frontend after every save.
+/// If the saved file has no typed-auto section the call is a fast no-op.
+/// Otherwise: extracts each block's current content, compares to the
+/// stored routing, propagates any deltas back to the source daily notes,
+/// and updates the routings table.
+///
+/// Returns the number of blocks whose content changed (and was
+/// propagated). 0 is the steady-state value when nothing has been edited
+/// in the document since the last regen.
+#[tauri::command]
+fn propagate_typed_block_edits(vault_path: String, file_path: String) -> Result<usize, String> {
+    let body = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+    let section = match extract_typed_auto_section(&body) {
+        Some(s) => s,
+        None => return Ok(0),
+    };
+    let parsed = parse_auto_section_blocks(section);
+    if parsed.is_empty() {
+        return Ok(0);
+    }
+
+    let conn = open_or_init_db(&vault_path)?;
+    let mut propagated = 0;
+
+    // Collect updates to apply per-daily-note so we can do one file
+    // write per source. (Different daily notes' blocks may interleave
+    // in the document's auto-section.)
+    let mut by_source: std::collections::HashMap<String, Vec<(i64, String)>> =
+        std::collections::HashMap::new();
+
+    for (src_path, idx, new_content) in parsed {
+        // Look up the stored content.
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT content FROM typed_block_routings
+                 WHERE daily_note_path = ?1 AND block_index = ?2",
+                params![&src_path, idx],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(stored_content) = stored else {
+            // No matching routing row. Could happen if the user
+            // deleted the source block in the daily note since the
+            // last regen. Skip silently — the next daily-note save
+            // will refresh the auto-section.
+            continue;
+        };
+        if stored_content == new_content {
+            continue;
+        }
+        // Update the routing.
+        conn.execute(
+            "UPDATE typed_block_routings
+             SET content = ?1
+             WHERE daily_note_path = ?2 AND block_index = ?3",
+            params![&new_content, &src_path, idx],
+        )
+        .map_err(|e| e.to_string())?;
+        by_source
+            .entry(src_path)
+            .or_insert_with(Vec::new)
+            .push((idx, new_content));
+        propagated += 1;
+    }
+
+    // Apply updates per source daily note. Sort each source's updates
+    // by descending block_index so earlier-block edits don't shift the
+    // line counts that later-block edits rely on. (Not strictly needed
+    // because replace_daily_note_typed_block re-walks from scratch each
+    // call, but it's a defensive habit for future refactors.)
+    for (src_path, mut updates) in by_source {
+        updates.sort_by(|a, b| b.0.cmp(&a.0));
+        for (idx, new_content) in updates {
+            match replace_daily_note_typed_block(&src_path, idx, &new_content) {
+                Ok(true) => {
+                    eprintln!(
+                        "[cortex] propagate: updated daily-note block {} in {}",
+                        idx, src_path
+                    );
+                }
+                Ok(false) => {
+                    eprintln!(
+                        "[cortex] propagate: block {} not found in {} (skipped)",
+                        idx, src_path
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[cortex] propagate: replace failed for {}#{}: {}",
+                        src_path, idx, e
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(propagated)
 }
 
 // -----------------------------------------------------------------------------
@@ -4743,6 +5470,13 @@ pub struct Event {
     /// Google Calendar" button.
     #[serde(default)]
     pub external_html_link: Option<String>,
+    /// Cluster 14 v1.0: how long the event actually took, in minutes.
+    /// None = no actual recorded yet. For non-recurring events the
+    /// EventEditModal's "Actual minutes" field writes this; recurring
+    /// events ignore the field and are auto-credited as fully spent
+    /// at aggregate time (Cluster 14 v1.1 semantics).
+    #[serde(default)]
+    pub actual_minutes: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -4751,6 +5485,62 @@ pub struct EventCategory {
     pub label: String,
     pub color: String,
     pub sort_order: i64,
+}
+
+/// Cluster 14 v1.3 — per-instance override for a recurring event.
+/// Keyed by (master_event_id, instance_start_unix). Absence of a row
+/// for an instance means "follow the default" (counted in aggregates,
+/// auto-credited as fully spent in time tracking).
+///
+///   skipped         — true if this single occurrence didn't happen
+///                     (drops out of expansion entirely).
+///   actual_minutes  — Some(n) overrides the auto-credited duration
+///                     for this one instance; None means use the
+///                     default (auto-credit planned).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct InstanceOverride {
+    pub master_event_id: String,
+    pub instance_start_unix: i64,
+    pub skipped: bool,
+    #[serde(default)]
+    pub actual_minutes: Option<i64>,
+    pub created_at_unix: i64,
+    pub updated_at_unix: i64,
+}
+
+/// Load all overrides for a given recurring master, keyed by
+/// instance_start_unix for O(1) lookup during expansion.
+fn load_overrides_for_master(
+    conn: &Connection,
+    master_id: &str,
+) -> Result<std::collections::HashMap<i64, InstanceOverride>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT master_event_id, instance_start_unix, skipped, actual_minutes,
+                    created_at_unix, updated_at_unix
+             FROM event_instance_overrides
+             WHERE master_event_id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![master_id], |row| {
+            Ok(InstanceOverride {
+                master_event_id: row.get(0)?,
+                instance_start_unix: row.get(1)?,
+                skipped: row.get::<_, i64>(2)? != 0,
+                actual_minutes: row.get(3)?,
+                created_at_unix: row.get(4)?,
+                updated_at_unix: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut map: std::collections::HashMap<i64, InstanceOverride> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let ov = r.map_err(|e| e.to_string())?;
+        map.insert(ov.instance_start_unix, ov);
+    }
+    Ok(map)
 }
 
 fn unix_now() -> i64 {
@@ -4791,7 +5581,19 @@ fn next_event_id(conn: &Connection, date_iso: &str) -> Result<String, String> {
 ///
 /// Expansion is bounded by both `window_end` and a hard cap (5000)
 /// so a buggy rule can't run away and starve the SQLite query.
-fn expand_recurrence(master: &Event, window_start: i64, window_end: i64) -> Vec<Event> {
+///
+/// Cluster 14 v1.3: `overrides` is a map keyed by instance_start_unix.
+/// Skipped instances are dropped before being pushed; instances with
+/// a non-null `actual_minutes` override land in the expanded Event's
+/// own `actual_minutes` field (so the time-tracking aggregator can
+/// distinguish auto-credit from a user-recorded value). For non-
+/// recurring events (or callers that don't care), pass an empty map.
+fn expand_recurrence(
+    master: &Event,
+    window_start: i64,
+    window_end: i64,
+    overrides: &std::collections::HashMap<i64, InstanceOverride>,
+) -> Vec<Event> {
     let rule_str = match &master.recurrence_rule {
         Some(s) if !s.trim().is_empty() => s.clone(),
         _ => return vec![master.clone()],
@@ -4845,9 +5647,24 @@ fn expand_recurrence(master: &Event, window_start: i64, window_end: i64) -> Vec<
     let walk_end = window_end.min(until_unix.unwrap_or(window_end));
 
     let push_instance = |out: &mut Vec<Event>, start_at: i64| {
+        // Cluster 14 v1.3: drop skipped instances at expansion time so
+        // they never show up in calendar lists OR aggregates. Overrides
+        // with a non-null actual_minutes set the instance's value (so
+        // the aggregator's recurring branch can distinguish "user
+        // recorded a custom actual" from "auto-credit").
+        let override_for_this = overrides.get(&start_at);
+        if let Some(ov) = override_for_this {
+            if ov.skipped {
+                return;
+            }
+        }
         let end_at = start_at + duration;
         // Only include if the instance overlaps the visible window.
         if start_at < window_end && end_at > window_start {
+            let actual = match override_for_this {
+                Some(ov) => ov.actual_minutes.or(master.actual_minutes),
+                None => master.actual_minutes,
+            };
             out.push(Event {
                 id: master.id.clone(),
                 title: master.title.clone(),
@@ -4866,6 +5683,7 @@ fn expand_recurrence(master: &Event, window_start: i64, window_end: i64) -> Vec<
                 external_id: master.external_id.clone(),
                 external_etag: master.external_etag.clone(),
                 external_html_link: master.external_html_link.clone(),
+                actual_minutes: actual,
             });
         }
     };
@@ -5097,6 +5915,8 @@ fn create_event(
     recurrence_rule: Option<String>,
     notify_mode: Option<String>,
     notify_lead_minutes: Option<i64>,
+    // Cluster 14 v1.0 — optional post-hoc actual duration in minutes.
+    actual_minutes: Option<i64>,
 ) -> Result<Event, String> {
     if title.trim().is_empty() {
         return Err("Event title is empty".to_string());
@@ -5118,9 +5938,10 @@ fn create_event(
     let now = unix_now();
     let date_iso = today_iso_date();
     let id = next_event_id(&conn, &date_iso)?;
+    let cleaned_actual = actual_minutes.filter(|n| *n >= 0);
     conn.execute(
-        "INSERT INTO events (id, title, start_at, end_at, all_day, category, status, body, created_at, updated_at, recurrence_rule, notify_mode, notify_lead_minutes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO events (id, title, start_at, end_at, all_day, category, status, body, created_at, updated_at, recurrence_rule, notify_mode, notify_lead_minutes, actual_minutes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             id,
             title,
@@ -5135,6 +5956,7 @@ fn create_event(
             cleaned_rule,
             cleaned_mode,
             cleaned_lead,
+            cleaned_actual,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -5160,6 +5982,7 @@ fn create_event(
         external_id: None,
         external_etag: None,
         external_html_link: None,
+        actual_minutes: cleaned_actual,
     })
 }
 
@@ -5190,6 +6013,8 @@ fn update_event(
     recurrence_rule: Option<String>,
     notify_mode: Option<String>,
     notify_lead_minutes: Option<i64>,
+    // Cluster 14 v1.0
+    actual_minutes: Option<i64>,
 ) -> Result<Event, String> {
     if title.trim().is_empty() {
         return Err("Event title is empty".to_string());
@@ -5209,13 +6034,14 @@ fn update_event(
     };
     let conn = open_or_init_db(&vault_path)?;
     let now = unix_now();
+    let cleaned_actual = actual_minutes.filter(|n| *n >= 0);
     let affected = conn
         .execute(
             "UPDATE events
              SET title = ?2, start_at = ?3, end_at = ?4, all_day = ?5,
                  category = ?6, status = ?7, body = ?8, updated_at = ?9,
                  recurrence_rule = ?10, notify_mode = ?11,
-                 notify_lead_minutes = ?12
+                 notify_lead_minutes = ?12, actual_minutes = ?13
              WHERE id = ?1",
             params![
                 id,
@@ -5230,6 +6056,7 @@ fn update_event(
                 cleaned_rule,
                 cleaned_mode,
                 cleaned_lead,
+                cleaned_actual,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -5265,7 +6092,295 @@ fn update_event(
         external_id: None,
         external_etag: None,
         external_html_link: None,
+        actual_minutes: cleaned_actual,
     })
+}
+
+// -----------------------------------------------------------------------------
+// Cluster 14 v1.0 — planned-vs-actual analytics
+// -----------------------------------------------------------------------------
+//
+// `get_time_tracking_aggregates` walks the events table over a date range
+// and returns per-category aggregates: total planned minutes, total actual
+// minutes, count of events, count of events with an actual recorded.
+//
+// Recurring events (Cluster 14 v1.1): each occurrence is auto-credited
+// with its full duration. collect_events_in_window expands recurring
+// masters into instances within the date window, and the aggregator
+// treats every recurring instance as "fully spent" (actual = planned).
+// This means standups, weekly reviews, and other regular blocks
+// contribute to category totals without per-instance manual entry.
+// Non-recurring events still rely on the user filling in actual_minutes
+// post-hoc to count toward actual / ratio.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TimeTrackingRow {
+    pub category: String,
+    pub planned_minutes_total: i64,
+    pub actual_minutes_total: i64,
+    pub events_count: i64,
+    pub events_with_actual_count: i64,
+}
+
+#[tauri::command]
+fn get_time_tracking_aggregates(
+    vault_path: String,
+    range_start_unix: i64,
+    range_end_unix: i64,
+) -> Result<Vec<TimeTrackingRow>, String> {
+    let conn = open_or_init_db(&vault_path)?;
+    // collect_events_in_window expands recurring masters into per-
+    // occurrence instances. Each instance carries the master's
+    // recurrence_rule (Some(...)) so the aggregator can identify and
+    // auto-credit them below.
+    let events = collect_events_in_window(&conn, range_start_unix, range_end_unix)?;
+
+    // Filter to events that STARTED within the window (matches the
+    // earlier SQL semantics: not just "overlap"). collect_events_in_window
+    // returns instances that overlap, which over-counts standalone
+    // events that started before range_start. Tighten here.
+    let mut by_category: std::collections::HashMap<String, TimeTrackingRow> =
+        std::collections::HashMap::new();
+
+    for evt in &events {
+        if evt.start_at < range_start_unix || evt.start_at >= range_end_unix {
+            continue;
+        }
+        let raw_cat = evt.category.trim();
+        let cat_key = if raw_cat.is_empty() {
+            "uncategorized".to_string()
+        } else {
+            raw_cat.to_string()
+        };
+        let planned = ((evt.end_at - evt.start_at).max(0)) / 60;
+        // Recurring events: auto-credit each occurrence as fully spent
+        // (Cluster 14 v1.1) UNLESS the user has recorded an instance
+        // override (Cluster 14 v1.3) — in which case use the override's
+        // actual_minutes. Skipped instances were already dropped by
+        // expand_recurrence and don't appear here.
+        // For non-recurring events, the master's actual_minutes (set
+        // post-hoc via the modal) is the source of truth.
+        let is_recurring = evt.recurrence_rule.is_some();
+        let (actual, has_actual) = if is_recurring {
+            match evt.actual_minutes {
+                Some(m) if m >= 0 => (m, true),
+                _ => (planned, true),
+            }
+        } else {
+            match evt.actual_minutes {
+                Some(m) if m >= 0 => (m, true),
+                _ => (0, false),
+            }
+        };
+        let row = by_category
+            .entry(cat_key.clone())
+            .or_insert_with(|| TimeTrackingRow {
+                category: cat_key,
+                planned_minutes_total: 0,
+                actual_minutes_total: 0,
+                events_count: 0,
+                events_with_actual_count: 0,
+            });
+        row.planned_minutes_total += planned;
+        row.actual_minutes_total += actual;
+        row.events_count += 1;
+        if has_actual {
+            row.events_with_actual_count += 1;
+        }
+    }
+
+    let mut out: Vec<TimeTrackingRow> = by_category.into_values().collect();
+    out.sort_by(|a, b| a.category.cmp(&b.category));
+    Ok(out)
+}
+
+// ===========================================================================
+// Cluster 14 v1.3 — per-instance overrides for recurring events + per-day
+// rollup for the Trends tab.
+// ===========================================================================
+
+/// Upsert an override for a single recurring instance. Identified by
+/// (master_event_id, instance_start_unix). When `skipped` is true, the
+/// instance is dropped from calendar lists and aggregates entirely.
+/// `actual_minutes` (when non-null) replaces the auto-credited value
+/// in time-tracking aggregates for this one occurrence.
+#[tauri::command]
+fn set_event_instance_override(
+    vault_path: String,
+    master_id: String,
+    instance_start_unix: i64,
+    skipped: bool,
+    actual_minutes: Option<i64>,
+) -> Result<(), String> {
+    if master_id.trim().is_empty() {
+        return Err("master_id required".into());
+    }
+    // Reject negative actual_minutes; treat as None.
+    let cleaned_actual = match actual_minutes {
+        Some(m) if m >= 0 => Some(m),
+        _ => None,
+    };
+    let conn = open_or_init_db(&vault_path)?;
+    // Refuse if the master doesn't exist or isn't recurring — overrides
+    // only make sense against a recurring master.
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE id = ?1 AND recurrence_rule IS NOT NULL",
+            params![master_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if exists == 0 {
+        return Err(format!(
+            "Event `{}` not found or is not a recurring series.",
+            master_id
+        ));
+    }
+    let now = unix_now();
+    conn.execute(
+        "INSERT INTO event_instance_overrides
+            (master_event_id, instance_start_unix, skipped, actual_minutes,
+             created_at_unix, updated_at_unix)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(master_event_id, instance_start_unix) DO UPDATE SET
+             skipped = excluded.skipped,
+             actual_minutes = excluded.actual_minutes,
+             updated_at_unix = excluded.updated_at_unix",
+        params![
+            master_id,
+            instance_start_unix,
+            if skipped { 1i64 } else { 0i64 },
+            cleaned_actual,
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drop the override for one instance. Functionally equivalent to
+/// "revert to series default" (auto-credit, no skip). No-op if no
+/// override row existed.
+#[tauri::command]
+fn delete_event_instance_override(
+    vault_path: String,
+    master_id: String,
+    instance_start_unix: i64,
+) -> Result<(), String> {
+    let conn = open_or_init_db(&vault_path)?;
+    conn.execute(
+        "DELETE FROM event_instance_overrides
+         WHERE master_event_id = ?1 AND instance_start_unix = ?2",
+        params![master_id, instance_start_unix],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Return the override row for one instance, or None if none exists.
+/// Used by the EventEditModal to populate its instance-mode form.
+#[tauri::command]
+fn get_event_instance_override(
+    vault_path: String,
+    master_id: String,
+    instance_start_unix: i64,
+) -> Result<Option<InstanceOverride>, String> {
+    let conn = open_or_init_db(&vault_path)?;
+    let row = conn
+        .query_row(
+            "SELECT master_event_id, instance_start_unix, skipped, actual_minutes,
+                    created_at_unix, updated_at_unix
+             FROM event_instance_overrides
+             WHERE master_event_id = ?1 AND instance_start_unix = ?2",
+            params![master_id, instance_start_unix],
+            |row| {
+                Ok(InstanceOverride {
+                    master_event_id: row.get(0)?,
+                    instance_start_unix: row.get(1)?,
+                    skipped: row.get::<_, i64>(2)? != 0,
+                    actual_minutes: row.get(3)?,
+                    created_at_unix: row.get(4)?,
+                    updated_at_unix: row.get(5)?,
+                })
+            },
+        )
+        .ok();
+    Ok(row)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DailyRollupRow {
+    pub day_iso: String,  // YYYY-MM-DD in user's local time
+    pub category: String, // GROUP key; "uncategorized" for blank
+    pub planned_minutes: i64,
+    pub actual_minutes: i64,
+    pub events_count: i64,
+}
+
+/// Per-day rollup of planned/actual minutes by category. Reuses
+/// `collect_events_in_window` so recurring expansion + overrides
+/// flow through identically to `get_time_tracking_aggregates`.
+/// Each event's day is resolved against the user's local time via
+/// `tz_offset_minutes` (signed minutes east of UTC; pass
+/// `-new Date().getTimezoneOffset()` from the JS side).
+#[tauri::command]
+fn get_time_tracking_daily_rollup(
+    vault_path: String,
+    range_start_unix: i64,
+    range_end_unix: i64,
+    tz_offset_minutes: i32,
+) -> Result<Vec<DailyRollupRow>, String> {
+    let conn = open_or_init_db(&vault_path)?;
+    let events = collect_events_in_window(&conn, range_start_unix, range_end_unix)?;
+    // Bin by (day_iso, category). Same start_at filter as
+    // get_time_tracking_aggregates so we don't double-count standalone
+    // events that started before range_start.
+    let mut bins: std::collections::HashMap<(String, String), DailyRollupRow> =
+        std::collections::HashMap::new();
+    for evt in &events {
+        if evt.start_at < range_start_unix || evt.start_at >= range_end_unix {
+            continue;
+        }
+        let raw_cat = evt.category.trim();
+        let cat_key = if raw_cat.is_empty() {
+            "uncategorized".to_string()
+        } else {
+            raw_cat.to_string()
+        };
+        let day_iso = local_iso_date_for(evt.start_at, tz_offset_minutes);
+        let planned = ((evt.end_at - evt.start_at).max(0)) / 60;
+        let is_recurring = evt.recurrence_rule.is_some();
+        let actual = if is_recurring {
+            match evt.actual_minutes {
+                Some(m) if m >= 0 => m,
+                _ => planned,
+            }
+        } else {
+            match evt.actual_minutes {
+                Some(m) if m >= 0 => m,
+                _ => 0,
+            }
+        };
+        let key = (day_iso.clone(), cat_key.clone());
+        let row = bins.entry(key).or_insert_with(|| DailyRollupRow {
+            day_iso,
+            category: cat_key,
+            planned_minutes: 0,
+            actual_minutes: 0,
+            events_count: 0,
+        });
+        row.planned_minutes += planned;
+        row.actual_minutes += actual;
+        row.events_count += 1;
+    }
+    let mut out: Vec<DailyRollupRow> = bins.into_values().collect();
+    // Sort by day asc, then category asc for stable output.
+    out.sort_by(|a, b| {
+        a.day_iso
+            .cmp(&b.day_iso)
+            .then_with(|| a.category.cmp(&b.category))
+    });
+    Ok(out)
 }
 
 #[tauri::command]
@@ -5491,7 +6606,8 @@ fn collect_events_in_window(
                 "SELECT id, title, start_at, end_at, all_day, category, status, body,
                         created_at, updated_at, recurrence_rule,
                         notify_mode, notify_lead_minutes,
-                        source, external_id, external_etag, external_html_link
+                        source, external_id, external_etag, external_html_link,
+                        actual_minutes
                  FROM events
                  WHERE recurrence_rule IS NULL
                    AND start_at < ?1 AND end_at > ?2
@@ -5518,6 +6634,7 @@ fn collect_events_in_window(
                     external_id: row.get(14)?,
                     external_etag: row.get(15)?,
                     external_html_link: row.get(16)?,
+                    actual_minutes: row.get(17)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -5531,7 +6648,8 @@ fn collect_events_in_window(
                 "SELECT id, title, start_at, end_at, all_day, category, status, body,
                         created_at, updated_at, recurrence_rule,
                         notify_mode, notify_lead_minutes,
-                        source, external_id, external_etag, external_html_link
+                        source, external_id, external_etag, external_html_link,
+                        actual_minutes
                  FROM events
                  WHERE recurrence_rule IS NOT NULL",
             )
@@ -5556,12 +6674,22 @@ fn collect_events_in_window(
                     external_id: row.get(14)?,
                     external_etag: row.get(15)?,
                     external_html_link: row.get(16)?,
+                    actual_minutes: row.get(17)?,
                 })
             })
             .map_err(|e| e.to_string())?;
         for r in rows {
             let master = r.map_err(|e| e.to_string())?;
-            out.extend(expand_recurrence(&master, window_start, window_end));
+            // Cluster 14 v1.3: load this master's overrides once, apply
+            // during expansion. For masters with no overrides the map
+            // is empty and expansion behaves identically to v1.2.
+            let overrides = load_overrides_for_master(conn, &master.id)?;
+            out.extend(expand_recurrence(
+                &master,
+                window_start,
+                window_end,
+                &overrides,
+            ));
         }
     }
     out.sort_by_key(|e| e.start_at);
@@ -6865,6 +7993,8 @@ pub fn run() {
             ensure_persistent_file,
             regenerate_persistent_file,
             route_experiment_blocks,
+            route_typed_blocks,
+            propagate_typed_block_edits,
             query_notes_by_type,
             create_idea,
             create_method,
@@ -6879,6 +8009,12 @@ pub fn run() {
             list_events_in_range,
             create_event,
             update_event,
+            get_time_tracking_aggregates,
+            // Cluster 14 v1.3 — per-instance overrides + per-day rollup
+            set_event_instance_override,
+            delete_event_instance_override,
+            get_event_instance_override,
+            get_time_tracking_daily_rollup,
             delete_event,
             list_event_categories,
             upsert_event_category,

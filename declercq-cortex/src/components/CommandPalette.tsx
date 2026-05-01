@@ -12,6 +12,14 @@ interface CommandPaletteProps {
   isOpen: boolean;
   onClose: () => void;
   onOpenFile: (path: string) => void;
+  /**
+   * Cluster 16 — wikilink pick-mode. When provided, the palette
+   * intercepts result clicks: instead of `onOpenFile`, it calls
+   * `onPickResult` with the result's title (and path, in case the
+   * caller wants it). The palette also shows a small banner
+   * ("Picking a wikilink…") so the user sees the mode shift.
+   */
+  onPickResult?: (path: string, title: string) => void;
 }
 
 /**
@@ -41,7 +49,9 @@ export function CommandPalette({
   isOpen,
   onClose,
   onOpenFile,
+  onPickResult,
 }: CommandPaletteProps) {
+  const pickMode = !!onPickResult;
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Result[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -126,7 +136,11 @@ export function CommandPalette({
       e.preventDefault();
       const r = results[selectedIdx];
       if (r) {
-        onOpenFile(r.path);
+        if (pickMode) {
+          onPickResult!(r.path, r.title);
+        } else {
+          onOpenFile(r.path);
+        }
         onClose();
       }
     }
@@ -144,6 +158,12 @@ export function CommandPalette({
   return (
     <div style={styles.scrim} onClick={onClose}>
       <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
+        {pickMode && (
+          <div style={styles.pickBanner}>
+            Picking a wikilink — click a result to insert <code>[[Title]]</code>{" "}
+            at your cursor.
+          </div>
+        )}
         <div style={styles.tabRow} role="tablist" aria-label="Search scope">
           {(["all", "md", "pdf"] as const).map((k) => {
             const label = k === "all" ? "All" : k === "md" ? "Notes" : "PDFs";
@@ -188,7 +208,11 @@ export function CommandPalette({
               <div
                 key={r.path}
                 onClick={() => {
-                  onOpenFile(r.path);
+                  if (pickMode) {
+                    onPickResult!(r.path, r.title);
+                  } else {
+                    onOpenFile(r.path);
+                  }
                   onClose();
                 }}
                 onMouseEnter={() => setSelectedIdx(i)}
@@ -246,6 +270,16 @@ function highlightSnippet(snippet: string): string {
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  pickBanner: {
+    padding: "0.45rem 0.7rem",
+    margin: "0 0 0.5rem",
+    background: "var(--bg-elev)",
+    border: "1px solid var(--accent)",
+    borderRadius: "5px",
+    fontSize: "0.78rem",
+    color: "var(--accent)",
+    lineHeight: 1.5,
+  },
   scrim: {
     position: "fixed",
     inset: 0,

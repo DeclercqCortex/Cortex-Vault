@@ -217,12 +217,21 @@ That delivered **Phase 2 proper** — Cortex as the research notebook the v4.1 s
 
 **Phase 3 — picked on demand, in any order:**
 
-- Cluster 8 — Structured views (Idea Log first; Methods Arsenal and Roadmap deferred)
-- Cluster 7 — Concept graph
-- Cluster 6 — PDF reader
-- Cluster 10 — Integrations
+- Cluster 8 — Structured views (Idea Log + Methods + Protocols ✅; Roadmap deferred)
+- Cluster 6 — PDF reader ✅ (full cluster, multi-tab layout)
+- Cluster 10 — Integrations: GitHub ✅ (Calendar + Overleaf superseded by Cluster 11/12/13)
+- Cluster 11 — Personal Calendar (local-first calendar UI; in flight)
+- Cluster 12 — Google Calendar sync (read-only) ✅ — two-way deferred to v2.0
+- Cluster 13 — Outlook Calendar sync (planned, depends on Cluster 12 scaffold)
+- Cluster 14 — Time tracking / planned-vs-actual analytics ✅ v1.0
+- Cluster 15 — Reminders (overlay + bell) ✅
+- Cluster 16 — QoL pack (table polish + wikilink shortcut + Ctrl+S scroll fix + multi-type blocks) ✅
+- Cluster 17 — Block widget rewrite (custom TipTap node) ✅
+- Cluster 18 — Excel layer for tables (drag-resize + formulas + cell types + freeze panes + sort + filter + comparison ops) ✅ v1.2
+- Cluster 7 — Concept graph (not started)
 
-Phase 3 clusters can be built in any order because they don't depend on each other.
+Phase 3 clusters can be built in any order *except* the calendar chain
+(11 → 12 / 13 / 14), where 12-14 depend on Cluster 11's schema.
 
 ## A note on premature implementation
 
@@ -253,6 +262,14 @@ If a cluster takes 4+ days, split it. Phase 2+ is not Phase 1; momentum is not t
 | `cluster_05_color_legend_overlay.md` | Color legend | 4th | ✅ shipped |
 | `cluster_06_pdf_reader.md` | PDF reader | Phase 3, on demand | ✅ shipped |
 | `cluster_07_concept_graph.md` | Concept graph | Phase 3, on demand | — |
-| `cluster_08_structured_views.md` | Idea Log, Methods, Roadmap | Phase 3, in flight (Idea Log + Methods) | 🔨 building |
+| `cluster_08_structured_views.md` | Idea Log, Methods, Roadmap | Phase 3, in flight (Idea Log + Methods + Protocols) | 🔨 Roadmap deferred |
 | `cluster_09_strong_inference_gate.md` | Strong Inference gate | (was 6th) | ✗ dropped |
-| `cluster_10_integrations.md` | GitHub, GCal, Overleaf | Phase 3, on demand | — |
+| `cluster_10_integrations.md` | GitHub, GCal, Overleaf | Phase 3, on demand | ✅ GitHub shipped (v1.1); GCal moved to Cluster 12, Overleaf to Cluster 13 |
+| `cluster_11_personal_calendar.md` | Personal Calendar | Phase 3, in flight | ✅ v1.4 shipped (recurrence + body-in-splice + timezone fixes + per-event notifications) — NLP/heatmap/pie/multi-tz/density/day/per-instance-edit deferred to v1.5+ |
+| `cluster_12_google_calendar_sync.md` | Google Calendar sync | Phase 3, in flight | ✅ v1.0 read-only shipped — two-way, multi-calendar, syncToken deferred |
+| `cluster_13_outlook_calendar_sync.md` | Outlook Calendar two-way sync | Phase 3, planned | — depends on Cluster 12 scaffold |
+| `cluster_14_time_tracking.md` | Planned-vs-actual analytics | Phase 3 | ✅ v1.3 shipped — v1.0: events.actual_minutes nullable column + EventEditModal field, get_time_tracking_aggregates Tauri command, TimeTracking structured view, sidebar button. v1.1: recurring events auto-credit each instance as fully spent. v1.2: pie chart tab with deterministic-colour slices + planned/actual sub-toggle. v1.3: per-instance overrides for recurring events (new event_instance_overrides table, three Tauri commands, EventEditModal dual-save UX with Skip / Save just this / Save series buttons), Trends tab (hand-drawn SVG line chart with one line per category, planned/actual/both metric toggle), Copy CSV button. Sequenced follow-ups: title/time overrides on a single instance, sparklines per category, daily-note splice for time-tracking summary |
+| `cluster_15_reminders.md` | Reminders (overlay + bell) | Phase 3 | ✅ v1.0 shipped |
+| `cluster_16_qol_pack.md` | QoL pack (table polish + wikilink shortcut + Ctrl+S scroll fix + multi-type blocks + typed-block routing) | Phase 3, on demand | ✅ v1.1.4 shipped — HTML-tables-always serializer, equalize-on-insert + selected-column-scoped equalize, drag cell-selection + merge-cells, right-click menu clamped/scrollable, ::protocol/::idea/::method blocks route both directions (daily note ↔ document via per-block CORTEX-BLOCK markers + propagate_typed_block_edits), col-resize cursor at column boundaries, drag-to-resize columns, Calendar WeekView all-day row. 🔴 Known unresolved: cell-height growth on hover for tables without explicit colwidths (workaround: Equalize once). Block widget rewrite (Cluster 17) and Excel layer (Cluster 18) sequenced as follow-ups |
+| `cluster_17_block_widget_rewrite.md` | Block widget rewrite (custom TipTap node) | Phase 3 | ✅ v1.1 shipped — typedBlock node + NodeView (non-editable title bar, inline rename, atomic delete), markdown serializer (on-disk format unchanged from v1.1.x), liftTypedBlocks post-setContent transform that doubles as invisible migration, BlockContextMenu, body holds bullets/ordered-lists/code/tables, Cluster 4 + Cluster 16 routing pipelines unaffected. v1.1 adds Ctrl/Cmd+Click on title bar → opens the referenced document via new `resolve_typed_block_target` Tauri command (experiments → matching iteration file or experiment index; protocol/idea/method → corresponding doc). CORTEX-BLOCK markers still emitted by regen and parsed by propagator (intentional; dropping them needs a per-routed-entry custom node for the auto-section, out of v1.x scope) |
+| `cluster_18_table_excel_layer.md` | Table formulas, cell types, freeze rows/cols, custom drag-resize | Phase 3 | ✅ v1.0 shipped — CortexColumnResize plugin replacing prosemirror-tables's built-in (fully closes the v1.1.4 cell-height-growth-on-hover bug, no per-hover view updates), formula engine (~670 lines: lexer + parser + evaluator with SUM/AVG/COUNT/MIN/MAX/MEDIAN/IF, A1 refs, A1:B5 ranges, circular-ref detection), FormulaCells extension (per-cell `data-formula` + `data-formula-result` attrs round-tripping through HtmlTable serializer), CSS display swap (result italic when not focused, raw formula on focus, errors in --danger). Cell-type formatting / freeze rows/cols / sort / filter deferred to v1.1+ |

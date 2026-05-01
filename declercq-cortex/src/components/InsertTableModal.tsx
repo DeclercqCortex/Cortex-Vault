@@ -8,9 +8,14 @@ interface InsertTableModalProps {
 }
 
 const MIN_ROWS = 1;
-const MAX_ROWS = 20;
+// Cluster 18 v1.1.2 — raised from 20/10 (which silently clamped user
+// input). Tables with hundreds of rows are reasonable for a research
+// vault. Caps prevent obvious typos (e.g. 5000 → would lock the
+// editor while ProseMirror builds a giant doc) but otherwise stay out
+// of the way.
+const MAX_ROWS = 200;
 const MIN_COLS = 1;
-const MAX_COLS = 10;
+const MAX_COLS = 50;
 
 /**
  * Dialog asking for new-table dimensions. Reachable from the editor's

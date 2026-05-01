@@ -8,16 +8,26 @@ interface HierarchyItem {
   modeling: boolean | null;
 }
 
+interface NoteWithMetadata {
+  path: string;
+  title: string;
+  frontmatter_yaml: string;
+  modified_at: number;
+}
+
+export type BlockType = "experiment" | "protocol" | "idea" | "method";
+
 interface ExperimentBlockModalProps {
   vaultPath: string;
   isOpen: boolean;
   onClose: () => void;
   /**
-   * Called with the experiment name (as it should appear in the block
-   * header) and iteration number. The caller inserts the block scaffold
-   * into the editor at the cursor.
+   * Cluster 16 — widened to support four block types. Experiment
+   * keeps the (name, iter) shape it had in v1.0. Protocol / idea /
+   * method only carry a name (iter is undefined). The caller
+   * inserts the corresponding `::TYPE NAME` scaffold at the cursor.
    */
-  onConfirm: (experimentName: string, iterNumber: number) => void;
+  onConfirm: (type: BlockType, name: string, iterNumber?: number) => void;
 }
 
 /**
@@ -35,25 +45,60 @@ export function ExperimentBlockModal({
   onClose,
   onConfirm,
 }: ExperimentBlockModalProps) {
+  const [blockType, setBlockType] = useState<BlockType>("experiment");
   const [experiments, setExperiments] = useState<HierarchyItem[]>([]);
   const [experimentPath, setExperimentPath] = useState<string>("");
   const [iterNumber, setIterNumber] = useState<number>(1);
   const [maxIter, setMaxIter] = useState<number>(0);
+  // Cluster 16 v1.1 — protocol / idea / method now also pick from
+  // existing log entries (the corresponding query_notes_by_type list)
+  // so a block routes to the right document on save. Free-text input
+  // is kept as a fallback when no document with the chosen name yet
+  // exists (the user may want to scaffold one later via the Idea Log /
+  // Methods Arsenal / Protocols Log creators).
+  const [protocols, setProtocols] = useState<NoteWithMetadata[]>([]);
+  const [ideas, setIdeas] = useState<NoteWithMetadata[]>([]);
+  const [methods, setMethods] = useState<NoteWithMetadata[]>([]);
+  const [genericPath, setGenericPath] = useState<string>("");
+  const [genericName, setGenericName] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
-  // Load experiment list on open.
+  // Load all four lists on open. Three of them only matter for one
+  // branch each, but loading them in parallel up-front means switching
+  // the Block-type dropdown is instant and avoids a flash.
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
+    setBlockType("experiment");
     setExperimentPath("");
     setMaxIter(0);
     setIterNumber(1);
+    setGenericName("");
+    setGenericPath("");
     invoke<HierarchyItem[]>("list_experiments", {
       vaultPath,
       projectPath: null,
     })
       .then((list) => setExperiments(list))
       .catch((e) => setError(`Could not load experiments: ${e}`));
+    invoke<NoteWithMetadata[]>("query_notes_by_type", {
+      vaultPath,
+      noteType: "protocol",
+    })
+      .then((list) => setProtocols(list))
+      .catch((e) => console.warn("query_notes_by_type(protocol) failed:", e));
+    invoke<NoteWithMetadata[]>("query_notes_by_type", {
+      vaultPath,
+      noteType: "idea",
+    })
+      .then((list) => setIdeas(list))
+      .catch((e) => console.warn("query_notes_by_type(idea) failed:", e));
+    invoke<NoteWithMetadata[]>("query_notes_by_type", {
+      vaultPath,
+      noteType: "method",
+    })
+      .then((list) => setMethods(list))
+      .catch((e) => console.warn("query_notes_by_type(method) failed:", e));
   }, [isOpen, vaultPath]);
 
   // When the experiment selection changes, fetch its iterations to
@@ -87,17 +132,49 @@ export function ExperimentBlockModal({
   const selectedExperiment = experiments.find((e) => e.path === experimentPath);
 
   function submit() {
-    if (!selectedExperiment) {
-      setError("Pick an experiment.");
+    if (blockType === "experiment") {
+      if (!selectedExperiment) {
+        setError("Pick an experiment.");
+        return;
+      }
+      if (!Number.isFinite(iterNumber) || iterNumber < 1) {
+        setError("Iteration number must be ≥ 1.");
+        return;
+      }
+      // Use the experiment's title (or folder basename if untitled) as the
+      // name in the block header. Rust's find_iteration_path matches both.
+      onConfirm("experiment", selectedExperiment.name, iterNumber);
       return;
     }
-    if (!Number.isFinite(iterNumber) || iterNumber < 1) {
-      setError("Iteration number must be ≥ 1.");
+    // Cluster 16 v1.1 — protocol / idea / method prefer the dropdown's
+    // selected entry (so the block routes to the existing document on
+    // save). If the user typed a name without picking an existing
+    // entry, we still let the block insert — saving with a name that
+    // doesn't match any log entry surfaces a "X not found — block
+    // skipped" warning, which is the same friendly fallback Cluster 4
+    // uses for unmatched experiment names.
+    const fromList = pickedTypedName();
+    const name = (fromList ?? genericName).trim();
+    if (!name) {
+      setError(`Pick or enter a ${blockType} name.`);
       return;
     }
-    // Use the experiment's title (or folder basename if untitled) as the
-    // name in the block header. Rust's find_iteration_path matches both.
-    onConfirm(selectedExperiment.name, iterNumber);
+    onConfirm(blockType, name);
+  }
+
+  /** Returns the name of the selected protocol/idea/method (from the
+   *  appropriate dropdown), or null if nothing is selected. */
+  function pickedTypedName(): string | null {
+    if (!genericPath) return null;
+    const list =
+      blockType === "protocol"
+        ? protocols
+        : blockType === "idea"
+          ? ideas
+          : blockType === "method"
+            ? methods
+            : [];
+    return list.find((n) => n.path === genericPath)?.title ?? null;
   }
 
   function handleKey(e: React.KeyboardEvent) {
@@ -117,50 +194,150 @@ export function ExperimentBlockModal({
         role="dialog"
         aria-label="Insert experiment block"
       >
-        <h2 style={styles.heading}>Insert experiment block</h2>
+        <h2 style={styles.heading}>Insert block</h2>
 
         <label style={styles.label}>
-          <span style={styles.labelText}>Experiment</span>
+          <span style={styles.labelText}>Block type</span>
           <select
-            value={experimentPath}
-            onChange={(e) => setExperimentPath(e.target.value)}
+            value={blockType}
+            onChange={(e) => setBlockType(e.target.value as BlockType)}
             style={styles.input}
           >
-            <option value="">Choose an experiment…</option>
-            {experiments.map((e) => (
-              <option key={e.path} value={e.path}>
-                {e.name}
-              </option>
-            ))}
+            <option value="experiment">Experiment</option>
+            <option value="protocol">Protocol</option>
+            <option value="idea">Idea</option>
+            <option value="method">Method</option>
           </select>
         </label>
 
-        <label style={styles.label}>
-          <span style={styles.labelText}>
-            Iteration{" "}
-            {selectedExperiment && maxIter > 0 && (
-              <span style={styles.hint}>
-                (existing: 1–{maxIter}; type {maxIter + 1}+ to auto-create a new
-                iteration)
-              </span>
-            )}
-          </span>
-          <input
-            type="number"
-            min={1}
-            value={iterNumber}
-            onChange={(e) => setIterNumber(parseInt(e.target.value, 10) || 1)}
-            style={styles.input}
-          />
-        </label>
+        {blockType === "experiment" ? (
+          <>
+            <label style={styles.label}>
+              <span style={styles.labelText}>Experiment</span>
+              <select
+                value={experimentPath}
+                onChange={(e) => setExperimentPath(e.target.value)}
+                style={styles.input}
+              >
+                <option value="">Choose an experiment…</option>
+                {experiments.map((e) => (
+                  <option key={e.path} value={e.path}>
+                    {e.name}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-        <p style={styles.hint}>
-          Inserts{" "}
-          <code style={styles.codeInline}>::experiment NAME / iter-N</code> and{" "}
-          <code style={styles.codeInline}>::end</code> at the cursor. On save,
-          content between them routes to the iteration's "From daily notes"
-          section.
-        </p>
+            <label style={styles.label}>
+              <span style={styles.labelText}>
+                Iteration{" "}
+                {selectedExperiment && maxIter > 0 && (
+                  <span style={styles.hint}>
+                    (existing: 1–{maxIter}; type {maxIter + 1}+ to auto-create a
+                    new iteration)
+                  </span>
+                )}
+              </span>
+              <input
+                type="number"
+                min={1}
+                value={iterNumber}
+                onChange={(e) =>
+                  setIterNumber(parseInt(e.target.value, 10) || 1)
+                }
+                style={styles.input}
+              />
+            </label>
+
+            <p style={styles.hint}>
+              Inserts{" "}
+              <code style={styles.codeInline}>::experiment NAME / iter-N</code>{" "}
+              and <code style={styles.codeInline}>::end</code> at the cursor. On
+              save, content between them routes to the iteration&apos;s
+              &ldquo;From daily notes&rdquo; section.
+            </p>
+          </>
+        ) : (
+          <>
+            <label style={styles.label}>
+              <span style={styles.labelText}>
+                {blockType === "protocol"
+                  ? "Existing protocol"
+                  : blockType === "idea"
+                    ? "Existing idea"
+                    : "Existing method"}
+              </span>
+              <select
+                value={genericPath}
+                onChange={(e) => {
+                  setGenericPath(e.target.value);
+                  // Mirror the chosen entry's title into the free-text
+                  // input so the user can see/edit it. If they clear
+                  // the dropdown, leave the typed value alone.
+                  if (e.target.value) {
+                    const list =
+                      blockType === "protocol"
+                        ? protocols
+                        : blockType === "idea"
+                          ? ideas
+                          : methods;
+                    const item = list.find((x) => x.path === e.target.value);
+                    if (item) setGenericName(item.title);
+                  }
+                }}
+                style={styles.input}
+              >
+                <option value="">Choose an existing {blockType}…</option>
+                {(blockType === "protocol"
+                  ? protocols
+                  : blockType === "idea"
+                    ? ideas
+                    : methods
+                ).map((n) => (
+                  <option key={n.path} value={n.path}>
+                    {n.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={styles.label}>
+              <span style={styles.labelText}>
+                Name to insert in block header
+              </span>
+              <input
+                type="text"
+                value={genericName}
+                onChange={(e) => setGenericName(e.target.value)}
+                placeholder={`e.g. ${
+                  blockType === "protocol"
+                    ? "Centrifuge wash"
+                    : blockType === "idea"
+                      ? "Network-effect lever"
+                      : "Bayesian update sweep"
+                }`}
+                style={styles.input}
+                autoFocus={!genericPath}
+              />
+            </label>
+            <p style={styles.hint}>
+              Inserts <code style={styles.codeInline}>::{blockType} NAME</code>{" "}
+              and <code style={styles.codeInline}>::end</code> at the cursor. On
+              save, the block content routes to the chosen {blockType}&apos;s{" "}
+              <code style={styles.codeInline}>## From daily notes</code>{" "}
+              section. Typing a name that doesn&apos;t match any existing{" "}
+              {blockType} still inserts the block (you&apos;ll see a &ldquo;not
+              found&rdquo; warning on save until you create the {blockType} via
+              the{" "}
+              {blockType === "protocol"
+                ? "Protocols Log"
+                : blockType === "idea"
+                  ? "Idea Log"
+                  : "Methods Arsenal"}{" "}
+              creator).
+            </p>
+          </>
+        )}
 
         {error && <p style={styles.error}>{error}</p>}
 

@@ -21,7 +21,7 @@ import {
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Editor } from "./Editor";
+import { Editor, equalizeTableColumnWidths } from "./Editor";
 import { FrontmatterPanel } from "./FrontmatterPanel";
 import { BacklinksPanel } from "./BacklinksPanel";
 import { RelatedHierarchyPanel } from "./RelatedHierarchyPanel";
@@ -30,6 +30,7 @@ import { IdeaLog } from "./IdeaLog";
 import { MethodsArsenal } from "./MethodsArsenal";
 import { ProtocolsLog } from "./ProtocolsLog";
 import { Calendar } from "./Calendar";
+import { TimeTracking } from "./TimeTracking";
 import { PDFReader } from "./PDFReader";
 import { parseFrontmatter, serializeFrontmatter } from "../utils/frontmatter";
 
@@ -46,7 +47,9 @@ export type ActiveView =
   | "methods-arsenal"
   | "protocols-log"
   | "pdf-reader"
-  | "calendar";
+  | "calendar"
+  // Cluster 14 v1.0
+  | "time-tracking";
 
 /** Imperative API the parent uses to drive this pane. */
 export type TabPaneHandle = {
@@ -54,8 +57,20 @@ export type TabPaneHandle = {
   saveIfDirty(): Promise<boolean>;
   /** Re-read the open file from disk (Ctrl+R in this pane). */
   reload(): Promise<void>;
-  /** Insert an experiment-block scaffold at the cursor. */
-  insertExperimentBlock(name: string, iter: number): void;
+  /** Insert a block scaffold at the cursor. v1.4 widened from
+   *  experiment-only to four types (experiment / protocol / idea /
+   *  method). For experiment, `iter` is the iteration number; for the
+   *  other three it's ignored. The header line shape:
+   *    type=experiment → `::experiment NAME / iter-N`
+   *    type=protocol   → `::protocol NAME`
+   *    type=idea       → `::idea NAME`
+   *    type=method     → `::method NAME`
+   *  All four share the `::end` closer. */
+  insertExperimentBlock(
+    type: "experiment" | "protocol" | "idea" | "method",
+    name: string,
+    iter?: number,
+  ): void;
   /** Insert a table at the cursor. */
   insertTable(rows: number, cols: number, withHeaderRow: boolean): void;
   /**
@@ -65,6 +80,19 @@ export type TabPaneHandle = {
    * save+reload, the same way `::experiment` blocks behave.
    */
   insertGitHubMarkdown(markdown: string): void;
+  /**
+   * Cluster 16 — wikilink shortcut (`Ctrl+Shift+W`). If the editor
+   * has a non-empty selection, wrap it with `[[...]]` and return
+   * true. If the selection is empty, return false so App can open
+   * the command palette in pick-mode and let the user choose a note
+   * to wikilink to.
+   */
+  wrapSelectionInWikilink(): boolean;
+  /**
+   * Cluster 16 — insert `[[title]]` at the current cursor position.
+   * Used by the palette pick-mode after the user clicks a result.
+   */
+  insertWikilinkAt(title: string): void;
   /** Load a file into this pane (handles PDF vs markdown routing). */
   openPath(path: string | null): Promise<void>;
   /** Switch to a structured view (idea-log, methods-arsenal, etc.). */
@@ -117,6 +145,16 @@ export type TabPaneProps = {
   onDirtyChange: (dirty: boolean) => void;
   /** Wikilink follow — App resolves & routes (may switch panes). */
   onFollowWikilink: (target: string) => void;
+  /**
+   * Cluster 17 v1.1 — Ctrl/Cmd+Click on a typedBlock title bar. App
+   * resolves the reference (via the resolve_typed_block_target Tauri
+   * command) and opens the resulting path in this slot.
+   */
+  onFollowTypedBlock: (attrs: {
+    blockType: "experiment" | "protocol" | "idea" | "method";
+    name: string;
+    iterNumber: number | null;
+  }) => void;
   /** Editor right-click "Insert table…" — App opens the modal. */
   onRequestInsertTable: () => void;
   /** Open a file in this pane (used by backlinks / related panel). */
@@ -148,6 +186,7 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
       onActiveViewChange,
       onDirtyChange,
       onFollowWikilink,
+      onFollowTypedBlock,
       onRequestInsertTable,
       onOpenFileInPane,
     } = props;
@@ -271,6 +310,50 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
                 e,
               ),
             );
+
+          // Cluster 16 v1.1 — also route ::protocol / ::idea / ::method
+          // blocks. Same shape as experiment routing but resolves into
+          // a single document under 04-Ideas/ / 05-Methods/ / 06-Protocols/.
+          // Independent failure path so an unmatched typed block doesn't
+          // mask experiment routing warnings or vice versa.
+          invoke<{ routed: number; warnings: string[] }>("route_typed_blocks", {
+            vaultPath,
+            dailyNotePath: selectedPath,
+          })
+            .then((res) => {
+              console.info(
+                `[cortex pane ${slotIndex}] typed routing: routed=${res.routed}, warnings=${res.warnings.length}`,
+              );
+              if (res.warnings.length > 0) setError(res.warnings[0]);
+            })
+            .catch((e) =>
+              console.warn(`[pane ${slotIndex}] route_typed_blocks failed:`, e),
+            );
+
+          // Cluster 16 v1.1.1 — two-way sync, the document → daily-note
+          // direction. Fires on EVERY save (Rust short-circuits if the
+          // saved file has no typed-auto section). When the file IS a
+          // protocol/idea/method document and its auto-section content
+          // has been edited, the corresponding ::TYPE NAME / ::end
+          // block in the source daily note is updated in place — no
+          // new block is created.
+          invoke<number>("propagate_typed_block_edits", {
+            vaultPath,
+            filePath: selectedPath,
+          })
+            .then((n) => {
+              if (n > 0) {
+                console.info(
+                  `[cortex pane ${slotIndex}] typed propagate: ${n} block(s) propagated to source daily notes`,
+                );
+              }
+            })
+            .catch((e) =>
+              console.warn(
+                `[pane ${slotIndex}] propagate_typed_block_edits failed:`,
+                e,
+              ),
+            );
         }
 
         scheduleCommit();
@@ -324,7 +407,11 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           }
           setReloadTick((t) => t + 1);
         },
-        insertExperimentBlock(name: string, iter: number) {
+        insertExperimentBlock(
+          type: "experiment" | "protocol" | "idea" | "method",
+          name: string,
+          iter?: number,
+        ) {
           const editor = editorInstanceRef.current;
           if (!editor) {
             console.warn(
@@ -332,21 +419,33 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
             );
             return;
           }
-          const header = `::experiment ${name} / iter-${iter}`;
-          const closer = "::end";
+          // Cluster 17 — insert a typedBlock node directly. Fresh
+          // blocks are born as the new custom node; the post-setContent
+          // lift transform handles the legacy plain-paragraph form on
+          // load. The node's markdown serializer emits the same on-disk
+          // text the v1.0/v1.1 inserter wrote (`::TYPE NAME / iter-N`
+          // header + body + `::end` closer), so route_*_blocks on the
+          // Rust side is unaffected.
           const $from = editor.state.selection.$from;
           const insertAt = $from.depth === 0 ? $from.pos : $from.after(1);
           editor
             .chain()
             .focus()
-            .insertContentAt(insertAt, [
-              { type: "paragraph", content: [{ type: "text", text: header }] },
-              { type: "paragraph" },
-              { type: "paragraph" },
-              { type: "paragraph", content: [{ type: "text", text: closer }] },
-            ])
+            .insertContentAt(insertAt, {
+              type: "typedBlock",
+              attrs: {
+                blockType: type,
+                name,
+                iterNumber: type === "experiment" ? (iter ?? 1) : null,
+              },
+              content: [{ type: "paragraph" }],
+            })
             .run();
-          const cursorTarget = insertAt + header.length + 5;
+          // Place the cursor inside the block's first body paragraph.
+          // The typedBlock node opens at insertAt; its inner paragraph
+          // starts at insertAt+1 and the paragraph's text begins at
+          // insertAt+2.
+          const cursorTarget = insertAt + 2;
           editor.chain().setTextSelection(cursorTarget).run();
         },
         insertTable(rows: number, cols: number, withHeaderRow: boolean) {
@@ -358,6 +457,20 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
             return;
           }
           ed.chain().focus().insertTable({ rows, cols, withHeaderRow }).run();
+          // Cluster 16 v1.1.4: immediately give every cell an explicit
+          // colwidth via equalize. Without this, fresh tables have no
+          // colwidths, which makes prosemirror-tables's
+          // `updateColumnsOnResize` use the 100px-per-column fallback
+          // and re-run on every hover-near-boundary, growing empty
+          // cells visibly. With explicit widths set up-front, the
+          // re-run is a no-op (style.width assignments are unchanged
+          // and the browser skips layout). One frame's delay so the
+          // insert transaction has fully committed before equalize
+          // walks the doc.
+          requestAnimationFrame(() => {
+            const ed2 = editorInstanceRef.current;
+            if (ed2) equalizeTableColumnWidths(ed2);
+          });
         },
         insertGitHubMarkdown(markdown: string) {
           const editor = editorInstanceRef.current;
@@ -386,6 +499,31 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           const $from = editor.state.selection.$from;
           const insertAt = $from.depth === 0 ? $from.pos : $from.after(1);
           editor.chain().focus().insertContentAt(insertAt, nodes).run();
+        },
+        wrapSelectionInWikilink() {
+          const editor = editorInstanceRef.current;
+          if (!editor) return false;
+          const { from, to, empty } = editor.state.selection;
+          if (empty || from === to) return false;
+          // Read the literal selected text (no marks). For a multi-
+          // node selection this concatenates the text content.
+          const text = editor.state.doc.textBetween(from, to, "\n", "\n");
+          if (!text.trim()) return false;
+          // Replace selection with [[text]]. insertContent at the
+          // selection range automatically deletes + inserts.
+          editor
+            .chain()
+            .focus()
+            .insertContentAt({ from, to }, `[[${text.trim()}]]`)
+            .run();
+          return true;
+        },
+        insertWikilinkAt(title: string) {
+          const editor = editorInstanceRef.current;
+          if (!editor) return;
+          const trimmed = title.trim();
+          if (!trimmed) return;
+          editor.chain().focus().insertContent(`[[${trimmed}]]`).run();
         },
         async openPath(path: string | null) {
           // Save dirty state first so we don't lose anything.
@@ -549,6 +687,12 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           />
         ) : activeView === "calendar" ? (
           <Calendar vaultPath={vaultPath} onClose={closeStructuredView} />
+        ) : activeView === "time-tracking" ? (
+          <TimeTracking
+            vaultPath={vaultPath}
+            refreshKey={indexVersion}
+            onClose={closeStructuredView}
+          />
         ) : activeView === "pdf-reader" && selectedPath ? (
           <PDFReader
             vaultPath={vaultPath}
@@ -612,6 +756,7 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
                 setDirty(md !== fileBody);
               }}
               onFollowWikilink={onFollowWikilink}
+              onFollowTypedBlock={onFollowTypedBlock}
               onEditorReady={(e) => {
                 editorInstanceRef.current = e;
               }}

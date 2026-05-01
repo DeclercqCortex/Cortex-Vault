@@ -59,7 +59,21 @@ const EDITOR_MODE: Row[] = [
     action: "Table operations menu (insert/add/delete row/column/etc.)",
   },
   { keys: "Ctrl+Click", action: "Follow [[wikilink]] under cursor" },
+  {
+    keys: "Ctrl+Click (block title)",
+    action:
+      "Open the document a typed block (::experiment / ::protocol / ::idea / ::method) references — for experiments, the matching iteration file",
+  },
+  {
+    keys: "Right-click (inside block)",
+    action: "Block menu: Edit name / Delete block",
+  },
   { keys: "Double-click", action: "Select the whole highlighted range" },
+  {
+    keys: "Ctrl+Shift+W",
+    action:
+      "Wikilink: wrap selected text in [[…]], or open palette pick-mode if nothing selected",
+  },
 ];
 
 const PLANNED: Row[] = [
