@@ -457,6 +457,20 @@ function App() {
         } catch (e) {
           console.warn("regenerate_calendar_section failed:", e);
         }
+        // Cluster 14 v1.4 — Time-tracking auto-section. Same today-only
+        // gate as Calendar/GitHub. Renders yesterday's per-category
+        // planned/actual table; "(no events recorded yesterday)" when
+        // empty. Compose-after-Calendar order so the time summary sits
+        // below today's calendar in the rendered note.
+        try {
+          await invoke("regenerate_time_tracking_section", {
+            vaultPath,
+            filePath: path,
+            tzOffsetMinutes: -new Date().getTimezoneOffset(),
+          });
+        } catch (e) {
+          console.warn("regenerate_time_tracking_section failed:", e);
+        }
       }
     }
 

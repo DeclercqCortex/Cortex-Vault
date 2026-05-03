@@ -6509,6 +6509,270 @@ fn get_time_tracking_daily_rollup(
 }
 
 // ===========================================================================
+// Cluster 14 v1.4 — Time-tracking daily-note splice.
+// ===========================================================================
+//
+// Mirrors the Cluster 11 calendar splice and Cluster 10 GitHub splice
+// patterns. On open of today's daily note, regenerate a
+// "Yesterday's time" auto-section in the body, between
+// TIMETRACK-AUTO-START / TIMETRACK-AUTO-END markers, with a per-
+// category planned/actual table for the previous local day. Yesterday
+// rather than today, because by the time the user opens today's
+// daily note, yesterday's events are fully captured (including
+// post-hoc actual_minutes); today's are still in flight.
+//
+// Idempotent — only writes when the rendered content differs from
+// what's already on disk. Past daily notes are never touched (basename
+// gate matches today's local date).
+
+const TIMETRACK_AUTO_START: &str =
+    "<!-- TIMETRACK-AUTO-START — derived from yesterday's calendar events; do not edit -->";
+const TIMETRACK_AUTO_END: &str = "<!-- TIMETRACK-AUTO-END -->";
+const TIMETRACK_HEADING: &str = "## Yesterday's time";
+
+/// In-process aggregation that mirrors `get_time_tracking_aggregates`
+/// but is callable from non-Tauri contexts. Refactor candidate if a
+/// third caller appears; for now we accept the small duplication
+/// rather than restructure the existing public command's signature.
+fn aggregate_time_tracking_in_window(
+    conn: &Connection,
+    range_start: i64,
+    range_end: i64,
+) -> Result<Vec<TimeTrackingRow>, String> {
+    let events = collect_events_in_window(conn, range_start, range_end)?;
+    let mut by_category: std::collections::HashMap<String, TimeTrackingRow> =
+        std::collections::HashMap::new();
+    for evt in &events {
+        if evt.start_at < range_start || evt.start_at >= range_end {
+            continue;
+        }
+        let raw_cat = evt.category.trim();
+        let cat_key = if raw_cat.is_empty() {
+            "uncategorized".to_string()
+        } else {
+            raw_cat.to_string()
+        };
+        let planned = ((evt.end_at - evt.start_at).max(0)) / 60;
+        let is_recurring = evt.recurrence_rule.is_some();
+        let (actual, has_actual) = if is_recurring {
+            match evt.actual_minutes {
+                Some(m) if m >= 0 => (m, true),
+                _ => (planned, true),
+            }
+        } else {
+            match evt.actual_minutes {
+                Some(m) if m >= 0 => (m, true),
+                _ => (0, false),
+            }
+        };
+        let row = by_category
+            .entry(cat_key.clone())
+            .or_insert_with(|| TimeTrackingRow {
+                category: cat_key,
+                planned_minutes_total: 0,
+                actual_minutes_total: 0,
+                events_count: 0,
+                events_with_actual_count: 0,
+            });
+        row.planned_minutes_total += planned;
+        row.actual_minutes_total += actual;
+        row.events_count += 1;
+        if has_actual {
+            row.events_with_actual_count += 1;
+        }
+    }
+    let mut out: Vec<TimeTrackingRow> = by_category.into_values().collect();
+    out.sort_by(|a, b| a.category.cmp(&b.category));
+    Ok(out)
+}
+
+/// Compact "Xh Ym" / "Xm" / "0m" — matches TimeTracking.tsx's
+/// `formatMinutes` so the splice and the in-app view round to the
+/// same display.
+fn format_minutes_short(min: i64) -> String {
+    if min == 0 {
+        return "0m".to_string();
+    }
+    if min < 60 {
+        return format!("{}m", min);
+    }
+    let h = min / 60;
+    let r = min - h * 60;
+    if r == 0 {
+        format!("{}h", h)
+    } else {
+        format!("{}h {}m", h, r)
+    }
+}
+
+/// Render the auto-section body. Empty rows → italic placeholder,
+/// matching the Cluster 11 calendar splice's "(no events)" pattern.
+/// Otherwise a 5-column markdown table plus a Total row.
+fn format_time_tracking_markdown(rows: &[TimeTrackingRow]) -> String {
+    if rows.is_empty() {
+        return "_(no events recorded yesterday)_".to_string();
+    }
+    let mut total_planned = 0i64;
+    let mut total_actual = 0i64;
+    let mut total_with_actual = 0i64;
+    let mut total_events = 0i64;
+    for r in rows {
+        total_planned += r.planned_minutes_total;
+        total_actual += r.actual_minutes_total;
+        total_with_actual += r.events_with_actual_count;
+        total_events += r.events_count;
+    }
+    let mut s = String::new();
+    s.push_str("| Category | Planned | Actual | Ratio | Events |\n");
+    s.push_str("| --- | ---: | ---: | ---: | ---: |\n");
+    for r in rows {
+        let ratio_str = if r.planned_minutes_total > 0 && r.events_with_actual_count > 0 {
+            format!(
+                "{:.2}×",
+                r.actual_minutes_total as f64 / r.planned_minutes_total as f64
+            )
+        } else {
+            "—".to_string()
+        };
+        let actual_str = if r.events_with_actual_count > 0 {
+            format_minutes_short(r.actual_minutes_total)
+        } else {
+            "—".to_string()
+        };
+        s.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            r.category,
+            format_minutes_short(r.planned_minutes_total),
+            actual_str,
+            ratio_str,
+            r.events_count,
+        ));
+    }
+    let total_ratio_str = if total_planned > 0 && total_with_actual > 0 {
+        format!("{:.2}×", total_actual as f64 / total_planned as f64)
+    } else {
+        "—".to_string()
+    };
+    let total_actual_str = if total_with_actual > 0 {
+        format_minutes_short(total_actual)
+    } else {
+        "—".to_string()
+    };
+    s.push_str(&format!(
+        "| **Total** | **{}** | **{}** | **{}** | **{}** |\n",
+        format_minutes_short(total_planned),
+        total_actual_str,
+        total_ratio_str,
+        total_events,
+    ));
+    s
+}
+
+/// First-time injection. Mirrors `insert_calendar_under_heading`'s
+/// shape — find an existing `## Yesterday's time` heading and slot
+/// the auto-section under it (replacing any prior content under the
+/// heading up to the next H2), or append at end of file with a fresh
+/// heading.
+fn insert_time_tracking_under_heading(existing: &str, body: &str) -> String {
+    if let Some(idx) = existing.find(TIMETRACK_HEADING) {
+        let after_heading = &existing[idx + TIMETRACK_HEADING.len()..];
+        let line_end = after_heading.find('\n').unwrap_or(after_heading.len());
+        let head_end = idx + TIMETRACK_HEADING.len() + line_end;
+        let head = &existing[..head_end];
+        let tail = &existing[head_end..];
+        let next_h2 = tail
+            .find("\n## ")
+            .map(|i| i + 1)
+            .unwrap_or_else(|| tail.len());
+        let after_section = &tail[next_h2..];
+        format!(
+            "{head}\n\n{start}\n{body}\n{end}\n{after_section}",
+            head = head,
+            start = TIMETRACK_AUTO_START,
+            body = body,
+            end = TIMETRACK_AUTO_END,
+            after_section = after_section,
+        )
+    } else {
+        format!(
+            "{existing}\n\n{heading}\n\n{start}\n{body}\n{end}\n",
+            existing = existing.trim_end(),
+            heading = TIMETRACK_HEADING,
+            start = TIMETRACK_AUTO_START,
+            body = body,
+            end = TIMETRACK_AUTO_END,
+        )
+    }
+}
+
+/// Re-render the time-tracking auto-section in today's daily note.
+/// Past daily notes are no-ops (basename gate). Idempotent — only
+/// writes when content changes.
+#[tauri::command]
+fn regenerate_time_tracking_section(
+    vault_path: String,
+    file_path: String,
+    tz_offset_minutes: i32,
+) -> Result<(), String> {
+    let path = PathBuf::from(&file_path);
+    let basename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let now_utc = unix_now();
+    let today_local = local_iso_date_for(now_utc, tz_offset_minutes);
+    let today_basename = format!("{}.md", today_local);
+    if basename != today_basename {
+        // Past daily note — leave alone.
+        return Ok(());
+    }
+
+    // Yesterday's local-day window expressed in UTC seconds. Same
+    // tz-offset arithmetic as `regenerate_calendar_section`.
+    let offset_secs = (tz_offset_minutes as i64) * 60;
+    let now_local_repr = now_utc + offset_secs;
+    let today_local_start_repr = now_local_repr - now_local_repr.rem_euclid(86_400);
+    let yesterday_local_start_repr = today_local_start_repr - 86_400;
+    let yesterday_local_end_repr = today_local_start_repr;
+    let yesterday_start_unix = yesterday_local_start_repr - offset_secs;
+    let yesterday_end_unix = yesterday_local_end_repr - offset_secs;
+
+    let conn = open_or_init_db(&vault_path)?;
+    let rows = aggregate_time_tracking_in_window(&conn, yesterday_start_unix, yesterday_end_unix)?;
+    drop(conn);
+
+    let existing = match fs::read_to_string(&file_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let body_md = format_time_tracking_markdown(&rows);
+    let new_content = if let (Some(start_idx), Some(end_idx)) = (
+        existing.find(TIMETRACK_AUTO_START),
+        existing.find(TIMETRACK_AUTO_END),
+    ) {
+        if end_idx > start_idx {
+            let head = &existing[..start_idx + TIMETRACK_AUTO_START.len()];
+            let tail = &existing[end_idx..];
+            format!(
+                "{head}\n{body}\n{tail}",
+                head = head,
+                body = body_md,
+                tail = tail
+            )
+        } else {
+            insert_time_tracking_under_heading(&existing, &body_md)
+        }
+    } else {
+        insert_time_tracking_under_heading(&existing, &body_md)
+    };
+    if new_content != existing {
+        fs::write(&file_path, new_content).map_err(|e| e.to_string())?;
+        index_single_file(vault_path, file_path)?;
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Cluster 19 v1.0 — Image support: per-note attachments dir + import.
 // ===========================================================================
 
@@ -8295,6 +8559,8 @@ pub fn run() {
             delete_event_instance_override,
             get_event_instance_override,
             get_time_tracking_daily_rollup,
+            // Cluster 14 v1.4 — daily-note splice
+            regenerate_time_tracking_section,
             // Cluster 17 v1.1 — typedBlock title-bar Ctrl+Click target resolver
             resolve_typed_block_target,
             // Cluster 19 v1.0 — Image support

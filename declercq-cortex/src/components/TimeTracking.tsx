@@ -20,6 +20,12 @@
 // the current per-category aggregates (Category / Planned / Actual /
 // Ratio / Events / Events with actual) as CSV to the clipboard.
 //
+// Cluster 14 v1.4 adds a per-category Trend sparkline column to the
+// table view — a tiny inline SVG polyline of the same daily-rollup
+// data that powers the Trends tab, sized to fit a single table cell.
+// Re-uses categoryColour() so a category is one consistent colour
+// across pie / trends / sparkline.
+//
 // Rendered as a structured-view component in the same slot pattern as
 // IdeaLog / MethodsArsenal / ProtocolsLog. Sidebar button in App.tsx
 // switches the active slot's view to "time-tracking"; TabPane.tsx
@@ -205,11 +211,14 @@ export function TimeTracking({
   }, [vaultPath, preset, refreshKey]);
 
   // Cluster 14 v1.3 — fetch the per-day rollup whenever the user is
-  // looking at the Trends tab. We only fetch when the tab is visible
-  // so a user who never opens Trends doesn't pay the daily-bin cost.
+  // looking at the Trends tab.
+  // Cluster 14 v1.4 — also fetch when the Table tab is active, since
+  // the per-row sparklines consume the same data. Pie alone doesn't
+  // need it; gate on table || trends to avoid the daily-bin cost
+  // when the user lives in pie view.
   useEffect(() => {
     if (!vaultPath) return;
-    if (viewMode !== "trends") return;
+    if (viewMode !== "trends" && viewMode !== "table") return;
     let cancelled = false;
     const { start, end } = computeRange(preset);
     setTrendsError(null);
@@ -505,6 +514,13 @@ export function TimeTracking({
                 <th style={{ ...styles.th, textAlign: "right" }}>Actual</th>
                 <th style={{ ...styles.th, textAlign: "right" }}>Ratio</th>
                 <th style={{ ...styles.th, textAlign: "right" }}>Events</th>
+                {/* Cluster 14 v1.4 — per-category trend sparkline.
+                    Inline SVG of daily actual_minutes over the selected
+                    window. Empty cell when no daily-rollup data has
+                    arrived yet. */}
+                <th style={{ ...styles.th, textAlign: "center", width: 96 }}>
+                  Trend
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -544,6 +560,13 @@ export function TimeTracking({
                       ({r.events_with_actual_count})
                     </span>
                   </td>
+                  <td style={{ ...styles.td, textAlign: "center" }}>
+                    <Sparkline
+                      rows={trendsRows}
+                      category={r.category}
+                      preset={preset}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -551,7 +574,9 @@ export function TimeTracking({
           <div style={styles.legend}>
             Ratio &lt; 0.9× → green (came in under estimate). Ratio &gt; 1.2× →
             red (significantly over). Counts in parentheses are the events with
-            an &quot;Actual minutes&quot; recorded.
+            an &quot;Actual minutes&quot; recorded. Trend sparkline shows daily
+            actual minutes over the selected window (recurring events
+            auto-credit; flat at zero means no actuals recorded yet).
           </div>
         </>
       )}
@@ -568,6 +593,140 @@ export function TimeTracking({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Cluster 14 v1.4 — tiny inline SVG polyline of daily actual_minutes
+ * for one category. Sized to fit a single table cell (96×24). Reuses
+ * the same daily-rollup data that powers the Trends tab so a category
+ * is one consistent colour across pie / trends / sparkline.
+ *
+ * Behaviour:
+ *   - Filters the global rollup to this category, sorts by day_iso.
+ *   - If the category has zero daily rows in the window (could happen
+ *     if all its events fell outside the bin grid for some reason),
+ *     renders a muted em-dash placeholder.
+ *   - Densifies the series to one point per day in the window so
+ *     "missing day" reads as a zero (rather than the line skipping
+ *     to the next data day, which visually compresses gaps).
+ *   - Y axis is per-category (max of this category's values across
+ *     the window), not shared with other rows. Each row's sparkline
+ *     answers "how does this category's daily spend evolve?", not
+ *     "which category is biggest?". The Pie + Trends views answer
+ *     the comparative question.
+ *   - Metric is `actual_minutes` (the time-tracking-relevant signal);
+ *     planned-trend lives in the Trends tab.
+ *   - Loading / null trendsRows → empty cell (the table renders
+ *     immediately on the per-category aggregates; sparklines populate
+ *     a tick later when the daily-rollup query returns).
+ */
+function Sparkline({
+  rows,
+  category,
+  preset,
+}: {
+  rows: DailyRollupRow[] | null;
+  category: string;
+  preset: RangePreset;
+}) {
+  const series = useMemo(() => {
+    if (!rows) return null;
+    // Densify the window — one point per local day in [start, end).
+    const { start, end } = computeRange(preset);
+    // For "all", clamp to the actual data range so we don't render
+    // 36500 zero days. Use the union of category days in `rows`.
+    let firstUnix = start;
+    let lastUnix = Math.min(end, Math.floor(Date.now() / 1000) + 86400);
+    if (preset === "all") {
+      const dataDays = rows.map((r) => r.day_iso).sort();
+      if (dataDays.length === 0) return [];
+      // Convert ISO date back to a unix at local midnight via Date
+      // parsing. We only need an ordering anchor.
+      firstUnix = new Date(`${dataDays[0]}T00:00:00`).getTime() / 1000;
+      lastUnix =
+        new Date(`${dataDays[dataDays.length - 1]}T00:00:00`).getTime() / 1000 +
+        86400;
+    }
+    // Build a quick lookup of this category's actual_minutes by day_iso.
+    const byDay = new Map<string, number>();
+    for (const r of rows) {
+      if (r.category !== category) continue;
+      byDay.set(r.day_iso, r.actual_minutes);
+    }
+    // Walk days inclusive of firstUnix..lastUnix-1 day.
+    const out: number[] = [];
+    const toIso = (unixSec: number) => {
+      const d = new Date(unixSec * 1000);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+    for (let t = firstUnix; t < lastUnix; t += 86400) {
+      out.push(byDay.get(toIso(t)) ?? 0);
+    }
+    return out;
+  }, [rows, category, preset]);
+
+  if (series === null) {
+    // Daily-rollup hasn't arrived yet. Render an empty placeholder of
+    // matching dimensions so the table layout doesn't reflow when it
+    // populates.
+    return <span style={{ display: "inline-block", width: 80, height: 24 }} />;
+  }
+  if (series.length === 0) {
+    return <span style={{ color: "var(--text-muted)" }}>—</span>;
+  }
+
+  const W = 80;
+  const H = 24;
+  const max = Math.max(...series, 1);
+  const stepX = series.length > 1 ? (W - 4) / (series.length - 1) : 0;
+  const points = series
+    .map((v, i) => {
+      const x = 2 + i * stepX;
+      const y = H - 2 - (v / max) * (H - 4);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const colour = categoryColour(category);
+
+  // Single-point edge case: render a dot (polyline with one point
+  // doesn't draw).
+  if (series.length === 1) {
+    return (
+      <svg
+        width={W}
+        height={H}
+        viewBox={`0 0 ${W} ${H}`}
+        role="img"
+        aria-label={`Sparkline for ${category}`}
+        style={{ display: "block", margin: "0 auto" }}
+      >
+        <circle cx={W / 2} cy={H / 2} r={2} fill={colour} />
+      </svg>
+    );
+  }
+
+  return (
+    <svg
+      width={W}
+      height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label={`Sparkline for ${category}`}
+      style={{ display: "block", margin: "0 auto" }}
+    >
+      <polyline
+        points={points}
+        fill="none"
+        stroke={colour}
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

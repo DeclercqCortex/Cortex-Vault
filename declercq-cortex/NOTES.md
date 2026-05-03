@@ -4499,3 +4499,509 @@ activeSlotIdx]?.setActiveView("time-tracking")`.
 - Colour-cued ratio (green / red / neutral).
 - Composes with the existing calendar stack — no new data the user
   hasn't already been entering, just one extra field.
+
+## Phase 3 — Cluster 14 v1.1 — Recurring events auto-credit
+
+The v1.0 ship excluded recurring events from the aggregate (no
+row to attach `actual_minutes` to per occurrence). After
+dogfooding, the user noted that the recurring side of the
+calendar — daily standups, weekly seminars — was the bulk of the
+time spend and the most worth tracking. The "no row" caveat is
+true, but it's a worse outcome than treating recurring instances
+as fully spent: if you actually held the recurring event, its
+planned duration is a fair estimate of the actual when no
+override exists.
+
+### What ships
+
+- `get_time_tracking_aggregates` walks `expand_recurrence` for
+  each recurring master in-range and contributes one row per
+  expanded occurrence to both `planned_minutes_total` and
+  `actual_minutes_total`. Each occurrence counts as `events_count`
+  and `events_with_actual_count`.
+- TimeTracking.tsx subtitle copy updated: "Recurring events
+  auto-credit each instance as fully spent."
+
+### Architectural decision
+
+- **Recurring duration ≈ recurring actual.** If you scheduled
+  something recurring, you've already decided it takes that long.
+  Until/unless you record an override on a single instance, the
+  planned duration is the best estimate. v1.3 adds per-instance
+  overrides for the times this is wrong.
+
+### Tag
+
+`cluster-14-v1.1-complete`.
+
+## Phase 3 — Cluster 14 v1.2 — Pie chart tab
+
+Second view of the same per-category aggregates. The table is
+exact-numbers-first; the pie is shape-first.
+
+### What ships
+
+- `ViewMode` union added to TimeTracking.tsx —
+  `"table" | "pie"`. Toggle in the toolbar.
+- Pie sub-toggle: `PieMetric = "planned" | "actual"`.
+- Deterministic colour palette: 12-colour fixed `PIE_PALETTE`,
+  categories map in via FNV-1a hash. Same category renders in
+  the same colour across reloads. Collisions degrade gracefully.
+- Inline SVG pie (no Chart.js / Recharts). Slice paths via
+  `M cx cy L x1 y1 A r r 0 large 1 x2 y2 Z` arc-flag arithmetic.
+
+### Architectural decisions
+
+- **Inline SVG over a charting library.** Cortex already had
+  hand-drawn SVG visualisations elsewhere; pulling in a 50 kB
+  dep for one pie was unjustified. The arithmetic is six lines.
+- **Hash-based colour assignment over random/ordered.** Random
+  changes every reload (jarring); ordering by size shifts colours
+  when categories enter/leave the window (also jarring); hash
+  is stable and cheap.
+
+### Tag
+
+`cluster-14-v1.2-complete`.
+
+## Phase 3 — Cluster 14 v1.3 — Per-instance overrides + Trends + CSV
+
+Three substantive additions in one ship.
+
+### Per-instance overrides for recurring events
+
+New table:
+
+```sql
+CREATE TABLE event_instance_overrides (
+  master_event_id INTEGER NOT NULL,
+  occurrence_date_iso TEXT NOT NULL,  -- 'YYYY-MM-DD' in event tz
+  skip INTEGER NOT NULL DEFAULT 0,
+  actual_minutes INTEGER,
+  PRIMARY KEY (master_event_id, occurrence_date_iso),
+  FOREIGN KEY (master_event_id) REFERENCES events(id) ON DELETE CASCADE
+)
+```
+
+Three Tauri commands: `set_event_instance_override`,
+`get_event_instance_overrides`, `delete_event_instance_override`.
+`expand_recurrence` consults the override table per occurrence
+(skipped instances are filtered out); aggregate queries read
+override actuals when present, otherwise auto-credit planned.
+
+EventEditModal grows a dual-save UX when editing a recurring
+instance: **Skip** writes `skip=1`; **Save just this** writes
+`actual_minutes` for this date only; **Save series** updates the
+master (legacy path). Plus a Delete dropdown with "Delete just
+this" / "Delete series".
+
+### Trends tab
+
+Hand-drawn SVG line chart with one line per category, planned/
+actual/both metric toggle. New
+`get_time_tracking_daily_rollup(vault, range_start, range_end,
+tz_offset_minutes)` Tauri command returns
+`Vec<DailyRollupRow>` with `day_iso`, `category`,
+`planned_minutes`, `actual_minutes`, `events_count`. Days are
+binned by **local** date using the same `tz_offset_minutes`
+pattern Cluster 10 v1.2 introduced.
+
+The chart reuses `categoryColour()` (same FNV-1a palette as the
+pie) so a category is one consistent colour across pie + trends.
+
+### Copy CSV
+
+Toolbar button emits the current per-category aggregates to the
+clipboard. RFC 4180 quoting (categories with `,` `"` `\n` get
+wrapped in `""`). Format: a `# Cortex time tracking — <range> —
+N categories` header comment, then the CSV header (`category,
+planned_minutes, actual_minutes, ratio, events,
+events_with_actual`), one row per category. Ratio is empty
+when `planned == 0` or `events_with_actual == 0`.
+
+### Architectural decisions
+
+- **Override table over modifying RRULEs.** The recurrence rule
+  is the schedule; per-occurrence skips and actuals are
+  exception data. Stuffing them into RFC 5545's `EXDATE` would
+  have been spec-faithful but harder to query. A separate table
+  keeps the schedule pure and the exceptions queryable.
+- **Local-day binning.** UTC binning would smear "what I did on
+  Tuesday" across two day buckets when the user crosses midnight
+  doing late-evening work. The same `tz_offset_minutes` approach
+  that fixed GitHub's cross-day rollover (Cluster 10 v1.2)
+  applies here.
+- **CSV ratio is empty when undefined.** `actual / planned` is
+  meaningless when `planned == 0` or no actuals recorded.
+  Emitting `""` is more honest than `0` (skews spreadsheet
+  aggregates) or `NaN` (Excel chokes).
+
+### Files touched (broad strokes)
+
+- `src-tauri/src/lib.rs` — `event_instance_overrides` table +
+  three commands; `expand_recurrence` honours overrides;
+  `get_time_tracking_aggregates` honours actuals; new
+  `get_time_tracking_daily_rollup` command.
+- `src/components/EventEditModal.tsx` — dual-save UX, Skip /
+  Save just this / Save series, Delete just this / Delete series.
+- `src/components/TimeTracking.tsx` — `ViewMode` extended to
+  include `"trends"`, Trends tab render, daily-rollup fetch
+  effect, Copy CSV button.
+- `verify-cluster-14-v1.3.ps1`.
+
+### Tag
+
+`cluster-14-v1.3-complete`.
+
+## Phase 3 — Cluster 19 v1.0 — Image embeds + ImageViewer
+
+Image support inside notes. Drag a PNG/JPG/WebP from the FileTree
+or use Ctrl+Shift+I to insert one; resize, rotate, free-position;
+annotate via Ctrl+click; right-click for the full menu. A
+substantive feature — custom TipTap atom node with a React
+NodeView, separate full-tab ImageViewer, attachment-management
+Tauri commands, drag/keyboard insertion paths. Layered in the
+same vein as PDFReader (Cluster 6).
+
+### What ships
+
+**Tauri config.** `assetProtocol` enabled in `tauri.conf.json`.
+This is what lets `convertFileSrc(absPath)` produce an
+`asset://localhost/...` URL the WebView can render. Without it,
+local images fail to load (CORS).
+
+**Two new Tauri commands** in `lib.rs`:
+
+- `ensure_note_attachments_dir(note_path) -> String` — creates
+  `<note-basename>-attachments/` next to the note if absent;
+  returns the absolute path. Idempotent.
+- `import_image_to_note(note_path, source_path) -> String` —
+  copies the source file into the attachments dir with
+  content-aware dedupe (SHA256 of bytes; if a file with matching
+  content exists, returns its path instead of re-copying).
+  Returns the relative path from the note (`<note>-attachments/
+  filename.png`).
+
+**`cortexImage` TipTap atom node** (`src/editor/CortexImage.ts`).
+Atom (no children, behaves as a single character in the doc).
+Attrs: `src`, `width`, `height`, `freeX`, `freeY`, `rotation`,
+`wrapMode` (`'left' | 'right' | 'break' | 'free'`), `annotation`
+(URL-encoded). `parseHTML` + `renderHTML` with `data-*` attrs
+round-trip through `tiptap-markdown`'s `html: true`.
+
+**`CortexImageNodeView.tsx`.** React NodeView. Resolves relative
+`src` via `editor.storage.cortexImage.notePath` (App.tsx writes
+it on every file open). Three corner handles on hover:
+
+- **Drag-to-move** — switches `wrapMode` to `'free'` and tracks
+  `freeX`/`freeY` against the editor's bounding rect.
+- **Rotate** — drags rotate around the image centre. Holding
+  Shift snaps to 5° increments.
+- **Resize** — horizontal drag changes `width`; height computed
+  via aspect ratio (no aspect-distort mode in v1).
+
+Visual treatment: 1×2 px shadow + 1px inset outline gives a
+"glued in a notebook" feel.
+
+**Wrap modes.** `'left' | 'right' | 'break' | 'free'`. Free
+mode uses `position: absolute` against the editor's relative
+positioning context (`.ProseMirror { position: relative }`).
+Other modes use CSS `float`. Break is a centred display-block
+image with margin.
+
+**Annotation system.** Per-image free-text annotation stored
+URL-encoded on the node attr (so it round-trips through HTML
+attribute parsing without escaping woes). Ctrl+click opens
+`ImageAnnotationPopover.tsx` — auto-sized textarea, blur or
+Ctrl+Enter saves, Escape cancels. SVG comment-bubble badge
+overlays the bottom-right corner when annotation is non-empty.
+
+**ImageContextMenu.** Right-click. Wrap-mode toggles, Reset
+rotation / position / width, Edit annotation, Delete.
+
+**ImageViewer.** Full-tab view for opening images directly.
+Pan/zoom/fit-to-window, checkerboard background for transparent
+images. Routed via `ActiveView` `"image-viewer"` and
+`TabPane`'s `IMAGE_EXTENSIONS` matcher.
+
+**Insertion paths.**
+
+- **Drag from FileTree.** PaneWrapper detects whether a
+  `cortex-path` drop is on an image inside a `.ProseMirror` vs
+  anywhere else. Inside an editor → calls
+  `paneRefs[i].current.insertImageFromPath(path, dropX, dropY)`.
+  Else → opens the image as its own tab via the existing
+  `selectFileInSlot` path.
+- **Ctrl+Shift+I** — keyboard shortcut. Opens
+  `@tauri-apps/plugin-dialog`'s `open()` dialog, then calls the
+  same `insertImageFromPath`.
+
+`insertImageFromPath` runs `ensure_note_attachments_dir` →
+`import_image_to_note` → `editor.commands.insertContent({type:
+'cortexImage', attrs: {...}})`.
+
+### Architectural decisions
+
+- **Atom node, not block.** Inline-positioning is the default
+  behaviour for images in markdown. Wrap modes layer on top via
+  CSS rather than via separate node types.
+- **Sidecar attachments folder** (`<note>-attachments/`) — local
+  to the note. Pattern matches PDF's `<file>.annotations.json`
+  sidecar shape (Cluster 6).
+- **Content-aware dedupe over filename dedupe.** SHA256-of-bytes
+  comparison means dragging the same image twice doesn't create
+  `image.png` and `image-1.png`. Identical content → file reused.
+- **URL-encoded annotation, not separate sidecar.** Annotations
+  are short. Per-image sidecar files would be 100× the storage
+  overhead per byte of content.
+- **NodeView for editability + visual feedback, atom for
+  selection.** Image is a single thing as far as the doc model
+  is concerned (selection, copy/paste, undo); the NodeView
+  handles all the in-place editing UX without polluting the doc
+  model with intermediate states.
+
+### Tag
+
+`cluster-19-v1.0-complete` (NOT separately tagged — bundled
+into the catch-up commit `9bbef27`. First separately tagged
+image-cluster ship is `cluster-19-v1.0.2-complete`.)
+
+## Phase 3 — Cluster 19 v1.0.2 — Image polish pass
+
+Five small fixes after a few hours of dogfooding.
+
+1. **Corner handles re-anchored.** Drifting on certain float /
+   margin / inline-block descender combinations. Switched to
+   `transform: translate(±50%, ±50%)` so handles sit exactly on
+   image corners regardless of layout. `.cortex-image-anchor` got
+   `font-size: 0` + `vertical-align: top` so the anchor matches
+   the image pixel-for-pixel.
+2. **Selection outline.** Was `outline + outline-offset` which
+   bled into the next paragraph row at tight line-heights.
+   Switched to `box-shadow: 0 0 0 2px var(--accent)` — stays
+   self-contained.
+3. **Annotation badge.** Replaced 📝 emoji with an inline SVG
+   comment-bubble icon — uniform across OSes, themed via
+   `currentColor`. 22×22 circular chip matching corner-handle
+   visual language.
+4. **Annotation interaction split.** Click → read-only bubble
+   (with footer hint "Ctrl+click image to edit"); Ctrl+click →
+   edit popover. New `cortex:view-image-annotation` CustomEvent
+   + `ViewImageAnnotationDetail`. Cursor feedback under Ctrl
+   rides on the existing `body.cortex-mod-pressed` class — same
+   pattern as PDF wikilink hover.
+5. **Drop placement.** New images default to `wrapMode: 'free'`
+   with seeded `freeX`/`freeY` from drop coords (when given) or
+   `view.coordsAtPos(selection.from)` (when inserted at cursor).
+   Images land where you put them and are draggable from frame
+   one. Wrap left/right/break still in the right-click menu.
+
+### Tag
+
+`cluster-19-v1.0.2-complete`.
+
+## Phase 3 — Cluster 19 v1.0.3 — Cluster 17 v1.1 follow-command fix
+
+Mostly a Cluster 17 v1.1 fix that surfaced while dogfooding the
+images cluster.
+
+The Cluster 17 v1.1 docs claimed a `resolve_typed_block_target`
+Tauri command and an App.tsx `onFollowTypedBlock` wiring, but
+neither was actually implemented. Plain click + Ctrl+Shift+B
+still worked (both local to TipTap), but Ctrl+click on a
+typedBlock title bar was a dead gesture. Bug only became visible
+during heavy dogfooding after v1.1 — there was no verify-script
+smoke check for it.
+
+### What ships
+
+**Rust command** — `resolve_typed_block_target(vault_path,
+block_type, name, iter_number?)`:
+
+- For `block_type='experiment'` queries the hierarchy table for
+  experiments, matches by directory basename with the `NN-`
+  numeric prefix stripped (case-insensitive); prefers
+  `iter-NN - *.md` when `iter_number` is given, falling back to
+  the experiment's `index.md`.
+- For `idea`/`method`/`protocol` scans `04-Ideas/`,
+  `05-Methods/`, `06-Protocols/` for a `*.md` whose stem
+  matches.
+- Registered in `invoke_handler`.
+
+**App.tsx wiring.** New `openTypedBlockInActive(attrs)` async
+helper that calls the command and dispatches `selectFileInSlot`
+on success or surfaces an error banner. TabPane usage gains
+`onFollowTypedBlock={(attrs)=>{activatePane(i);
+openTypedBlockInActive(attrs);}}` mirroring the existing
+`onFollowWikilink` wiring.
+
+### Architectural decision
+
+- **The `NN-` prefix is a sorting affordance, not part of the
+  identifier.** Hierarchy directories are named like
+  `01-Test Project/01-Test Experiment/`. The prefix exists so
+  the filesystem sorts in creation order. Identifier matching
+  strips the prefix and case-folds the rest.
+
+### Lesson
+
+If a doc claims a wiring exists, a verify-script smoke check is
+the only thing that catches "claimed but not actually
+implemented" before dogfooding does. Add an "Ctrl+click block
+title opens target doc" smoke item to future cluster-17 /
+cluster-19 verify scripts.
+
+### Tag
+
+`cluster-19-v1.0.3-complete`.
+
+## Phase 3 — Cluster 14 v1.4 — Sparklines per category + daily-note splice
+
+The first two sequenced follow-ups from v1.3, shipped together
+because they share the same data source.
+
+### What ships
+
+**Per-category Trend sparkline column** in the TimeTracking Table
+view. Each row gets an inline 80×24 SVG polyline of that category's
+daily `actual_minutes` across the selected window. Implementation
+reuses the existing `get_time_tracking_daily_rollup` Tauri command
+from v1.3 — no new query. The fetch effect's gate widens from
+`viewMode === "trends"` to `(viewMode === "trends" || viewMode ===
+"table")` so pie view still skips the daily-bin cost.
+
+The Sparkline component:
+
+- Filters the global rollup to `category === r.category` and sorts
+  by `day_iso`.
+- **Densifies** missing days to zero so a "no events on Wednesday"
+  reads as a flat dip rather than the polyline visually skipping
+  the gap and compressing time.
+- **Clamps All-time** to the actual data span (union of category
+  days in `rows`) so a category with three data points doesn't
+  render 36500 zero days.
+- Per-category Y axis (`max(values, 1)`); each row's sparkline
+  answers "how does this category's daily spend evolve?", not
+  "which is biggest?". The pie + Trends views already answer the
+  comparative question.
+- **Reuses `categoryColour()`** (FNV-1a hash from v1.2) so a
+  category is one consistent colour across pie / Trends / sparkline.
+
+Edge cases handled:
+
+- `trendsRows === null` (data hasn't arrived yet) → empty 80×24
+  placeholder. Table layout stays stable when the sparklines
+  populate a tick later.
+- `series.length === 0` (category has zero rows in the window) →
+  muted em-dash.
+- `series.length === 1` → a single 2 px centre dot (a 1-point
+  polyline doesn't draw).
+- `max === 0` → divide-by-zero guarded; line sits at baseline.
+
+**Daily-note splice for time tracking.** New
+`regenerate_time_tracking_section(vault_path, file_path,
+tz_offset_minutes)` Tauri command. Mirrors
+`regenerate_calendar_section` and `regenerate_github_section`:
+
+- Basename gate to today's local-day daily-note basename
+  (`<YYYY-MM-DD>.md` in the user's local time, computed via
+  `local_iso_date_for(now_utc, tz_offset_minutes)`). Past daily
+  notes are no-ops.
+- Window: yesterday's local-day `[00:00, 24:00)` in UTC seconds via
+  the same tz-offset arithmetic the calendar splice uses
+  (`now_local_repr - rem_euclid(86_400) - 86_400`).
+- Aggregation factored into `aggregate_time_tracking_in_window`
+  helper so the command shares all the recurring auto-credit +
+  override semantics with `get_time_tracking_aggregates`. (Public
+  command remains the canonical Tauri entry point; helper is a
+  refactor candidate if a third caller appears.)
+- Markers: `<!-- TIMETRACK-AUTO-START — derived from yesterday's
+  calendar events; do not edit -->` / `<!-- TIMETRACK-AUTO-END -->`.
+- Heading-fallback insertion under `## Yesterday's time` when
+  markers absent (mirrors `insert_calendar_under_heading` shape).
+- Idempotent — only writes when content differs; `index_single_file`
+  invoked after writes.
+
+Body shape: a 5-column markdown table (Category / Planned / Actual
+/ Ratio / Events) with a bolded **Total** row at the bottom.
+Compact `Xh Ym` formatting via a new `format_minutes_short` helper
+that mirrors `TimeTracking.tsx`'s `formatMinutes`. Ratio is
+`actual / planned` to 2 decimals; em-dash when planned is zero or
+no actuals are recorded. Empty rows render
+`_(no events recorded yesterday)_` italic placeholder.
+
+Wired into `App.tsx`'s `selectFileInSlot` daily-log branch right
+after the existing `regenerate_calendar_section` call, with the
+same `tzOffsetMinutes` plumbing. Failures log a warning but don't
+block the file open.
+
+### Architectural decisions
+
+- **Reuse the v1.3 daily-rollup query, don't add a new endpoint.**
+  Sparklines need the same `(day_iso, category, actual_minutes)`
+  shape that Trends already fetches. Adding a separate
+  "sparklines query" would be a duplication. The fetch effect's
+  gate widens by one disjunct.
+- **Densify on the frontend.** The Rust query returns one row per
+  `(day_iso, category)` that had data. Filling the gaps to zero
+  is presentation logic, not a query concern. Doing it in Rust
+  would require materialising every day in the window for every
+  category just to emit zeros, which is wasteful when most
+  categories have data on most days.
+- **Yesterday, not today.** The daily-note splice is meant to be
+  a stable summary the user sees when they open today's daily
+  note. Today's events are still in flight; yesterday's are
+  fully captured (including post-hoc actual_minutes). v1.5 could
+  add a configurable window (today running / last 7 days) but
+  yesterday is the right v1 default.
+- **Helper extraction over public-command call.** The public
+  Tauri command's signature is `(String, i64, i64) -> Result<...>`
+  — fine for the frontend invoke shape but awkward for the regen
+  to call inline. Extracting `aggregate_time_tracking_in_window`
+  with the same internals lets both callers stay clean.
+- **Bolded Total row, not a separate summary line above the
+  table.** The total reads naturally inside the same shape; a
+  separate line above would feel like a duplicate header.
+
+### Files touched
+
+- `src/components/TimeTracking.tsx`
+  - Header comment updated.
+  - Daily-rollup fetch effect's gate widens to `(trends || table)`.
+  - New "Trend" column header in the Table view's `<thead>`.
+  - New `<Sparkline rows={trendsRows} category={r.category}
+    preset={preset} />` cell per row.
+  - Legend copy updated.
+  - New `Sparkline` subcomponent (~115 lines) below the main
+    export, before `PieChart`.
+- `src/App.tsx`
+  - New `regenerate_time_tracking_section` invoke after the
+    existing `regenerate_calendar_section` block in
+    `selectFileInSlot`'s daily-log branch.
+- `src-tauri/src/lib.rs`
+  - New `TIMETRACK_AUTO_START` / `TIMETRACK_AUTO_END` /
+    `TIMETRACK_HEADING` constants.
+  - New `aggregate_time_tracking_in_window` helper.
+  - New `format_minutes_short` helper.
+  - New `format_time_tracking_markdown` helper.
+  - New `insert_time_tracking_under_heading` helper.
+  - New `regenerate_time_tracking_section` Tauri command.
+  - `invoke_handler!` registration for the new command.
+- `verify-cluster-14-v1.4.ps1` — new verify script with 12
+  smoke passes.
+- `phase_2_overview.md` — Cluster 14 status line bumped to v1.4.
+- `COWORK_HANDOFF.md` — tag table + cluster status updated.
+
+### What ships under tag `cluster-14-v1.4-complete`
+
+- Per-category Trend sparkline column on the Time tracking Table
+  view, reusing the existing daily-rollup data and category palette.
+- `## Yesterday's time` auto-section in today's daily note,
+  showing per-category planned/actual/ratio/events with a Total
+  row.
+- Same idempotent regen + tz-aware basename gate as the existing
+  Calendar/GitHub splice infrastructure.
+
+### Tag
+
+`cluster-14-v1.4-complete`.
