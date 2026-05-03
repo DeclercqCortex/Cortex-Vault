@@ -576,6 +576,33 @@ function App() {
   // Wikilinks — opens target file in the active slot (the pane that
   // initiated the click).
   // -------------------------------------------------------------------------
+  // Cluster 17 v1.1 — Ctrl/Cmd+Click on a typedBlock title bar.
+  // Resolves the (blockType, name, iterNumber) tuple to a file path
+  // via the resolve_typed_block_target Tauri command and opens it in
+  // the active slot. Soft-fails with an error banner when nothing
+  // matches (e.g. user typed a block name that doesn't correspond to
+  // any experiment / idea / method / protocol on disk).
+  async function openTypedBlockInActive(attrs: {
+    blockType: "experiment" | "protocol" | "idea" | "method";
+    name: string;
+    iterNumber: number | null;
+  }) {
+    if (!vaultPath) return;
+    try {
+      const path = await invoke<string>("resolve_typed_block_target", {
+        vaultPath,
+        blockType: attrs.blockType,
+        name: attrs.name,
+        iterNumber: attrs.iterNumber ?? null,
+      });
+      if (path) {
+        await selectFileInSlot(path, activeSlotIdx);
+      }
+    } catch (e) {
+      setError(`Couldn't open ${attrs.blockType} \"${attrs.name}\": ${e}`);
+    }
+  }
+
   async function openWikilinkInActive(target: string) {
     if (!vaultPath) return;
     try {
@@ -1124,6 +1151,12 @@ function App() {
             // resolve from there.
             activatePane(i);
             openWikilinkInActive(target);
+          }}
+          onFollowTypedBlock={(attrs) => {
+            // Cluster 17 v1.1 — Ctrl/Cmd+Click on a typedBlock title.
+            // Same activation pattern as wikilink follow.
+            activatePane(i);
+            openTypedBlockInActive(attrs);
           }}
           onRequestInsertTable={() => {
             activatePane(i);

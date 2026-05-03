@@ -4060,6 +4060,131 @@ const IDEAS_DIR: &str = "04-Ideas";
 const METHODS_DIR: &str = "05-Methods";
 const PROTOCOLS_DIR: &str = "06-Protocols";
 
+/// Cluster 17 v1.1 — resolve a typedBlock title to a target file path.
+///
+/// Inputs:
+///   - `block_type` ∈ {"experiment", "protocol", "idea", "method"}
+///   - `name`        — block name (case-insensitive match against the
+///                     experiment's directory basename, or the
+///                     idea/method/protocol's stem)
+///   - `iter_number` — only meaningful for experiments. When given,
+///                     prefer the matching `iter-NN - *.md` over the
+///                     experiment's `index.md`.
+///
+/// Returns the absolute path to the resolved file, or an Err string
+/// describing why no resolution was possible.
+#[tauri::command]
+fn resolve_typed_block_target(
+    vault_path: String,
+    block_type: String,
+    name: String,
+    iter_number: Option<i64>,
+) -> Result<String, String> {
+    if vault_path.trim().is_empty() {
+        return Err("vault_path required".into());
+    }
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("name required".into());
+    }
+    let kind = block_type.trim().to_ascii_lowercase();
+    let vault = PathBuf::from(&vault_path);
+
+    match kind.as_str() {
+        "experiment" => {
+            // Match experiment by directory basename (case-insensitive)
+            // via the hierarchy table.
+            let conn = open_or_init_db(&vault_path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT path FROM hierarchy
+                     WHERE type = 'experiment'
+                     ORDER BY path",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            let needle = trimmed_name.to_ascii_lowercase();
+            let mut matched_index: Option<PathBuf> = None;
+            for r in rows {
+                let p = PathBuf::from(r.map_err(|e| e.to_string())?);
+                let dir = p.parent().map(PathBuf::from).unwrap_or_default();
+                let dir_name = dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                // Strip leading numbered prefix "NN-" before comparing
+                // (the user types just "My Experiment", not "01-My Experiment").
+                let dir_stripped = dir_name
+                    .splitn(2, '-')
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| dir_name.clone());
+                let dir_lower = dir_stripped.to_ascii_lowercase();
+                if dir_lower == needle || dir_name.to_ascii_lowercase() == needle {
+                    matched_index = Some(p);
+                    break;
+                }
+            }
+            let exp_index = matched_index
+                .ok_or_else(|| format!("No experiment named `{}` found.", trimmed_name))?;
+            // If iter_number is given, look for iter-NN - *.md alongside
+            // the index.md.
+            if let Some(n) = iter_number {
+                if n > 0 {
+                    let exp_dir = exp_index.parent().map(PathBuf::from).unwrap_or_default();
+                    let prefix = format!("iter-{:02} - ", n);
+                    if let Ok(entries) = std::fs::read_dir(&exp_dir) {
+                        for entry in entries.flatten() {
+                            let fname = entry.file_name();
+                            let s = fname.to_string_lossy();
+                            if s.starts_with(&prefix) && s.ends_with(".md") {
+                                return Ok(entry.path().to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // Fall back to the experiment's index.md.
+            Ok(exp_index.to_string_lossy().to_string())
+        }
+        "idea" | "method" | "protocol" => {
+            let dir_name = match kind.as_str() {
+                "idea" => IDEAS_DIR,
+                "method" => METHODS_DIR,
+                _ => PROTOCOLS_DIR,
+            };
+            let dir = vault.join(dir_name);
+            if !dir.exists() {
+                return Err(format!("Folder `{}/` does not exist in vault.", dir_name));
+            }
+            let needle = trimmed_name.to_ascii_lowercase();
+            let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let s = fname.to_string_lossy().to_string();
+                if !s.to_ascii_lowercase().ends_with(".md") {
+                    continue;
+                }
+                let stem = s
+                    .strip_suffix(".md")
+                    .or_else(|| s.strip_suffix(".MD"))
+                    .unwrap_or(&s)
+                    .to_string();
+                if stem.to_ascii_lowercase() == needle {
+                    return Ok(entry.path().to_string_lossy().to_string());
+                }
+            }
+            Err(format!(
+                "No {} named `{}` found in {}/.",
+                kind, trimmed_name, dir_name
+            ))
+        }
+        other => Err(format!("Unknown block type: `{}`", other)),
+    }
+}
+
 #[derive(Serialize)]
 pub struct NoteWithMetadata {
     pub path: String,
@@ -8170,6 +8295,8 @@ pub fn run() {
             delete_event_instance_override,
             get_event_instance_override,
             get_time_tracking_daily_rollup,
+            // Cluster 17 v1.1 — typedBlock title-bar Ctrl+Click target resolver
+            resolve_typed_block_target,
             // Cluster 19 v1.0 — Image support
             ensure_note_attachments_dir,
             import_image_to_note,
