@@ -21,12 +21,21 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
+    "targets": [
+      "msi",
+      "nsis"
+    ],
     "category": "Productivity",
     "shortDescription": "Local-first research notebook for cancer engineering.",
     "longDescription": "Cortex is a single-user, local-first markdown research notebook with a fast file tree, TipTap editor, full-text search, wikilinks, backlinks, and git auto-commit. Notes live as plain markdown on disk. No cloud, no account.",

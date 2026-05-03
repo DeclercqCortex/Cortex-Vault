@@ -386,7 +386,11 @@ function App() {
     // PDF: skip persistent-regen / methods-regen / daily-log paths.
     // (PDFs aren't markdown, so none of those passes apply.)
 
-    if (path && vaultPath && !/\.pdf$/i.test(path)) {
+    if (
+      path &&
+      vaultPath &&
+      !/\.(pdf|jpg|jpeg|png|gif|webp|svg)$/i.test(path)
+    ) {
       const sep = path.includes("\\") ? "\\" : "/";
       const basename = path.split(sep).pop() ?? "";
       const isAtVaultRoot =
@@ -804,6 +808,27 @@ function App() {
           setWikilinkPickMode(true);
           setPaletteOpen(true);
         }
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key === "I" || e.key === "i")
+      ) {
+        // Cluster 19 v1.0 — open OS file picker for image files,
+        // import the chosen one into the active note's
+        // <basename>-attachments/ dir, and insert a cortexImage at
+        // the cursor. No-op if the active slot has no md open.
+        e.preventDefault();
+        const handle = paneRefs.current[activeSlotIdx];
+        if (handle?.insertImageDialog) {
+          handle.insertImageDialog().then((ok) => {
+            if (!ok) {
+              // Soft hint — likely no md open in the active slot.
+              console.info(
+                "[cortex] Insert image: open a markdown note first.",
+              );
+            }
+          });
+        }
       } else if (e.key === "Escape") {
         setPaletteOpen(false);
         setHelpOpen(false);
@@ -1048,6 +1073,18 @@ function App() {
         key={i}
         slotIndex={i}
         onDropPath={(path) => selectFileInSlot(path, i)}
+        onDropImage={async (sourceAbsolutePath, x, y) => {
+          // Cluster 19 v1.0 — drop image cortex-path into editor area
+          // → import + insert at drop position. If the slot has no md
+          // open OR the drop didn't land in an editor, fall back to
+          // opening the image as a tab.
+          const handle = paneRefs.current[i];
+          if (!handle) return;
+          const ok = await handle.insertImageFromPath(sourceAbsolutePath, x, y);
+          if (!ok) {
+            await selectFileInSlot(sourceAbsolutePath, i);
+          }
+        }}
       >
         <TabPane
           ref={(h) => {
@@ -1492,10 +1529,13 @@ function App() {
 function PaneWrapper({
   slotIndex,
   onDropPath,
+  onDropImage,
   children,
 }: {
   slotIndex: number;
   onDropPath: (path: string) => void;
+  /** Cluster 19 v1.0 — image cortex-path dropped over an editor. */
+  onDropImage?: (sourceAbsolutePath: string, x: number, y: number) => void;
   children: React.ReactNode;
 }) {
   const [isOver, setIsOver] = useState(false);
@@ -1535,11 +1575,21 @@ function PaneWrapper({
       onDropCapture={(e) => {
         const path = e.dataTransfer.getData("text/cortex-path");
         setIsOver(false);
-        if (path) {
-          e.preventDefault();
-          e.stopPropagation();
-          onDropPath(path);
+        if (!path) return;
+        e.preventDefault();
+        e.stopPropagation();
+        // Cluster 19 v1.0 — image drop inside an editor area inserts
+        // at drop position; outside (or no callback) falls back.
+        const isImagePath = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(path);
+        if (onDropImage && isImagePath) {
+          const dropTarget = e.target as HTMLElement | null;
+          const inEditor = !!dropTarget?.closest?.(".ProseMirror");
+          if (inEditor) {
+            onDropImage(path, e.clientX, e.clientY);
+            return;
+          }
         }
+        onDropPath(path);
       }}
       data-slot-index={slotIndex}
     >

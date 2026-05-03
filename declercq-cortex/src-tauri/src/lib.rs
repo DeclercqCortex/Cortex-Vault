@@ -6383,6 +6383,161 @@ fn get_time_tracking_daily_rollup(
     Ok(out)
 }
 
+// ===========================================================================
+// Cluster 19 v1.0 — Image support: per-note attachments dir + import.
+// ===========================================================================
+
+/// Given an absolute path to a markdown note, return its companion
+/// attachments directory: `<parent>/<note-basename>-attachments/`.
+/// For `02-Daily Log/2026-04-30.md` → `02-Daily Log/2026-04-30-attachments/`.
+/// Returns None if the input has no parent or no file stem (path
+/// shouldn't happen for real notes, but be defensive).
+fn note_attachments_dir_for(note_path: &Path) -> Option<PathBuf> {
+    let parent = note_path.parent()?;
+    let stem = note_path.file_stem()?.to_string_lossy().to_string();
+    if stem.is_empty() {
+        return None;
+    }
+    Some(parent.join(format!("{}-attachments", stem)))
+}
+
+/// Ensure the attachments dir for a note exists (creating it if not).
+/// Returns the absolute path to the attachments dir as a string. Idempotent.
+#[tauri::command]
+fn ensure_note_attachments_dir(vault_path: String, note_path: String) -> Result<String, String> {
+    if vault_path.trim().is_empty() || note_path.trim().is_empty() {
+        return Err("vault_path and note_path are required".into());
+    }
+    let note_pb = PathBuf::from(&note_path);
+    // Refuse if the note isn't under the vault — basic safety check.
+    let vault_pb = PathBuf::from(&vault_path);
+    if !note_pb.starts_with(&vault_pb) {
+        return Err(format!(
+            "note path `{}` is not under vault `{}`",
+            note_path, vault_path
+        ));
+    }
+    let dir = note_attachments_dir_for(&note_pb).ok_or_else(|| {
+        format!(
+            "couldn't compute attachments dir for note path `{}`",
+            note_path
+        )
+    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create attachments dir `{}` failed: {}", dir.display(), e))?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// Copy an image from `source_path` into the note's attachments dir.
+/// If a file with the same name already exists with different bytes,
+/// dedupe by suffixing `-2`, `-3`, etc. before the extension. Returns
+/// the path to use in the markdown `<img src="...">` — relative to the
+/// note's parent dir, with forward slashes for portability.
+#[tauri::command]
+fn import_image_to_note(
+    vault_path: String,
+    note_path: String,
+    source_path: String,
+) -> Result<String, String> {
+    if source_path.trim().is_empty() {
+        return Err("source_path is required".into());
+    }
+    let note_pb = PathBuf::from(&note_path);
+    let vault_pb = PathBuf::from(&vault_path);
+    if !note_pb.starts_with(&vault_pb) {
+        return Err(format!(
+            "note path `{}` is not under vault `{}`",
+            note_path, vault_path
+        ));
+    }
+    let source_pb = PathBuf::from(&source_path);
+    if !source_pb.exists() {
+        return Err(format!("source image `{}` does not exist", source_path));
+    }
+    let attachments_dir = note_attachments_dir_for(&note_pb).ok_or_else(|| {
+        format!(
+            "couldn't compute attachments dir for note path `{}`",
+            note_path
+        )
+    })?;
+    std::fs::create_dir_all(&attachments_dir).map_err(|e| {
+        format!(
+            "create attachments dir `{}` failed: {}",
+            attachments_dir.display(),
+            e
+        )
+    })?;
+
+    // Read source bytes once for both content-equality check and copy.
+    let source_bytes = std::fs::read(&source_pb)
+        .map_err(|e| format!("read source `{}` failed: {}", source_path, e))?;
+
+    let original_name = source_pb
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".to_string());
+
+    // Split name + extension for dedupe-rename.
+    let (stem, ext) = match source_pb.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => (
+            s.to_string(),
+            source_pb
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string()),
+        ),
+        None => (original_name.clone(), None),
+    };
+
+    // Walk candidates: name.ext, name-2.ext, name-3.ext ...
+    // If a candidate exists with identical bytes, reuse it (no copy).
+    // If different bytes, advance to the next suffix.
+    let mut chosen_name: Option<String> = None;
+    for n in 1..=999 {
+        let candidate_name = if n == 1 {
+            match &ext {
+                Some(e) => format!("{}.{}", stem, e),
+                None => stem.clone(),
+            }
+        } else {
+            match &ext {
+                Some(e) => format!("{}-{}.{}", stem, n, e),
+                None => format!("{}-{}", stem, n),
+            }
+        };
+        let dest = attachments_dir.join(&candidate_name);
+        if !dest.exists() {
+            // Free filename — copy and use it.
+            std::fs::write(&dest, &source_bytes)
+                .map_err(|e| format!("write `{}` failed: {}", dest.display(), e))?;
+            chosen_name = Some(candidate_name);
+            break;
+        }
+        // Exists. If bytes match, reuse.
+        let existing = std::fs::read(&dest).unwrap_or_default();
+        if existing == source_bytes {
+            chosen_name = Some(candidate_name);
+            break;
+        }
+        // Otherwise try the next suffix.
+    }
+
+    let chosen = chosen_name.ok_or_else(|| {
+        format!(
+            "couldn't find a free filename in `{}` after 999 tries",
+            attachments_dir.display()
+        )
+    })?;
+
+    // Build the relative path to use as <img src="">. Always forward
+    // slashes (portable across platforms, valid in HTML).
+    let attach_basename = attachments_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    Ok(format!("{}/{}", attach_basename, chosen))
+}
+
 #[tauri::command]
 fn delete_event(vault_path: String, id: String) -> Result<(), String> {
     let conn = open_or_init_db(&vault_path)?;
@@ -8015,6 +8170,9 @@ pub fn run() {
             delete_event_instance_override,
             get_event_instance_override,
             get_time_tracking_daily_rollup,
+            // Cluster 19 v1.0 — Image support
+            ensure_note_attachments_dir,
+            import_image_to_note,
             delete_event,
             list_event_categories,
             upsert_event_category,

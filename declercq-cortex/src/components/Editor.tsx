@@ -1,4 +1,4 @@
-import { useEditor, EditorContent } from "@tiptap/react";
+import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -42,6 +42,19 @@ import {
 } from "../editor/FormulaCells";
 import { CortexColumnResize } from "../editor/CortexColumnResize";
 import { CortexTableView } from "../editor/CortexTableView";
+// Cluster 19 v1.0 — image embeds.
+import { CortexImage } from "../editor/CortexImageNode";
+import {
+  CortexImageNodeView,
+  EDIT_IMAGE_ANNOTATION_EVENT,
+  VIEW_IMAGE_ANNOTATION_EVENT,
+  IMAGE_CONTEXT_MENU_EVENT,
+  type EditImageAnnotationDetail,
+  type ViewImageAnnotationDetail,
+  type ImageContextMenuDetail,
+} from "./CortexImageNodeView";
+import { ImageAnnotationPopover } from "./ImageAnnotationPopover";
+import { ImageContextMenu, type ImageContextAction } from "./ImageContextMenu";
 
 /**
  * Cluster 18 — table cells now carry verticalAlign (Cluster 16) AND
@@ -394,6 +407,16 @@ interface EditorProps {
     name: string;
     iterNumber: number | null;
   }) => void;
+  /** Cluster 19 v1.0 — vault path, used by the image-insert flow when
+   *  copying source images into the per-note attachments dir. */
+  vaultPath?: string;
+  /** Cluster 19 v1.0 — absolute path to the open note. Published into
+   *  the cortexImage extension's storage so the NodeView can resolve
+   *  relative img src attrs against the note's parent dir. */
+  notePath?: string | null;
+  /** Cluster 19 v1.0 — surface a recoverable error (e.g. image import
+   *  failure) to the host's banner. Optional. */
+  onError?: (message: string) => void;
 }
 
 /**
@@ -414,6 +437,9 @@ export function Editor({
   onEditorReady,
   onRequestInsertTable,
   onFollowTypedBlock,
+  vaultPath,
+  notePath,
+  onError,
 }: EditorProps) {
   // Right-click context-menu state. `inTable`, `canMerge`, `canSplit`
   // are computed from the editor's selection at click time and frozen
@@ -506,6 +532,18 @@ export function Editor({
       // formula transactions don't trigger resize.
       CortexColumnResize,
       FormulaEvaluator,
+      // Cluster 19 v1.0 — CortexImage with React NodeView wired in.
+      // addStorage publishes the open note's absolute path into
+      // editor.storage.cortexImage.notePath; the NodeView reads from
+      // that to resolve relative img src attrs each render.
+      CortexImage.extend({
+        addStorage() {
+          return { notePath: "" as string };
+        },
+        addNodeView() {
+          return ReactNodeViewRenderer(CortexImageNodeView);
+        },
+      }),
       // Text alignment with Ctrl+Shift+L/E/R shortcuts. Round-trips
       // through tiptap-markdown's html:true as inline style attributes.
       TextAlignWithShortcuts.configure({
@@ -590,6 +628,172 @@ export function Editor({
 
   // Cluster 17 v1.1 — listen for follow-typed-block events fired by the
   // typedBlock NodeView's title-bar Ctrl/Cmd+Click. The handler routes
+  // ---- Cluster 19 v1.0 — image annotation popover + context menu ----
+  const [imageAnnotation, setImageAnnotation] = useState<{
+    pos: number;
+    anchorRect: DOMRect;
+    annotation: string;
+  } | null>(null);
+  // Cluster 19 v1.0.2 — read-only annotation bubble for badge clicks.
+  const [imageBubble, setImageBubble] = useState<{
+    anchorRect: DOMRect;
+    annotation: string;
+  } | null>(null);
+  const [imageMenu, setImageMenu] = useState<{
+    pos: number;
+    x: number;
+    y: number;
+    attrs: ImageContextMenuDetail["attrs"];
+  } | null>(null);
+
+  // Publish the open note's path into the cortexImage extension's
+  // storage so the NodeView can resolve relative img src attrs.
+  useEffect(() => {
+    if (!editor) return;
+    const storage = editor.storage as Record<string, { notePath?: string }>;
+    if (storage.cortexImage) {
+      storage.cortexImage.notePath = notePath ?? "";
+    }
+  }, [editor, notePath]);
+
+  // Listen for the NodeView's CustomEvents on view.dom.
+  useEffect(() => {
+    if (!editor) return;
+    const dom = editor.view.dom;
+    function onAnnot(e: Event) {
+      const ce = e as CustomEvent<EditImageAnnotationDetail>;
+      if (!ce.detail) return;
+      setImageBubble(null); // close any open view-bubble before edit
+      setImageAnnotation({
+        pos: ce.detail.pos,
+        anchorRect: ce.detail.anchorRect,
+        annotation: ce.detail.annotation,
+      });
+    }
+    function onView(e: Event) {
+      const ce = e as CustomEvent<ViewImageAnnotationDetail>;
+      if (!ce.detail) return;
+      setImageBubble({
+        anchorRect: ce.detail.anchorRect,
+        annotation: ce.detail.annotation,
+      });
+    }
+    function onMenu(e: Event) {
+      const ce = e as CustomEvent<ImageContextMenuDetail>;
+      if (!ce.detail) return;
+      setImageMenu({
+        pos: ce.detail.pos,
+        x: ce.detail.x,
+        y: ce.detail.y,
+        attrs: ce.detail.attrs,
+      });
+    }
+    dom.addEventListener(EDIT_IMAGE_ANNOTATION_EVENT, onAnnot);
+    dom.addEventListener(VIEW_IMAGE_ANNOTATION_EVENT, onView);
+    dom.addEventListener(IMAGE_CONTEXT_MENU_EVENT, onMenu);
+    return () => {
+      dom.removeEventListener(EDIT_IMAGE_ANNOTATION_EVENT, onAnnot);
+      dom.removeEventListener(VIEW_IMAGE_ANNOTATION_EVENT, onView);
+      dom.removeEventListener(IMAGE_CONTEXT_MENU_EVENT, onMenu);
+    };
+  }, [editor]);
+
+  // Cluster 19 v1.0.2 — close the read-only bubble on outside click / Esc.
+  useEffect(() => {
+    if (!imageBubble) return;
+    function onDown(e: PointerEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.(".cortex-image-bubble")) return;
+      if (target?.closest?.(".cortex-image-badge")) return;
+      setImageBubble(null);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setImageBubble(null);
+    }
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [imageBubble]);
+
+  /** Apply an attrs patch to the cortexImage at `pos` via a transaction. */
+  function patchImageAttrs(
+    pos: number,
+    patch: Record<string, unknown>,
+  ): boolean {
+    if (!editor) return false;
+    const node = editor.state.doc.nodeAt(pos);
+    if (!node || node.type.name !== "cortexImage") return false;
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(pos, undefined, {
+        ...node.attrs,
+        ...patch,
+      }),
+    );
+    return true;
+  }
+
+  function handleImageMenuAction(action: ImageContextAction) {
+    if (!editor || !imageMenu) return;
+    const pos = imageMenu.pos;
+    switch (action.kind) {
+      case "wrap": {
+        // When leaving "free" mode, reset freeX/freeY so the image
+        // re-flows naturally; switching INTO free mode preserves any
+        // existing coordinates (or null = use seed-from-rendered).
+        const patch: Record<string, unknown> = { wrapMode: action.mode };
+        if (action.mode !== "free") {
+          patch.freeX = null;
+          patch.freeY = null;
+        }
+        patchImageAttrs(pos, patch);
+        break;
+      }
+      case "reset-rotation":
+        patchImageAttrs(pos, { rotation: 0 });
+        break;
+      case "reset-position":
+        patchImageAttrs(pos, { freeX: null, freeY: null });
+        break;
+      case "set-width":
+        patchImageAttrs(pos, { width: action.width });
+        break;
+      case "edit-annotation": {
+        // Open the popover anchored to the image. We need the rect —
+        // synthesise one from the right-click coords (a 1px point);
+        // good enough for popover positioning.
+        const synth = new DOMRect(imageMenu.x, imageMenu.y, 1, 1);
+        let decoded = imageMenu.attrs.annotation;
+        try {
+          decoded = decodeURIComponent(imageMenu.attrs.annotation);
+        } catch {
+          /* leave */
+        }
+        setImageAnnotation({ pos, anchorRect: synth, annotation: decoded });
+        break;
+      }
+      case "delete": {
+        const node = editor.state.doc.nodeAt(pos);
+        if (node) {
+          editor.view.dispatch(
+            editor.state.tr.delete(pos, pos + node.nodeSize),
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  function commitImageAnnotation(text: string) {
+    if (!imageAnnotation) return;
+    const encoded = text ? encodeURIComponent(text) : "";
+    patchImageAttrs(imageAnnotation.pos, { annotation: encoded });
+  }
+
+  // ---- end Cluster 19 v1.0 image plumbing -----------------------------
+
   // the event detail up to the host via onFollowTypedBlock; the host
   // (App.tsx) invokes the Rust resolver and opens the resulting path
   // in the active slot.
@@ -995,6 +1199,47 @@ export function Editor({
           onAction={(kind) => runBlockAction(kind, blockMenu.blockPos)}
         />
       )}
+      {imageMenu && (
+        <ImageContextMenu
+          x={imageMenu.x}
+          y={imageMenu.y}
+          attrs={imageMenu.attrs}
+          onAction={handleImageMenuAction}
+          onClose={() => setImageMenu(null)}
+        />
+      )}
+      {imageAnnotation && (
+        <ImageAnnotationPopover
+          initialText={imageAnnotation.annotation}
+          anchorRect={imageAnnotation.anchorRect}
+          onSave={commitImageAnnotation}
+          onClose={() => setImageAnnotation(null)}
+        />
+      )}
+      {imageBubble &&
+        (() => {
+          // Position the bubble below the image (or above if it would
+          // clip the viewport). Clamp horizontally.
+          const GAP = 8;
+          const W = 320;
+          const top0 = imageBubble.anchorRect.bottom + GAP;
+          const flipUp = top0 + 100 > window.innerHeight;
+          const top = flipUp
+            ? Math.max(GAP, imageBubble.anchorRect.top - GAP - 40)
+            : top0;
+          const left = Math.min(
+            Math.max(GAP, imageBubble.anchorRect.left),
+            Math.max(GAP, window.innerWidth - W - GAP),
+          );
+          return (
+            <div
+              className="cortex-image-bubble"
+              style={{ top, left, maxWidth: W }}
+            >
+              {imageBubble.annotation}
+            </div>
+          );
+        })()}
     </>
   );
 }

@@ -31,6 +31,7 @@ import { MethodsArsenal } from "./MethodsArsenal";
 import { ProtocolsLog } from "./ProtocolsLog";
 import { Calendar } from "./Calendar";
 import { TimeTracking } from "./TimeTracking";
+import { ImageViewer } from "./ImageViewer";
 import { PDFReader } from "./PDFReader";
 import { parseFrontmatter, serializeFrontmatter } from "../utils/frontmatter";
 
@@ -49,7 +50,26 @@ export type ActiveView =
   | "pdf-reader"
   | "calendar"
   // Cluster 14 v1.0
-  | "time-tracking";
+  | "time-tracking"
+  // Cluster 19 v1.0 — open image files directly in a tab slot.
+  | "image-viewer";
+
+/** Cluster 19 v1.0 — file extensions routed to ImageViewer. */
+export const IMAGE_EXTENSIONS = [
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".gif",
+  ".webp",
+  ".svg",
+] as const;
+
+/** True if the path's extension is one we open in ImageViewer. */
+export function isImagePath(path: string): boolean {
+  if (!path) return false;
+  const lower = path.toLowerCase();
+  return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
 
 /** Imperative API the parent uses to drive this pane. */
 export type TabPaneHandle = {
@@ -97,6 +117,21 @@ export type TabPaneHandle = {
   openPath(path: string | null): Promise<void>;
   /** Switch to a structured view (idea-log, methods-arsenal, etc.). */
   setActiveView(view: ActiveView): void;
+  /**
+   * Cluster 19 v1.0 — copy an image from `sourceAbsolutePath` into
+   * the open note's <basename>-attachments/ directory and insert a
+   * cortexImage node at the cursor (or at the drop coordinates if
+   * provided). Returns true on success. No-op (returns false) if no
+   * markdown note is open in this slot.
+   */
+  insertImageFromPath(
+    sourceAbsolutePath: string,
+    dropClientX?: number,
+    dropClientY?: number,
+  ): Promise<boolean>;
+  /** Cluster 19 v1.0 — open the OS file picker for image files,
+   *  copy the chosen one in, and insert at the cursor. */
+  insertImageDialog(): Promise<boolean>;
   /** Read the current open path (for tree highlight + per-slot save). */
   getPath(): string | null;
   /** Read the current active view. */
@@ -241,6 +276,18 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
         return;
       }
       if (/\.pdf$/i.test(selectedPath)) {
+        setFrontmatter({});
+        setFileBody("");
+        setEditedBody("");
+        setDirty(false);
+        setLoadingFile(false);
+        return;
+      }
+      // Cluster 19 v1.0.1 — image files are rendered by ImageViewer, not
+      // parsed as markdown. Short-circuit so we don't fire read_markdown_file
+      // on a binary stream (which would error with "stream did not contain
+      // valid UTF-8").
+      if (isImagePath(selectedPath)) {
         setFrontmatter({});
         setFileBody("");
         setEditedBody("");
@@ -535,8 +582,125 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
             setActiveViewLocal("pdf-reader");
             return;
           }
+          // Cluster 19 v1.0 — image files open in ImageViewer.
+          if (path && isImagePath(path)) {
+            setSelectedPath(path);
+            setActiveViewLocal("image-viewer");
+            return;
+          }
           setActiveViewLocal("editor");
           setSelectedPath(path);
+        },
+        async insertImageFromPath(
+          sourceAbsolutePath,
+          dropClientX,
+          dropClientY,
+        ) {
+          if (!selectedPath || !sourceAbsolutePath) return false;
+          // Only meaningful when an md file is open.
+          if (!/\.md$/i.test(selectedPath)) return false;
+          const ed = editorInstanceRef.current;
+          if (!ed) return false;
+          try {
+            const relSrc = await invoke<string>("import_image_to_note", {
+              vaultPath,
+              notePath: selectedPath,
+              sourcePath: sourceAbsolutePath,
+            });
+            // Compute insert position. If drop coords were provided,
+            // map them to a doc position; otherwise fall through to
+            // the current selection.
+            let insertPos: number | null = null;
+            if (
+              typeof dropClientX === "number" &&
+              typeof dropClientY === "number"
+            ) {
+              const coords = ed.view.posAtCoords({
+                left: dropClientX,
+                top: dropClientY,
+              });
+              if (coords) insertPos = coords.pos;
+            }
+            // Cluster 19 v1.0.2 — default new images to FREE wrap mode
+            // so they're freely movable from the moment they land. We
+            // seed (freeX, freeY) from the drop coordinates when given,
+            // else from the cursor position; both are translated into
+            // .ProseMirror-relative pixels (the editor content area is
+            // the positioned ancestor of free-mode images).
+            const proseMirror = ed.view.dom as HTMLElement;
+            const pmRect = proseMirror.getBoundingClientRect();
+            const pmScrollLeft = proseMirror.scrollLeft;
+            const pmScrollTop = proseMirror.scrollTop;
+            let seedClientX = dropClientX;
+            let seedClientY = dropClientY;
+            if (
+              typeof seedClientX !== "number" ||
+              typeof seedClientY !== "number"
+            ) {
+              try {
+                const cursor = ed.view.coordsAtPos(ed.state.selection.from);
+                seedClientX = cursor.left;
+                seedClientY = cursor.top;
+              } catch {
+                seedClientX = pmRect.left + 16;
+                seedClientY = pmRect.top + 16;
+              }
+            }
+            const freeX = Math.round(seedClientX - pmRect.left + pmScrollLeft);
+            const freeY = Math.round(seedClientY - pmRect.top + pmScrollTop);
+            const node = {
+              type: "cortexImage",
+              attrs: {
+                src: relSrc,
+                wrapMode: "free",
+                freeX,
+                freeY,
+                rotation: 0,
+                width: null,
+                annotation: "",
+              },
+            };
+            // Use insertContentAt to land cleanly at a doc position even
+            // when that position isn't inside a paragraph (block boundary).
+            // Falls back to current selection when no drop pos was given.
+            if (insertPos != null) {
+              ed.chain().focus().insertContentAt(insertPos, node).run();
+            } else {
+              ed.chain().focus().insertContent(node).run();
+            }
+            return true;
+          } catch (e) {
+            console.warn("[TabPane] insertImageFromPath failed:", e);
+            setError(`Image import failed: ${e}`);
+            return false;
+          }
+        },
+        async insertImageDialog() {
+          if (!selectedPath || !/\.md$/i.test(selectedPath)) {
+            return false;
+          }
+          try {
+            const { open } = await import("@tauri-apps/plugin-dialog");
+            const picked = await open({
+              multiple: false,
+              filters: [
+                {
+                  name: "Images",
+                  extensions: ["jpg", "jpeg", "png", "gif", "webp", "svg"],
+                },
+              ],
+            });
+            if (!picked) return false;
+            const sourcePath = Array.isArray(picked) ? picked[0] : picked;
+            if (!sourcePath) return false;
+            return await (this as unknown as TabPaneHandle).insertImageFromPath(
+              sourcePath as string,
+            );
+          } catch (e) {
+            console.warn("[TabPane] insertImageDialog failed:", e);
+            setError(`Image dialog failed: ${e}`);
+            return false;
+          }
         },
         setActiveView(view: ActiveView) {
           setActiveViewLocal(view);
@@ -700,6 +864,8 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
             onClose={closeStructuredView}
             isActive={isActive}
           />
+        ) : activeView === "image-viewer" && selectedPath ? (
+          <ImageViewer filePath={selectedPath} onClose={closeStructuredView} />
         ) : !selectedPath ? (
           <div
             style={{
@@ -750,6 +916,8 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
             </div>
             <FrontmatterPanel frontmatter={frontmatter} />
             <Editor
+              vaultPath={vaultPath}
+              notePath={selectedPath}
               content={fileBody}
               onChange={(md) => {
                 setEditedBody(md);
@@ -761,6 +929,7 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
                 editorInstanceRef.current = e;
               }}
               onRequestInsertTable={onRequestInsertTable}
+              onError={(msg) => setError(msg)}
             />
             <RelatedHierarchyPanel
               vaultPath={vaultPath}

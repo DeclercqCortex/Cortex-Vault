@@ -989,3 +989,260 @@ body.cortex-mod-pressed .pdf-annotation-overlay > div.ann-hover {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
+
+/* ========================================================================
+ * Cluster 19 v1.0.1 — image embeds (cortexImage TipTap node).
+ *
+ * Architecture (v1.0.1, replaces v1.0):
+ *   - The cortexImage node is INLINE so it lives inside paragraphs and
+ *     CSS float (wrap-left / wrap-right) makes adjacent text reflow
+ *     around it. Block-level images can't be wrapped.
+ *   - The shadow is `filter: drop-shadow` on the <img> itself, so it
+ *     follows the image's actual rendered shape (including rotation
+ *     and any transparent corners) instead of a rectangular box.
+ *   - Wrap modes apply to the NodeView's outer wrapper:
+ *       break  → display: block, margin auto (block-level, text breaks)
+ *       left   → float: left (text wraps right)
+ *       right  → float: right (text wraps left)
+ *       free   → position: absolute against the .ProseMirror content
+ *                area (which is `position: relative` below)
+ *   - Handles appear on hover and on the wrapper's corners; they're
+ *     absolutely positioned and re-anchor whenever the image's
+ *     rendered bounds change.
+ * ====================================================================== */
+
+/* ProseMirror is the positioning context for free-mode images. */
+.ProseMirror {
+  position: relative;
+}
+
+/* Inline wrapper. inline-block so its bounds shrink-wrap the image and
+ * the corner handles can anchor against it. */
+.cortex-image-wrap {
+  display: inline-block;
+  position: relative;
+  vertical-align: top;
+  margin: 4px 4px;
+  /* Allow handles to overflow without clipping. */
+  overflow: visible;
+}
+
+/* Block-level break: takes the whole paragraph, centred. */
+.cortex-image-wrap-break {
+  display: block;
+  margin: 0.6em auto;
+  text-align: center;
+}
+
+/* Float wraps. The float must be on the wrapper for surrounding text
+ * to reflow around it. shape-margin is widely supported and gives a
+ * little breathing room without disturbing the float computation. */
+.cortex-image-wrap-left {
+  float: left;
+  margin: 0 1em 0.5em 0;
+}
+.cortex-image-wrap-right {
+  float: right;
+  margin: 0 0 0.5em 1em;
+}
+
+/* Free positioning: detached from flow, absolutely placed against
+ * .ProseMirror. NodeView writes left/top inline. z-index keeps free
+ * images above text by default; right-click "Send back" could later
+ * lower this for layered notebooks. */
+.cortex-image-wrap-free {
+  position: absolute;
+  margin: 0;
+  z-index: 5;
+  /* Free-positioned images don't participate in flow, so other content
+   * paints under them without forcing the wrapper to be inline-block. */
+  display: inline-block;
+}
+
+/* Inner positioning anchor — used by the handles to position
+ * themselves precisely against the image's rendered bounds (not the
+ * wrapper, which can include the float-clear margin). */
+.cortex-image-anchor {
+  display: inline-block;
+  position: relative;
+  /* eliminate any inline-content padding so the box matches the img
+   * pixel-for-pixel — handles + selection outline anchor cleanly. */
+  font-size: 0;
+  line-height: 0;
+  vertical-align: top;
+}
+
+/* The image itself. drop-shadow follows rotation and any
+ * transparent regions; no rectangular bleed when overlapping. */
+.cortex-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+  transition:
+    transform 100ms ease,
+    width 100ms ease;
+  /* "Glued in a notebook" feel — drops on the image's rendered shape,
+   * follows rotation, doesn't paint a rectangle behind transparent
+   * corners. */
+  filter: drop-shadow(1px 2px 4px rgba(0, 0, 0, 0.28));
+}
+
+/* Dark mode: lighten the shadow so it stays visible against the dark
+ * background. We use both a soft inner glow and a subtle dark drop. */
+@media (prefers-color-scheme: dark) {
+  .cortex-image {
+    filter: drop-shadow(1px 2px 5px rgba(255, 255, 255, 0.18))
+      drop-shadow(0 0 1px rgba(255, 255, 255, 0.25));
+  }
+}
+[data-theme="dark"] .cortex-image,
+.dark .cortex-image {
+  filter: drop-shadow(1px 2px 5px rgba(255, 255, 255, 0.18))
+    drop-shadow(0 0 1px rgba(255, 255, 255, 0.25));
+}
+
+/* ProseMirror NodeSelection ring. drop-shadow can't be additive cleanly
+ * with a selection outline, so we ring the wrapper with a 2px halo. */
+.cortex-image-selected .cortex-image-anchor {
+  /* 2px ring inset against the anchor edges (= image edges) so it
+   * doesn't bleed into the row of text below the image. box-shadow
+   * doesn't affect layout, so the row below stays put. */
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 0 3px rgba(108, 160, 220, 0.25);
+  outline: none;
+}
+
+/* Annotation badge — small chip pinned to the bottom-left. The badge
+ * IS clickable (read-only popover); Ctrl+click switches to edit. */
+.cortex-image-badge {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  line-height: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-2);
+  pointer-events: auto;
+  cursor: help;
+  user-select: none;
+  z-index: 6;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition:
+    background 80ms,
+    color 80ms,
+    border-color 80ms;
+}
+.cortex-image-badge:hover {
+  background: var(--accent-bg-2);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* When the modifier (Ctrl/Cmd) is pressed, the badge becomes a "click
+ * to edit" affordance — cursor flips to text-edit and the ring
+ * brightens to mirror PDF wikilink behaviour. */
+body.cortex-mod-pressed .cortex-image-badge {
+  cursor: text;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* Ctrl+hover anywhere on an annotated image hints "edit annotation". */
+body.cortex-mod-pressed .cortex-image-has-annotation .cortex-image,
+body.cortex-mod-pressed .cortex-image:hover {
+  cursor: pointer;
+}
+
+/* Handles — only rendered while hovered or actively dragging (the
+ * NodeView toggles the JSX). They sit on the .cortex-image-anchor's
+ * corners so they track the image's rendered bounds 1:1. */
+.cortex-image-handle {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  font-size: 0.78rem;
+  line-height: 1;
+  color: var(--text-2);
+  user-select: none;
+  z-index: 7;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  pointer-events: auto;
+}
+.cortex-image-handle:hover {
+  background: var(--accent-bg-2);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* Each handle is centred ON the image's corner via translate(±50%,
+ * ±50%) so the handle visually sits half-on / half-off the image
+ * regardless of the image's rendered width, float context, or
+ * any margin/padding upstream. The corner of the anchor IS the
+ * corner of the image because .cortex-image-anchor has
+ * font-size:0 + line-height:0. */
+.cortex-image-handle-move {
+  top: 0;
+  left: 0;
+  transform: translate(-50%, -50%);
+  cursor: move;
+}
+.cortex-image-handle-rotate {
+  top: 0;
+  right: 0;
+  transform: translate(50%, -50%);
+  cursor: alias;
+  font-size: 0.85rem;
+}
+.cortex-image-handle-resize {
+  bottom: 0;
+  right: 0;
+  transform: translate(50%, 50%);
+  cursor: nwse-resize;
+}
+
+/* Read-only annotation bubble (click-on-badge popover). Smaller and
+ * less chrome than the editable popover so the user can tell the
+ * difference at a glance. */
+.cortex-image-bubble {
+  position: fixed;
+  z-index: 800;
+  max-width: 320px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.cortex-image-bubble::after {
+  content: "Ctrl+click image to edit";
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Drop-zone hint when an image cortex-path is being dragged over the
+ * editor — softer than the slot-level outline so you can see the
+ * insert point inside the document. */
+.ProseMirror.cortex-image-drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
+}
