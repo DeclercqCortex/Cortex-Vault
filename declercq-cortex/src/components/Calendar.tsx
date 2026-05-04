@@ -412,6 +412,28 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
             categories={categories}
             onSlotDraft={openNewEvent}
             onEventClick={openExistingEvent}
+            onEventReposition={(ev, newStart, newEnd) => {
+              // Cluster 11 v1.6 — commit a drag-resize / drag-move
+              // by routing through saveEdit, which preserves every
+              // unchanged field and triggers reload + daily-note
+              // regen. Recurring events: shifts the whole series
+              // (master record). v1.6 doesn't ship per-instance
+              // time overrides — that's still a v1.3 backlog item.
+              saveEdit({
+                id: ev.id,
+                title: ev.title,
+                start_at: newStart,
+                end_at: newEnd,
+                all_day: ev.all_day,
+                category: ev.category,
+                status: ev.status,
+                body: ev.body,
+                recurrence_rule: ev.recurrence_rule ?? null,
+                notify_mode: ev.notify_mode ?? null,
+                notify_lead_minutes: ev.notify_lead_minutes ?? null,
+                actual_minutes: ev.actual_minutes ?? null,
+              });
+            }}
           />
         ) : (
           <MonthView
@@ -467,6 +489,18 @@ interface WeekViewProps {
   categories: EventCategory[];
   onSlotDraft: (start: number, end: number) => void;
   onEventClick: (ev: CalendarEvent) => void;
+  /**
+   * Cluster 11 v1.6 — drag-resize / drag-move commit. Called on
+   * pointerup after a successful drag with the new start/end (UTC
+   * unix seconds). The parent updates the event via update_event,
+   * preserving every other field, then reloads. Read-only events
+   * (Google-sourced) are filtered out before this fires.
+   */
+  onEventReposition: (
+    ev: CalendarEvent,
+    newStartAt: number,
+    newEndAt: number,
+  ) => void;
 }
 
 function WeekView({
@@ -476,6 +510,7 @@ function WeekView({
   categories,
   onSlotDraft,
   onEventClick,
+  onEventReposition,
 }: WeekViewProps) {
   // Hour rows: 0..24. Each row is HOUR_HEIGHT px tall.
   const HOUR_HEIGHT = 48;
@@ -553,6 +588,239 @@ function WeekView({
     dragColRef.current = null;
     onSlotDraft(start, end);
   }
+
+  // ---------------------------------------------------------------
+  // Cluster 11 v1.6 — drag-resize / drag-move on existing event blocks.
+  // ---------------------------------------------------------------
+  //
+  // Three drag kinds, distinguished by where in the block the pointer
+  // landed:
+  //   - resize-top    — top 8px → drags start_at (snaps to 15-min grid)
+  //   - resize-bottom — bottom 8px → drags end_at
+  //   - move          — middle → drags both, preserving duration; the
+  //                     pointer's x can also move into another day
+  //                     column to shift the event across days
+  //
+  // The block's onClick still fires after a pure click (no movement);
+  // a ref-gate (swallowClickRef) suppresses the click that follows a
+  // drag so the edit modal doesn't pop up at the end of a drag-move.
+  //
+  // Read-only events (Google-synced) opt out — pointerdown returns
+  // early so the modal still opens via the click path.
+  //
+  // Cross-day move: window-level pointermove walks dayColRefs to find
+  // which column the pointer is over and updates previewDayIdx
+  // accordingly. The day column for resize ops stays pinned to the
+  // event's origin day (resizing only changes time, not date).
+  //
+  // Recurring events: a drag commits via update_event on the master,
+  // shifting every occurrence in the series. Per-instance time
+  // overrides (the "Save just this" path for time changes) is still
+  // a v1.3 backlog item.
+  type EventDragOp = {
+    kind: "move" | "resize-top" | "resize-bottom";
+    eventId: string;
+    pointerId: number;
+    originStartAt: number;
+    originEndAt: number;
+    originDayIdx: number;
+    anchorOffsetMin: number;
+    pointerStartX: number;
+    pointerStartY: number;
+    previewStartAt: number;
+    previewEndAt: number;
+    previewDayIdx: number;
+    moved: boolean;
+  };
+  const [eventDrag, setEventDrag] = useState<EventDragOp | null>(null);
+  const dayColRefs = useRef<(HTMLDivElement | null)[]>(
+    Array.from({ length: 7 }, () => null),
+  );
+  const swallowClickRef = useRef(false);
+  const isDraggingEvent = eventDrag !== null;
+
+  function handleEventPointerDown(
+    e: React.PointerEvent<HTMLButtonElement>,
+    ev: CalendarEvent,
+    dayIdx: number,
+  ) {
+    if (e.button !== 0) return;
+    if (ev.source === "google") return; // read-only
+    e.stopPropagation();
+
+    const btn = e.currentTarget;
+    const rect = btn.getBoundingClientRect();
+    const offsetY = e.clientY - rect.top;
+    const blockHeight = rect.height;
+
+    // Resize zones: 8px from top / bottom. Below MIN_FOR_HANDLES the
+    // block is too short to expose both handles plus a body, so we
+    // only allow move (the user can still resize via the edit modal).
+    const RESIZE_ZONE = 8;
+    const MIN_FOR_HANDLES = 28;
+    let kind: EventDragOp["kind"];
+    if (blockHeight < MIN_FOR_HANDLES) {
+      kind = "move";
+    } else if (offsetY <= RESIZE_ZONE) {
+      kind = "resize-top";
+    } else if (offsetY >= blockHeight - RESIZE_ZONE) {
+      kind = "resize-bottom";
+    } else {
+      kind = "move";
+    }
+
+    const dayCol = dayColRefs.current[dayIdx];
+    let anchorOffsetMin = 0;
+    if (dayCol) {
+      const colRect = dayCol.getBoundingClientRect();
+      const pointerMin = ((e.clientY - colRect.top) / HOUR_HEIGHT) * 60;
+      const eventTopMin = (ev.start_at - dayStarts[dayIdx]) / 60;
+      anchorOffsetMin = pointerMin - eventTopMin;
+    }
+
+    setEventDrag({
+      kind,
+      eventId: ev.id,
+      pointerId: e.pointerId,
+      originStartAt: ev.start_at,
+      originEndAt: ev.end_at,
+      originDayIdx: dayIdx,
+      anchorOffsetMin,
+      pointerStartX: e.clientX,
+      pointerStartY: e.clientY,
+      previewStartAt: ev.start_at,
+      previewEndAt: ev.end_at,
+      previewDayIdx: dayIdx,
+      moved: false,
+    });
+  }
+
+  // Window-level move/up while a drag is active. Re-attaches when a
+  // drag starts (effect deps: isDraggingEvent), cleans up when it
+  // ends. The handlers read the latest drag op via the functional
+  // setter; latest events / callback are pulled from refs to avoid
+  // re-subscribing every preview update.
+  const eventsRef = useRef(events);
+  useEffect(() => {
+    eventsRef.current = events;
+  }, [events]);
+  const onEventRepositionRef = useRef(onEventReposition);
+  useEffect(() => {
+    onEventRepositionRef.current = onEventReposition;
+  }, [onEventReposition]);
+
+  useEffect(() => {
+    if (!isDraggingEvent) return;
+
+    function onWindowMove(e: PointerEvent) {
+      setEventDrag((d) => {
+        if (!d || e.pointerId !== d.pointerId) return d;
+        const dx = Math.abs(e.clientX - d.pointerStartX);
+        const dy = Math.abs(e.clientY - d.pointerStartY);
+        const moved = d.moved || dx > 4 || dy > 4;
+
+        // For move, find which day column the pointer is over; for
+        // resize, stay on the origin day.
+        let dayIdx = d.previewDayIdx;
+        if (d.kind === "move") {
+          for (let i = 0; i < dayColRefs.current.length; i++) {
+            const r = dayColRefs.current[i]?.getBoundingClientRect();
+            if (r && e.clientX >= r.left && e.clientX <= r.right) {
+              dayIdx = i;
+              break;
+            }
+          }
+        } else {
+          dayIdx = d.originDayIdx;
+        }
+        const targetCol =
+          dayColRefs.current[dayIdx] ?? dayColRefs.current[d.originDayIdx];
+        if (!targetCol) return d;
+        const colRect = targetCol.getBoundingClientRect();
+        const pointerMin = Math.max(
+          0,
+          Math.min(24 * 60, ((e.clientY - colRect.top) / HOUR_HEIGHT) * 60),
+        );
+
+        let previewStartAt = d.originStartAt;
+        let previewEndAt = d.originEndAt;
+        let previewDayIdx = d.previewDayIdx;
+
+        if (d.kind === "move") {
+          const eventTopMin = pointerMin - d.anchorOffsetMin;
+          const snapped = snapMinutes(Math.max(0, eventTopMin), DRAG_SNAP_MIN);
+          const dayStart = dayStarts[dayIdx];
+          const duration = d.originEndAt - d.originStartAt;
+          previewStartAt = dayStart + snapped * MIN_SECS;
+          previewEndAt = previewStartAt + duration;
+          previewDayIdx = dayIdx;
+        } else if (d.kind === "resize-bottom") {
+          const dayStart = dayStarts[d.originDayIdx];
+          const snapped = snapMinutes(pointerMin, DRAG_SNAP_MIN);
+          let newEnd = dayStart + snapped * MIN_SECS;
+          // Floor at start + 15 min so the event always has a positive
+          // duration. Resize-shrink past the start does NOT flip into
+          // a negative-duration event.
+          if (newEnd <= d.originStartAt + DRAG_SNAP_MIN * MIN_SECS) {
+            newEnd = d.originStartAt + DRAG_SNAP_MIN * MIN_SECS;
+          }
+          previewEndAt = newEnd;
+        } else if (d.kind === "resize-top") {
+          const dayStart = dayStarts[d.originDayIdx];
+          const snapped = snapMinutes(pointerMin, DRAG_SNAP_MIN);
+          let newStart = dayStart + snapped * MIN_SECS;
+          if (newStart >= d.originEndAt - DRAG_SNAP_MIN * MIN_SECS) {
+            newStart = d.originEndAt - DRAG_SNAP_MIN * MIN_SECS;
+          }
+          previewStartAt = newStart;
+        }
+
+        return {
+          ...d,
+          previewStartAt,
+          previewEndAt,
+          previewDayIdx,
+          moved,
+        };
+      });
+    }
+
+    function onWindowUp(e: PointerEvent) {
+      setEventDrag((d) => {
+        if (!d || e.pointerId !== d.pointerId) return d;
+        if (
+          d.moved &&
+          (d.previewStartAt !== d.originStartAt ||
+            d.previewEndAt !== d.originEndAt)
+        ) {
+          const ev = eventsRef.current.find((x) => x.id === d.eventId);
+          if (ev) {
+            onEventRepositionRef.current(ev, d.previewStartAt, d.previewEndAt);
+          }
+          // Suppress the click that follows pointerup so the edit
+          // modal doesn't pop after a drag commits.
+          swallowClickRef.current = true;
+          setTimeout(() => {
+            swallowClickRef.current = false;
+          }, 150);
+        }
+        return null;
+      });
+    }
+
+    function onWindowCancel(e: PointerEvent) {
+      setEventDrag((d) => (d && e.pointerId === d.pointerId ? null : d));
+    }
+
+    window.addEventListener("pointermove", onWindowMove);
+    window.addEventListener("pointerup", onWindowUp);
+    window.addEventListener("pointercancel", onWindowCancel);
+    return () => {
+      window.removeEventListener("pointermove", onWindowMove);
+      window.removeEventListener("pointerup", onWindowUp);
+      window.removeEventListener("pointercancel", onWindowCancel);
+    };
+  }, [isDraggingEvent, dayStarts, HOUR_HEIGHT]);
 
   // Now-line: only render if "now" is within the visible window.
   const inWindow = now >= anchor && now < anchor + 7 * DAY_SECS;
@@ -681,6 +949,11 @@ function WeekView({
           return (
             <div
               key={dayIdx}
+              ref={(el) => {
+                // Cluster 11 v1.6 — collect day-column refs so the
+                // event-drag handlers can do cross-day hit testing.
+                dayColRefs.current[dayIdx] = el;
+              }}
               style={{ ...styles.dayCol, height: HOUR_HEIGHT * 24 }}
               onPointerDown={(e) => handlePointerDown(dayIdx, e)}
               onPointerMove={handlePointerMove}
@@ -711,15 +984,37 @@ function WeekView({
                   DESC so a shorter event sharing a start time lands on
                   top of a longer one (its title still visible). Title
                   wraps to multiple lines naturally; the block clips
-                  what doesn't fit. */}
+                  what doesn't fit.
+                  Cluster 11 v1.6 — drag-resize + drag-move. While a
+                  block is being dragged, render it at preview start/
+                  end (and possibly in a different day column for
+                  cross-day moves) with reduced opacity. The original-
+                  position render is suppressed so the user sees just
+                  the live preview. */}
               {laidOut.map((ev, idx) => {
-                const startMin = Math.max(
-                  0,
-                  (ev.event.start_at - dayStart) / 60,
-                );
+                // If this event is currently being dragged AND we're
+                // rendering its origin day, skip — we'll render it in
+                // its preview day's column below to avoid duplicates.
+                const dragging = eventDrag && eventDrag.eventId === ev.event.id;
+                if (
+                  dragging &&
+                  eventDrag.previewDayIdx !== dayIdx &&
+                  eventDrag.originDayIdx === dayIdx
+                ) {
+                  return null;
+                }
+                const effectiveStart =
+                  dragging && eventDrag.previewDayIdx === dayIdx
+                    ? eventDrag.previewStartAt
+                    : ev.event.start_at;
+                const effectiveEnd =
+                  dragging && eventDrag.previewDayIdx === dayIdx
+                    ? eventDrag.previewEndAt
+                    : ev.event.end_at;
+                const startMin = Math.max(0, (effectiveStart - dayStart) / 60);
                 const endMin = Math.min(
                   24 * 60,
-                  (ev.event.end_at - dayStart) / 60,
+                  (effectiveEnd - dayStart) / 60,
                 );
                 const top = (startMin / 60) * HOUR_HEIGHT;
                 const height = Math.max(
@@ -728,28 +1023,52 @@ function WeekView({
                 );
                 const color = colorById.get(ev.event.category) ?? "#888";
                 const tentative = ev.event.status === "tentative";
+                const isReadOnly = ev.event.source === "google";
                 // Recurring events surface multiple occurrences with
                 // the same `id` (the master id); compose a unique
                 // React key from id + start so the keys stay stable.
                 const renderKey = `${ev.event.id}@${ev.event.start_at}`;
+                // Cursor: ns-resize on the resize zones, move while
+                // dragging, pointer when idle. The resize-zone cursor
+                // is set on the handle divs below, not the button.
+                const blockCursor = dragging
+                  ? eventDrag.kind === "move"
+                    ? "grabbing"
+                    : "ns-resize"
+                  : isReadOnly
+                    ? "pointer"
+                    : "grab";
                 return (
                   <button
                     key={renderKey}
                     onClick={(e) => {
                       e.stopPropagation();
+                      // Cluster 11 v1.6 — swallow the click that
+                      // follows a drag-commit pointerup, so the edit
+                      // modal doesn't open at the end of a drag.
+                      if (swallowClickRef.current) {
+                        swallowClickRef.current = false;
+                        return;
+                      }
                       onEventClick(ev.event);
                     }}
-                    onPointerDown={(e) => e.stopPropagation()}
+                    onPointerDown={(e) =>
+                      handleEventPointerDown(e, ev.event, dayIdx)
+                    }
                     style={{
                       ...styles.eventBlock,
                       top,
                       height,
                       left: 0,
                       width: "calc(100% - 6px)",
+                      cursor: blockCursor,
                       // Stack later-rendered blocks on top so titles at
                       // each block's start time stay visible. Base 1
-                      // keeps blocks above hour grid lines (z 0).
-                      zIndex: 1 + idx,
+                      // keeps blocks above hour grid lines (z 0). A
+                      // dragged block jumps to the very top so the
+                      // preview always sits over peers.
+                      zIndex: dragging ? 100 : 1 + idx,
+                      opacity: dragging ? 0.85 : 1,
                       background: tentative
                         ? `repeating-linear-gradient(135deg, ${color}33 0 8px, ${color}1a 8px 16px)`
                         : `${color}33`,
@@ -766,8 +1085,43 @@ function WeekView({
                           }
                         : {}),
                     }}
-                    title={`${ev.event.title}${tentative ? " (tentative)" : ""}${ev.event.source === "google" ? " — Google Calendar" : ""}`}
+                    title={`${ev.event.title}${tentative ? " (tentative)" : ""}${isReadOnly ? " — Google Calendar (read-only)" : ""}`}
                   >
+                    {/* Cluster 11 v1.6 — invisible 8-px resize zones
+                        at top and bottom. Only meaningful when the
+                        block is tall enough; for very short blocks
+                        the whole surface is the move target. They
+                        only set the cursor; pointerdown bubbles up
+                        to the parent button so handleEventPointerDown
+                        can compute the kind from offsetY itself. */}
+                    {!isReadOnly && height >= 28 && (
+                      <>
+                        <div
+                          aria-hidden="true"
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: 8,
+                            cursor: "ns-resize",
+                            pointerEvents: "none",
+                          }}
+                        />
+                        <div
+                          aria-hidden="true"
+                          style={{
+                            position: "absolute",
+                            bottom: 0,
+                            left: 0,
+                            right: 0,
+                            height: 8,
+                            cursor: "ns-resize",
+                            pointerEvents: "none",
+                          }}
+                        />
+                      </>
+                    )}
                     <div style={styles.eventTitle}>
                       {ev.event.source === "google" && (
                         <span style={styles.googleBadge} aria-hidden="true">
@@ -777,12 +1131,62 @@ function WeekView({
                       {ev.event.title}
                     </div>
                     <div style={styles.eventTime}>
-                      {formatHHMM(ev.event.start_at)}–
-                      {formatHHMM(ev.event.end_at)}
+                      {formatHHMM(effectiveStart)}–{formatHHMM(effectiveEnd)}
                     </div>
                   </button>
                 );
               })}
+              {/* Cluster 11 v1.6 — render the dragged event's preview
+                  in a destination day column when the user moves it
+                  across days. The origin day suppresses its own copy
+                  via the early-return at the top of the laidOut.map. */}
+              {eventDrag &&
+                eventDrag.kind === "move" &&
+                eventDrag.previewDayIdx === dayIdx &&
+                eventDrag.originDayIdx !== dayIdx &&
+                (() => {
+                  const ev = events.find((x) => x.id === eventDrag.eventId);
+                  if (!ev) return null;
+                  const startMin = Math.max(
+                    0,
+                    (eventDrag.previewStartAt - dayStart) / 60,
+                  );
+                  const endMin = Math.min(
+                    24 * 60,
+                    (eventDrag.previewEndAt - dayStart) / 60,
+                  );
+                  const top = (startMin / 60) * HOUR_HEIGHT;
+                  const height = Math.max(
+                    16,
+                    ((endMin - startMin) / 60) * HOUR_HEIGHT,
+                  );
+                  const color = colorById.get(ev.category) ?? "#888";
+                  return (
+                    <div
+                      key={`drag-preview-${ev.id}`}
+                      style={{
+                        ...styles.eventBlock,
+                        top,
+                        height,
+                        left: 0,
+                        width: "calc(100% - 6px)",
+                        zIndex: 100,
+                        opacity: 0.85,
+                        cursor: "grabbing",
+                        background: `${color}33`,
+                        borderLeft: `3px solid ${color}`,
+                        boxShadow: "0 0 0 1px var(--bg)",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      <div style={styles.eventTitle}>{ev.title}</div>
+                      <div style={styles.eventTime}>
+                        {formatHHMM(eventDrag.previewStartAt)}–
+                        {formatHHMM(eventDrag.previewEndAt)}
+                      </div>
+                    </div>
+                  );
+                })()}
 
               {/* Click-drag draft */}
               {draft && draft.dayIdx === dayIdx && (
