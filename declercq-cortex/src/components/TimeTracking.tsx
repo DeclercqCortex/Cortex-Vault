@@ -270,7 +270,8 @@ export function TimeTracking({
           <div style={styles.subtitle}>
             Planned vs actual time per category. Recurring events auto-credit
             each instance as fully spent; for one-off events, fill in
-            &quot;Actual minutes&quot; after they happen.
+            &quot;Actual minutes&quot; after they happen. All-day events are
+            excluded.
           </div>
         </div>
         <button onClick={onClose} style={styles.closeBtn} title="Close">

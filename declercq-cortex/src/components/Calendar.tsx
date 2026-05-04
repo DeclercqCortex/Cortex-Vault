@@ -481,6 +481,29 @@ function WeekView({
   const HOUR_HEIGHT = 48;
   const HOURS = Array.from({ length: 24 }, (_, i) => i);
   const dayStarts = Array.from({ length: 7 }, (_, i) => anchor + i * DAY_SECS);
+
+  // Cluster 11 v1.5.1 — all-day row sizing constants. Chip height +
+  // gap + cell padding match the styles below; tweak both together
+  // if you change one. Used to compute the row's minHeight from the
+  // busiest day's event count so the row grows to fit two or more
+  // stacked all-day events on any single day in the visible week.
+  const ALL_DAY_CHIP_H = 22; // matches allDayChip rendered height
+  const ALL_DAY_CHIP_GAP = 2; // matches allDayCol's flex `gap`
+  const ALL_DAY_ROW_PAD = 8; // 4px top + 4px bottom on allDayCol
+  const allDayMaxCount = useMemo(() => {
+    let max = 0;
+    for (let i = 0; i < dayStarts.length; i++) {
+      const dayStart = dayStarts[i];
+      const dayEnd = dayStart + DAY_SECS;
+      let count = 0;
+      for (const e of events) {
+        if (e.start_at < dayEnd && e.end_at > dayStart && e.all_day) count++;
+      }
+      if (count > max) max = count;
+    }
+    return max;
+  }, [events, dayStarts]);
+
   const colorById = useMemo(() => {
     const m = new Map<string, string>();
     categories.forEach((c) => m.set(c.id, c.color));
@@ -570,8 +593,26 @@ function WeekView({
           The all-day row sits between the day-header and the hour
           grid, mirrors the month-view event-chip styling for visual
           continuity, and supports both click-to-edit (existing
-          events) and click-to-create (empty cell → all-day draft). */}
-      <div style={styles.allDayRow}>
+          events) and click-to-create (empty cell → all-day draft).
+
+          Cluster 11 v1.5.1: row grows with the busiest day's all-day
+          count. Pre-fix, the row had a hard `minHeight: 32px` which
+          fit one chip cleanly, but two or more chips on a single day
+          would either spill out of the visible row or read as
+          cramped against the bottom border. We tally the max all-day
+          count across the seven visible days and size the row so the
+          busiest column's chips all fit at native chip height. */}
+      <div
+        style={{
+          ...styles.allDayRow,
+          minHeight: `${Math.max(
+            32,
+            allDayMaxCount * ALL_DAY_CHIP_H +
+              Math.max(0, allDayMaxCount - 1) * ALL_DAY_CHIP_GAP +
+              ALL_DAY_ROW_PAD,
+          )}px`,
+        }}
+      >
         <div style={styles.allDayLabel}>all-day</div>
         {dayStarts.map((dayStart, dayIdx) => {
           const dayEnd = dayStart + DAY_SECS;
@@ -660,8 +701,18 @@ function WeekView({
                 />
               ))}
 
-              {/* Events */}
-              {laidOut.map((ev) => {
+              {/* Events.
+                  Cluster 11 v1.5 — overlay layout. Each timed event takes
+                  the full column width (no more side-by-side at 1/N width).
+                  Overlapping events stack with z-index by start order:
+                  later starts render on top so each block's title appears
+                  at the top of its own start position, above any earlier
+                  block underneath it. Sort by start ASC then duration
+                  DESC so a shorter event sharing a start time lands on
+                  top of a longer one (its title still visible). Title
+                  wraps to multiple lines naturally; the block clips
+                  what doesn't fit. */}
+              {laidOut.map((ev, idx) => {
                 const startMin = Math.max(
                   0,
                   (ev.event.start_at - dayStart) / 60,
@@ -693,12 +744,20 @@ function WeekView({
                       ...styles.eventBlock,
                       top,
                       height,
-                      left: `${(ev.col / ev.cols) * 100}%`,
-                      width: `calc(${100 / ev.cols}% - 4px)`,
+                      left: 0,
+                      width: "calc(100% - 6px)",
+                      // Stack later-rendered blocks on top so titles at
+                      // each block's start time stay visible. Base 1
+                      // keeps blocks above hour grid lines (z 0).
+                      zIndex: 1 + idx,
                       background: tentative
                         ? `repeating-linear-gradient(135deg, ${color}33 0 8px, ${color}1a 8px 16px)`
                         : `${color}33`,
                       borderLeft: `3px solid ${color}`,
+                      // Subtle outline so an event landing on top of
+                      // another reads as a separate layer rather than
+                      // a solid wash.
+                      boxShadow: "0 0 0 1px var(--bg)",
                       ...(tentative
                         ? {
                             borderStyle: "dashed",
@@ -801,9 +860,15 @@ function MonthView({
         {days.map((s) => {
           const d = new Date(s * 1000);
           const dayEnd = s + DAY_SECS;
-          const dayEvents = events.filter(
-            (ev) => ev.start_at < dayEnd && ev.end_at > s,
-          );
+          // Cluster 11 v1.5 — all-day events sort to the top of the
+          // day cell so they render first (mirrors WeekView's
+          // dedicated all-day row at the top).
+          const dayEvents = events
+            .filter((ev) => ev.start_at < dayEnd && ev.end_at > s)
+            .sort((a, b) => {
+              if (a.all_day !== b.all_day) return a.all_day ? -1 : 1;
+              return a.start_at - b.start_at;
+            });
           const isFocusMonth = d.getMonth() === focusMonthIdx;
           const isToday = sameLocalDay(s, nowSecs());
           return (
@@ -976,41 +1041,31 @@ interface LaidOut {
 }
 
 /**
- * Lay out overlapping events into columns. Greedy: assign each event
- * to the first column whose existing events don't overlap. Then for
- * each event, set `cols` = the maximum number of columns used by any
- * event in its overlap-cluster.
+ * Order events for the WeekView time grid.
+ *
+ * Cluster 11 v1.5: the time grid switched from side-by-side columns
+ * (each overlap got 1/N width) to a full-width overlay where each
+ * block takes the full day-column width and stacks via DOM order +
+ * z-index. The `col`/`cols` fields are kept on `LaidOut` for callers
+ * but always 0 / 1 — render-time z-index picks the visual stack
+ * order via array index instead.
+ *
+ * Sort key: start ASC, then duration DESC (longer events first /
+ * underneath). When two events share a start time, the shorter one
+ * renders later (on top), so its title stays visible and the longer
+ * event's body fills in below.
  */
 function layoutEventsForDay(events: CalendarEvent[]): LaidOut[] {
   if (events.length === 0) return [];
-  const sorted = [...events].sort((a, b) => a.start_at - b.start_at);
-  const cols: CalendarEvent[][] = [];
-  const placement = new Map<string, number>();
-  for (const ev of sorted) {
-    let placed = false;
-    for (let i = 0; i < cols.length; i++) {
-      const last = cols[i][cols[i].length - 1];
-      if (last.end_at <= ev.start_at) {
-        cols[i].push(ev);
-        placement.set(ev.id, i);
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      cols.push([ev]);
-      placement.set(ev.id, cols.length - 1);
-    }
-  }
-  // For each event, find the max column count among events it
-  // overlaps with — that's the divisor for its width.
-  const totalCols = Math.max(1, cols.length);
+  const sorted = [...events].sort((a, b) => {
+    if (a.start_at !== b.start_at) return a.start_at - b.start_at;
+    // Same start → longer first (renders below the shorter one).
+    return b.end_at - b.start_at - (a.end_at - a.start_at);
+  });
   return sorted.map((ev) => ({
     event: ev,
-    col: placement.get(ev.id) ?? 0,
-    // Use the global cluster column count; not perfect for sparse
-    // overlaps but visually consistent.
-    cols: totalCols,
+    col: 0,
+    cols: 1,
   }));
 }
 
@@ -1213,12 +1268,25 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "left",
     border: "none",
     boxSizing: "border-box",
+    // Cluster 11 v1.5 — top-align content so the title sits at the
+    // start-time edge of each block. With overlay layout this is
+    // what makes a block's identity visible even when an overlapping
+    // block covers the body below.
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "stretch",
+    justifyContent: "flex-start",
+    gap: "1px",
   },
   eventTitle: {
     fontWeight: 600,
-    whiteSpace: "nowrap",
+    // Cluster 11 v1.5 — wrap to second / third line if the title runs
+    // past the block width. Block clips at its bottom so content past
+    // the block height disappears rather than overflowing.
+    whiteSpace: "normal",
     overflow: "hidden",
-    textOverflow: "ellipsis",
+    wordBreak: "break-word",
+    lineHeight: 1.2,
   },
   googleBadge: {
     display: "inline-block",

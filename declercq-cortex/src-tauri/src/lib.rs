@@ -6271,6 +6271,16 @@ fn get_time_tracking_aggregates(
         if evt.start_at < range_start_unix || evt.start_at >= range_end_unix {
             continue;
         }
+        // Cluster 14 v1.5 — all-day events are excluded from time
+        // tracking. They're typically markers (vacation, holiday,
+        // anniversary, conference day) where the duration is 1440
+        // minutes per day, which would massively distort planned/
+        // actual totals if counted. The user's WeekView already
+        // separates all-day events into a dedicated top row; mirror
+        // that separation in the analytics layer.
+        if evt.all_day {
+            continue;
+        }
         let raw_cat = evt.category.trim();
         let cat_key = if raw_cat.is_empty() {
             "uncategorized".to_string()
@@ -6466,6 +6476,11 @@ fn get_time_tracking_daily_rollup(
         if evt.start_at < range_start_unix || evt.start_at >= range_end_unix {
             continue;
         }
+        // Cluster 14 v1.5 — same all-day exclusion as the table
+        // aggregator. Trends / sparklines never include all-day events.
+        if evt.all_day {
+            continue;
+        }
         let raw_cat = evt.category.trim();
         let cat_key = if raw_cat.is_empty() {
             "uncategorized".to_string()
@@ -6544,6 +6559,12 @@ fn aggregate_time_tracking_in_window(
         std::collections::HashMap::new();
     for evt in &events {
         if evt.start_at < range_start || evt.start_at >= range_end {
+            continue;
+        }
+        // Cluster 14 v1.5 — exclude all-day events from the splice
+        // for the same reason as the public aggregator: a single
+        // 1440-minute marker would dominate yesterday's totals.
+        if evt.all_day {
             continue;
         }
         let raw_cat = evt.category.trim();
