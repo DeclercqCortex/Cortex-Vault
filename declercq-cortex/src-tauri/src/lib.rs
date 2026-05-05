@@ -7170,6 +7170,199 @@ fn import_image_to_note(
     Ok(format!("{}/{}", attach_basename, chosen))
 }
 
+// ===========================================================================
+// Cluster 19 v1.2 — Orphan attachments GC.
+// ===========================================================================
+//
+// Walks the vault for `<note-stem>-attachments/` directories and lists
+// any files inside that aren't referenced from their parent note's
+// content. Reference detection is a substring match on the relative
+// path (`<note-stem>-attachments/<file>`), the same shape that
+// CortexImage NodeView writes via `data-cortex-image` <img> tags. The
+// match is case-sensitive on purpose — Windows's case-insensitive
+// filesystem is fine because our writes always use the canonical stem,
+// so a case mismatch in content is a real divergence worth flagging.
+//
+// Caveat (documented for users): a freshly-dropped image that hasn't
+// been saved yet is technically orphaned (the .md file on disk doesn't
+// reference it). Users should save the note before running the GC.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OrphanAttachment {
+    pub note_path: String,           // absolute
+    pub note_relative: String,       // relative to vault, for display
+    pub attachment_path: String,     // absolute, target of delete
+    pub attachment_relative: String, // <stem>-attachments/<file>
+    pub file_size: i64,              // bytes
+}
+
+#[tauri::command]
+fn find_orphan_attachments(vault_path: String) -> Result<Vec<OrphanAttachment>, String> {
+    let vault = PathBuf::from(&vault_path);
+    if !vault.is_dir() {
+        return Err(format!("vault `{}` is not a directory", vault_path));
+    }
+    let mut orphans: Vec<OrphanAttachment> = Vec::new();
+    for entry in WalkDir::new(&vault).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let attach_dir = match note_attachments_dir_for(path) {
+            Some(d) => d,
+            None => continue,
+        };
+        if !attach_dir.is_dir() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let dir_basename = attach_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let dir_iter = match std::fs::read_dir(&attach_dir) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for entry in dir_iter.flatten() {
+            let entry_path = entry.path();
+            if !entry_path.is_file() {
+                continue;
+            }
+            let file_name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let ref_str = format!("{}/{}", dir_basename, file_name);
+            if !content.contains(&ref_str) {
+                let size = entry.metadata().map(|m| m.len() as i64).unwrap_or(0);
+                let note_rel = path
+                    .strip_prefix(&vault)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+                orphans.push(OrphanAttachment {
+                    note_path: path.to_string_lossy().into_owned(),
+                    note_relative: note_rel,
+                    attachment_path: entry_path.to_string_lossy().into_owned(),
+                    attachment_relative: ref_str,
+                    file_size: size,
+                });
+            }
+        }
+    }
+    orphans.sort_by(|a, b| {
+        a.note_relative
+            .cmp(&b.note_relative)
+            .then_with(|| a.attachment_relative.cmp(&b.attachment_relative))
+    });
+    Ok(orphans)
+}
+
+#[tauri::command]
+fn delete_orphan_attachment(vault_path: String, attachment_path: String) -> Result<(), String> {
+    let vault = PathBuf::from(&vault_path);
+    let target = PathBuf::from(&attachment_path);
+    if !target.starts_with(&vault) {
+        return Err(format!(
+            "attachment `{}` is not under vault `{}`",
+            attachment_path, vault_path
+        ));
+    }
+    if !target.is_file() {
+        return Err(format!("`{}` is not a file", attachment_path));
+    }
+    std::fs::remove_file(&target)
+        .map_err(|e| format!("delete `{}` failed: {}", attachment_path, e))?;
+    Ok(())
+}
+
+// ===========================================================================
+// Cluster 19 v1.2 — Save cropped image bytes.
+// ===========================================================================
+//
+// The CropModal renders the image in a canvas, draws the cropped
+// region, and exports PNG bytes. We accept the bytes as Vec<u8> (Tauri
+// transports a Uint8Array as a JSON array of numbers) and write them
+// alongside the source as `<source-stem>-cropped[-N].png`. Same suffix-
+// counter dedupe as `import_image_to_note`, so multiple crops of the
+// same source coexist.
+
+#[tauri::command]
+fn save_cropped_image(
+    vault_path: String,
+    note_path: String,
+    source_relative: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("bytes is empty".into());
+    }
+    let note_pb = PathBuf::from(&note_path);
+    let vault_pb = PathBuf::from(&vault_path);
+    if !note_pb.starts_with(&vault_pb) {
+        return Err(format!(
+            "note path `{}` is not under vault `{}`",
+            note_path, vault_path
+        ));
+    }
+    let attachments_dir = note_attachments_dir_for(&note_pb)
+        .ok_or_else(|| format!("couldn't compute attachments dir for note `{}`", note_path))?;
+    std::fs::create_dir_all(&attachments_dir).map_err(|e| {
+        format!(
+            "create attachments dir `{}` failed: {}",
+            attachments_dir.display(),
+            e
+        )
+    })?;
+
+    let source_pb = PathBuf::from(&source_relative);
+    let source_stem = source_pb
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+    let mut chosen_name: Option<String> = None;
+    for n in 1..=999 {
+        let candidate = if n == 1 {
+            format!("{}-cropped.png", source_stem)
+        } else {
+            format!("{}-cropped-{}.png", source_stem, n)
+        };
+        let dest = attachments_dir.join(&candidate);
+        if !dest.exists() {
+            std::fs::write(&dest, &bytes)
+                .map_err(|e| format!("write `{}` failed: {}", dest.display(), e))?;
+            chosen_name = Some(candidate);
+            break;
+        }
+        let existing = std::fs::read(&dest).unwrap_or_default();
+        if existing == bytes {
+            chosen_name = Some(candidate);
+            break;
+        }
+    }
+    let chosen = chosen_name.ok_or_else(|| {
+        format!(
+            "couldn't find a free filename in `{}` after 999 tries",
+            attachments_dir.display()
+        )
+    })?;
+    let attach_basename = attachments_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(format!("{}/{}", attach_basename, chosen))
+}
+
 #[tauri::command]
 fn delete_event(vault_path: String, id: String) -> Result<(), String> {
     let conn = open_or_init_db(&vault_path)?;
@@ -8813,6 +9006,10 @@ pub fn run() {
             // Cluster 19 v1.0 — Image support
             ensure_note_attachments_dir,
             import_image_to_note,
+            // Cluster 19 v1.2 — Orphan GC + crop save
+            find_orphan_attachments,
+            delete_orphan_attachment,
+            save_cropped_image,
             delete_event,
             list_event_categories,
             upsert_event_category,

@@ -200,6 +200,46 @@ export const CortexImage = Node.create({
           return { "data-flip-v": "1" };
         },
       },
+      /** Cluster 19 v1.2 — non-destructive crop. Stored in NATURAL
+       *  image pixels. All four must be non-null for the crop to
+       *  apply; a half-set state is treated as no-crop (defensive
+       *  partial-set fallback, mirrors the v1.6 time-override
+       *  semantic). The original src never changes — re-cropping
+       *  opens the modal with the ORIGINAL image and the existing
+       *  rect as the starting state, so the user can adjust or
+       *  expand without ratchet-loss. */
+      cropX: {
+        default: null as number | null,
+        parseHTML: (el) => parseFloatAttr(el.getAttribute("data-crop-x"), null),
+        renderHTML: (attrs) => {
+          if (attrs.cropX == null) return {};
+          return { "data-crop-x": String(Math.round(attrs.cropX)) };
+        },
+      },
+      cropY: {
+        default: null as number | null,
+        parseHTML: (el) => parseFloatAttr(el.getAttribute("data-crop-y"), null),
+        renderHTML: (attrs) => {
+          if (attrs.cropY == null) return {};
+          return { "data-crop-y": String(Math.round(attrs.cropY)) };
+        },
+      },
+      cropW: {
+        default: null as number | null,
+        parseHTML: (el) => parseFloatAttr(el.getAttribute("data-crop-w"), null),
+        renderHTML: (attrs) => {
+          if (attrs.cropW == null) return {};
+          return { "data-crop-w": String(Math.round(attrs.cropW)) };
+        },
+      },
+      cropH: {
+        default: null as number | null,
+        parseHTML: (el) => parseFloatAttr(el.getAttribute("data-crop-h"), null),
+        renderHTML: (attrs) => {
+          if (attrs.cropH == null) return {};
+          return { "data-crop-h": String(Math.round(attrs.cropH)) };
+        },
+      },
     };
   },
 

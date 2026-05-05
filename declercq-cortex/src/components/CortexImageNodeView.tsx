@@ -25,6 +25,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { CortexImageWrap } from "../editor/CortexImageNode";
+import { imageMultiSelectKey } from "../editor/imageMultiSelect";
 
 /** Dispatched on Ctrl+click — opens the editable annotation popover. */
 export const EDIT_IMAGE_ANNOTATION_EVENT = "cortex:edit-image-annotation";
@@ -117,6 +118,28 @@ export function CortexImageNodeView(props: NodeViewProps) {
   // flip axes so user-set rotation is preserved as its own attr.
   const flipH = !!node.attrs.flipH;
   const flipV = !!node.attrs.flipV;
+  // Cluster 19 v1.2 — non-destructive crop. Stored in NATURAL pixels.
+  // All four must be present for the crop to apply (defensive
+  // partial-set fallback).
+  const cropX = node.attrs.cropX as number | null;
+  const cropY = node.attrs.cropY as number | null;
+  const cropW = node.attrs.cropW as number | null;
+  const cropH = node.attrs.cropH as number | null;
+  // Natural dimensions are known only after the img loads. Until
+  // then we render uncropped (full image) so there's no flash of
+  // mis-sized box; once the load resolves the wrapper sizes pick up.
+  const [naturalSize, setNaturalSize] = useState<{
+    w: number;
+    h: number;
+  } | null>(null);
+  const cropActive =
+    cropX != null &&
+    cropY != null &&
+    cropW != null &&
+    cropH != null &&
+    cropW > 0 &&
+    cropH > 0 &&
+    naturalSize != null;
   const src = node.attrs.src as string;
 
   // The note path is published into storage by Editor.tsx whenever the
@@ -315,9 +338,35 @@ export function CortexImageNodeView(props: NodeViewProps) {
     };
   }, [dragging, onMoveMove, onRotateMove, onResizeMove, onUp]);
 
-  // ---- click on the image: Ctrl+click → edit annotation ----------------
+  // ---- click on the image: Alt+click → multi-select toggle,
+  //                          Ctrl+click → edit annotation -----------------
+  // Cluster 19 v1.2 — Alt+click is handled HERE (in the NodeView's React
+  // onClick) rather than in the imageMultiSelect ProseMirror plugin's
+  // handleClickOn. Why: the NodeViewWrapper carries data-drag-handle in
+  // left/right/break wrap modes, which puts the wrapper into HTML5
+  // drag-prep on mousedown. With Alt held that prep can intercept the
+  // click before PM's click pipeline runs, so handleClickOn never fires
+  // on the cortexImage node and the toggle is silently dropped. The
+  // React onClick on the inner <img> is a plain DOM click and fires
+  // reliably regardless of drag-handle wiring, so we dispatch the
+  // toggle transaction directly from here. The PM plugin's
+  // handleClickOn is kept as a fallback path AND for the off-image
+  // clear case (clicks on text / other nodes that should drop the set).
   const onClick = useCallback(
     (e: React.MouseEvent<HTMLImageElement>) => {
+      if (e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        const pos = typeof getPos === "function" ? getPos() : null;
+        if (pos == null) return;
+        editor.view.dispatch(
+          editor.view.state.tr.setMeta(imageMultiSelectKey, {
+            kind: "toggle",
+            pos,
+          }),
+        );
+        return;
+      }
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         e.stopPropagation();
@@ -426,18 +475,133 @@ export function CortexImageNodeView(props: NodeViewProps) {
   // image mirrors across the rotated axes (matches how Photoshop /
   // Figma compose these). Identity (no rotation, no flip) emits no
   // transform so the simple case stays clean.
+  // Cluster 19 v1.2 — when crop is active the transform moves from
+  // the <img> to the crop-wrapper so rotation rotates the CROPPED
+  // result (matches the user's mental model: "rotate this photo I
+  // just cropped"), not the full natural image inside the clip
+  // window.
   const flipScaleX = flipH ? -1 : 1;
   const flipScaleY = flipV ? -1 : 1;
   const transformParts: string[] = [];
   if (rotation) transformParts.push(`rotate(${rotation.toFixed(2)}deg)`);
   if (flipH || flipV)
     transformParts.push(`scale(${flipScaleX}, ${flipScaleY})`);
-  const imgStyle: React.CSSProperties = {
-    transform: transformParts.length > 0 ? transformParts.join(" ") : undefined,
-  };
-  if (width != null) {
-    imgStyle.width = `${width}px`;
-  }
+  const composedTransform =
+    transformParts.length > 0 ? transformParts.join(" ") : undefined;
+
+  // Cluster 19 v1.2 — crop math. When crop is active, the user-set
+  // `width` attr applies to the CROPPED result (so a 200-px-wide
+  // user-set width displays a 200-px-wide cropped image regardless
+  // of where the crop landed in the source). When unset, fall back
+  // to the cropped region's natural dimensions (cropW × cropH at 1:1).
+  // We only need cropDisplayedW directly — height auto-derives from
+  // the wrapper's aspect-ratio, and the inner img positions itself
+  // proportionally via percentages.
+  const cropDisplayedW =
+    cropActive && cropW != null ? (width != null ? width : cropW) : null;
+
+  const imgStyle: React.CSSProperties = cropActive
+    ? {
+        // Inside the crop-wrapper: position the FULL natural image so
+        // overflow:hidden on the wrapper clips to the crop region.
+        // Sizes + offsets are expressed as PERCENTAGES of the wrapper
+        // so the inner image scales proportionally when the wrapper
+        // hits its parent's right edge and shrinks via max-width:100%.
+        // Math: wrapper width = cropW * scale, img target width =
+        // naturalW * scale → img width as % of wrapper = naturalW /
+        // cropW × 100. Likewise for the negative offsets.
+        position: "absolute",
+        left: `${(-((cropX as number) / (cropW as number)) * 100).toFixed(3)}%`,
+        top: `${(-((cropY as number) / (cropH as number)) * 100).toFixed(3)}%`,
+        width: `${((naturalSize!.w / (cropW as number)) * 100).toFixed(3)}%`,
+        height: "auto",
+        // .cortex-image CSS has max-width: 100% which would cap the
+        // inner img to the wrapper's width and squash the image to
+        // fit (turning the crop into a resize). Override here so the
+        // percentage-based width can exceed 100% of the wrapper.
+        maxWidth: "none",
+        // Transform is on the wrapper; img stays untransformed.
+        transform: undefined,
+        // The drop-shadow filter on the img would extend past the
+        // wrapper edges and get clipped, leaving a partial shadow on
+        // the cropped image. Move shadow responsibility to the wrapper
+        // (set there via .cortex-image-crop-wrapper) so it rings the
+        // cropped result cleanly.
+        filter: "none",
+      }
+    : {
+        transform: composedTransform,
+        ...(width != null ? { width: `${width}px` } : null),
+      };
+
+  // Crop-wrapper style applied only when crop is active.
+  // Cluster 19 v1.2 — the wrapper has NO explicit width. Its
+  // intrinsic dimensions come from a hidden inline <svg> placeholder
+  // rendered inside (see the JSX below). The SVG behaves like an
+  // <img> for sizing — `max-width: 100%` lets it scale down, and
+  // `min-content` is 1 px (replaceable element). That makes the
+  // absolute-positioning shrink-to-fit chain at
+  // .cortex-image-wrap-free actually compress when freeX runs the
+  // image past the editor's right edge:
+  //
+  //   final-width = min(max-content, max(min-content, available-width))
+  //
+  // With an explicit `width: cropDisplayedW px` on the wrapper,
+  // min-content gets set to that declared width, the formula
+  // returns cropDisplayedW regardless of available-width, and the
+  // wrapper never compresses. The SVG-placeholder pattern restores
+  // the natural <img>-style flexibility.
+  //
+  // Aspect ratio is preserved by the SVG's own intrinsic ratio
+  // (declared via `width` and `height` HTML attrs), so we don't
+  // need a separate aspect-ratio CSS prop here.
+  const cropWrapperStyle: React.CSSProperties | undefined = cropActive
+    ? {
+        display: "inline-block",
+        position: "relative",
+        verticalAlign: "top",
+        overflow: "hidden",
+        // Hard line-height: 0 so the SVG doesn't introduce a
+        // descender gap below it (the wrapper would otherwise be a
+        // few px taller than the crop region).
+        lineHeight: 0,
+        fontSize: 0,
+        transform: composedTransform,
+        // Cluster 19 v1.2 — drop-shadow moved here from the inner
+        // img so the shadow rings the visible cropped result. The
+        // values mirror the .cortex-image filter (light theme); a
+        // companion CSS rule themes it for dark mode without
+        // having to read theme state in JS.
+        filter: "drop-shadow(1px 2px 4px rgba(0, 0, 0, 0.28))",
+      }
+    : undefined;
+
+  // SVG placeholder style. `max-width: 100%` is what gives the
+  // chain its compression. `height: auto` derives height from the
+  // capped width. visibility: hidden keeps the SVG present in flow
+  // (so it drives layout) but invisible.
+  const cropSvgStyle: React.CSSProperties | undefined = cropActive
+    ? {
+        display: "block",
+        maxWidth: "100%",
+        height: "auto",
+        visibility: "hidden",
+      }
+    : undefined;
+
+  // Cluster 19 v1.2 — onLoad reads natural dimensions out of the
+  // loaded <img>. The crop wrapper math depends on these. On src
+  // change (e.g. user replaces the image) we re-read so coords stay
+  // consistent.
+  const handleImgLoad = useCallback(
+    (e: React.SyntheticEvent<HTMLImageElement>) => {
+      const i = e.currentTarget;
+      if (i.naturalWidth > 0 && i.naturalHeight > 0) {
+        setNaturalSize({ w: i.naturalWidth, h: i.naturalHeight });
+      }
+    },
+    [],
+  );
 
   // In wrap modes (left / right / break) the user repositions the image
   // by *dragging the image itself* — ProseMirror handles the doc-level
@@ -463,17 +627,59 @@ export function CortexImageNodeView(props: NodeViewProps) {
       data-drag-handle={wrapDraggable ? "" : undefined}
     >
       {/* Inner anchor — handles position against THIS box (matches the
-          image's exact rendered bounds, including post-resize updates). */}
+          image's exact rendered bounds, including post-resize updates).
+          Cluster 19 v1.2 — when crop is active, the <img> sits inside
+          a crop-wrapper that has overflow:hidden + crop dimensions, and
+          the rotation/flip transform moves to that wrapper so it
+          rotates the cropped result (not the full natural image inside
+          the clip window). The anchor's box still tracks the visible
+          rendered bounds, so the corner handles stay anchored
+          correctly. */}
       <span className="cortex-image-anchor">
-        <img
-          ref={imgRef}
-          src={resolvedSrc}
-          alt=""
-          className="cortex-image"
-          draggable={false}
-          style={imgStyle}
-          onClick={onClick}
-        />
+        {cropActive && cropWrapperStyle && cropDisplayedW != null ? (
+          <span className="cortex-image-crop-wrapper" style={cropWrapperStyle}>
+            {/* Cluster 19 v1.2 — invisible SVG placeholder. Drives
+                the wrapper's intrinsic dimensions so the chain
+                shrink-to-fit at .cortex-image-wrap-free can compress
+                the wrapper when freeX pushes it past the parent's
+                right edge. The SVG's intrinsic aspect ratio
+                (cropW × cropH expressed via width / height attrs)
+                also means the wrapper's height auto-derives from
+                whatever width the browser settles on. */}
+            <svg
+              width={Math.max(1, Math.round(cropDisplayedW))}
+              height={Math.max(
+                1,
+                Math.round(
+                  cropDisplayedW * ((cropH as number) / (cropW as number)),
+                ),
+              )}
+              style={cropSvgStyle}
+              aria-hidden="true"
+            />
+            <img
+              ref={imgRef}
+              src={resolvedSrc}
+              alt=""
+              className="cortex-image"
+              draggable={false}
+              style={imgStyle}
+              onClick={onClick}
+              onLoad={handleImgLoad}
+            />
+          </span>
+        ) : (
+          <img
+            ref={imgRef}
+            src={resolvedSrc}
+            alt=""
+            className="cortex-image"
+            draggable={false}
+            style={imgStyle}
+            onClick={onClick}
+            onLoad={handleImgLoad}
+          />
+        )}
 
         {/* Handles. Rendered inside the anchor so they re-anchor on
             every resize. Visible while hovered or actively dragging. */}

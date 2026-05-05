@@ -22,6 +22,11 @@ export type ImageContextAction =
   // editor.commands.updateAttributes({ flipH: !current.flipH }) etc.
   | { kind: "flip-h" }
   | { kind: "flip-v" }
+  // Cluster 19 v1.2 — open the CropModal for this image. Editor.tsx
+  // hosts the modal; on Apply it draws the cropped region to a
+  // canvas, sends the bytes to save_cropped_image, and replaces the
+  // node's src with the new attachment path.
+  | { kind: "crop" }
   | { kind: "delete" };
 
 export interface ImageContextMenuProps {
@@ -185,6 +190,9 @@ export function ImageContextMenu({
       <Item onClick={() => pick({ kind: "flip-v" })} leading={dot(attrs.flipV)}>
         Flip vertical
       </Item>
+
+      <div style={separator} />
+      <Item onClick={() => pick({ kind: "crop" })}>Crop image…</Item>
 
       <div style={separator} />
       <Item onClick={() => pick({ kind: "edit-annotation" })}>

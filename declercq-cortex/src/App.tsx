@@ -12,6 +12,7 @@ import { ExperimentBlockModal } from "./components/ExperimentBlockModal";
 import { InsertTableModal } from "./components/InsertTableModal";
 import { IntegrationsSettings } from "./components/IntegrationsSettings";
 import { ReminderOverlay } from "./components/ReminderOverlay";
+import { OrphanAttachmentsModal } from "./components/OrphanAttachmentsModal";
 import { NotificationBell } from "./components/NotificationBell";
 import { ThemeToggle, useTheme } from "./components/ThemeToggle";
 import {
@@ -197,6 +198,8 @@ function App() {
   const [tableModalOpen, setTableModalOpen] = useState(false);
   // Cluster 10 — Integrations settings (currently GitHub-only).
   const [integrationsOpen, setIntegrationsOpen] = useState(false);
+  // Cluster 19 v1.2 — Orphan attachments GC modal (Ctrl+Shift+O).
+  const [orphanModalOpen, setOrphanModalOpen] = useState(false);
   // Cluster 15 — Reminders overlay (Ctrl+Shift+M) and a tick the
   // overlay bumps after every save so the NotificationBell refreshes
   // immediately rather than waiting for its 30s poll.
@@ -833,6 +836,14 @@ function App() {
         // Cluster 15 — open the Reminders overlay (modal, not a slot).
         e.preventDefault();
         setReminderOverlayOpen(true);
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key === "O" || e.key === "o")
+      ) {
+        // Cluster 19 v1.2 — open the Orphan attachments GC modal.
+        e.preventDefault();
+        setOrphanModalOpen(true);
       } else if (
         (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
@@ -1557,6 +1568,11 @@ function App() {
         onClose={() => setReminderOverlayOpen(false)}
         onChanged={() => setReminderRefreshTick((t) => t + 1)}
         onOpenInPane={(filePath) => selectFileInSlot(filePath, activeSlotIdx)}
+      />
+      <OrphanAttachmentsModal
+        vaultPath={vaultPath}
+        isOpen={orphanModalOpen}
+        onClose={() => setOrphanModalOpen(false)}
       />
     </div>
   );

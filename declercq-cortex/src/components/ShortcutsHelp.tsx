@@ -23,6 +23,10 @@ const ALWAYS: Row[] = [
     keys: "Ctrl+Shift+M",
     action: "Open Reminders overlay (memo / quick-capture)",
   },
+  {
+    keys: "Ctrl+Shift+O",
+    action: "Find orphan attachments (vault GC)",
+  },
   { keys: "Ctrl+,", action: "Open Integrations settings (GitHub)" },
   { keys: "Click", action: "(Tree) Open file in slot 1 (single/dual layout)" },
   { keys: "Ctrl+Click", action: "(Tree) Open file in slot 2 (dual layout)" },

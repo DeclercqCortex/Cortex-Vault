@@ -55,6 +55,9 @@ import {
 } from "./CortexImageNodeView";
 import { ImageAnnotationPopover } from "./ImageAnnotationPopover";
 import { ImageContextMenu, type ImageContextAction } from "./ImageContextMenu";
+import { CropModal } from "./CropModal";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { buildImageMultiSelectPlugin } from "../editor/imageMultiSelect";
 
 /**
  * Cluster 18 — table cells now carry verticalAlign (Cluster 16) AND
@@ -543,6 +546,14 @@ export function Editor({
         addNodeView() {
           return ReactNodeViewRenderer(CortexImageNodeView);
         },
+        // Cluster 19 v1.2 — multi-select plugin. Ctrl/Cmd+click on a
+        // cortexImage toggles its position in the plugin's set; Esc
+        // clears; Delete/Backspace removes every selected image in
+        // reverse-position order. Decoration adds a class to the
+        // wrapper for the visible ring (CSS in src/index.css).
+        addProseMirrorPlugins() {
+          return [buildImageMultiSelectPlugin()];
+        },
       }),
       // Text alignment with Ctrl+Shift+L/E/R shortcuts. Round-trips
       // through tiptap-markdown's html:true as inline style attributes.
@@ -644,6 +655,18 @@ export function Editor({
     x: number;
     y: number;
     attrs: ImageContextMenuDetail["attrs"];
+  } | null>(null);
+  // Cluster 19 v1.2 — Crop modal state. Opened from the context
+  // menu's Crop entry; commits by writing the cropX/Y/W/H attrs on
+  // the image node (non-destructive — the src never changes; the
+  // crop is purely display state). `initialCrop` carries any
+  // existing crop attrs so the modal opens on the original image
+  // with the saved rect already applied, ready for the user to
+  // adjust or expand.
+  const [cropModal, setCropModal] = useState<{
+    pos: number;
+    imageUrl: string;
+    initialCrop: { x: number; y: number; w: number; h: number } | null;
   } | null>(null);
 
   // Publish the open note's path into the cortexImage extension's
@@ -787,6 +810,41 @@ export function Editor({
         const node = editor.state.doc.nodeAt(pos);
         const cur = !!node?.attrs?.flipV;
         patchImageAttrs(pos, { flipV: !cur });
+        break;
+      }
+      // Cluster 19 v1.2 — open the crop modal for this image.
+      // Non-destructive: the modal seeds with the image's existing
+      // cropX/Y/W/H attrs (if any) so re-cropping shows the saved
+      // rect over the ORIGINAL image, then on Apply we just patch
+      // the four attrs. The node's `src` never changes — no file is
+      // written, and the original is always available for re-crop.
+      case "crop": {
+        const node = editor.state.doc.nodeAt(pos);
+        if (!node) break;
+        const sourceRelative = String(node.attrs.src ?? "");
+        if (!sourceRelative) break;
+        const sep = (notePath ?? "").includes("\\") ? "\\" : "/";
+        const np = notePath ?? "";
+        const lastSep = np.lastIndexOf(sep);
+        const parent = lastSep >= 0 ? np.slice(0, lastSep) : "";
+        const normalised = sourceRelative.replace(/[\\/]+/g, sep);
+        const absolute = parent ? `${parent}${sep}${normalised}` : "";
+        let imageUrl = "";
+        try {
+          imageUrl = absolute ? convertFileSrc(absolute) : "";
+        } catch {
+          imageUrl = "";
+        }
+        if (!imageUrl) break;
+        const cx = node.attrs.cropX as number | null;
+        const cy = node.attrs.cropY as number | null;
+        const cw = node.attrs.cropW as number | null;
+        const ch = node.attrs.cropH as number | null;
+        const initialCrop =
+          cx != null && cy != null && cw != null && ch != null
+            ? { x: cx, y: cy, w: cw, h: ch }
+            : null;
+        setCropModal({ pos, imageUrl, initialCrop });
         break;
       }
       case "delete": {
@@ -1229,6 +1287,44 @@ export function Editor({
           anchorRect={imageAnnotation.anchorRect}
           onSave={commitImageAnnotation}
           onClose={() => setImageAnnotation(null)}
+        />
+      )}
+      {cropModal && (
+        <CropModal
+          isOpen={true}
+          imageUrl={cropModal.imageUrl}
+          initialCrop={cropModal.initialCrop}
+          onApplied={(rect) => {
+            // Cluster 19 v1.2 — non-destructive crop commit. Apply
+            // writes the four cropX/Y/W/H attrs onto the node;
+            // Reset (rect === null) clears them so the image
+            // renders un-cropped. The src stays the original in
+            // both cases — there's no derived file to update or
+            // garbage-collect. `width` resets so the user-set
+            // pixel width (which referenced a different aspect
+            // ratio's natural cropW) doesn't carry over confusingly;
+            // the cropped image then displays at its natural
+            // cropW × cropH until the user resizes again.
+            if (rect == null) {
+              patchImageAttrs(cropModal.pos, {
+                cropX: null,
+                cropY: null,
+                cropW: null,
+                cropH: null,
+                width: null,
+              });
+            } else {
+              patchImageAttrs(cropModal.pos, {
+                cropX: rect.x,
+                cropY: rect.y,
+                cropW: rect.w,
+                cropH: rect.h,
+                width: null,
+              });
+            }
+            setCropModal(null);
+          }}
+          onClose={() => setCropModal(null)}
         />
       )}
       {imageBubble &&

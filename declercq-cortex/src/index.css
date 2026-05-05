@@ -1103,6 +1103,25 @@ body.cortex-mod-pressed .pdf-annotation-overlay > div.ann-hover {
     drop-shadow(0 0 1px rgba(255, 255, 255, 0.25));
 }
 
+/* Cluster 19 v1.2 — when an image has a non-destructive crop, the
+ * drop-shadow lives on the crop-wrapper instead of the img, so it
+ * rings the visible cropped result rather than getting clipped at
+ * the wrapper edges. These rules mirror the .cortex-image filter
+ * values so the visual matches across cropped / uncropped images.
+ * The inline `filter` set in the NodeView covers light-theme; these
+ * rules cover the two dark-mode variants the rest of the file uses. */
+@media (prefers-color-scheme: dark) {
+  .cortex-image-crop-wrapper {
+    filter: drop-shadow(1px 2px 5px rgba(255, 255, 255, 0.18))
+      drop-shadow(0 0 1px rgba(255, 255, 255, 0.25)) !important;
+  }
+}
+[data-theme="dark"] .cortex-image-crop-wrapper,
+.dark .cortex-image-crop-wrapper {
+  filter: drop-shadow(1px 2px 5px rgba(255, 255, 255, 0.18))
+    drop-shadow(0 0 1px rgba(255, 255, 255, 0.25)) !important;
+}
+
 /* ProseMirror NodeSelection ring. drop-shadow can't be additive cleanly
  * with a selection outline, so we ring the wrapper with a 2px halo. */
 .cortex-image-selected .cortex-image-anchor {
@@ -1112,6 +1131,18 @@ body.cortex-mod-pressed .pdf-annotation-overlay > div.ann-hover {
   box-shadow:
     0 0 0 2px var(--accent),
     0 0 0 3px rgba(108, 160, 220, 0.25);
+  outline: none;
+}
+
+/* Cluster 19 v1.2 — multi-select ring. Decoration.node from the
+ * imageMultiSelect plugin adds .cortex-image-multi-selected to the
+ * NodeView's wrapper. Slightly thicker than the single-selection
+ * ring and a different shade so it's distinguishable when both
+ * happen to coexist (rare; default click clears multi-select first). */
+.cortex-image-multi-selected .cortex-image-anchor {
+  box-shadow:
+    0 0 0 3px var(--accent),
+    0 0 0 5px rgba(108, 160, 220, 0.3);
   outline: none;
 }
 
