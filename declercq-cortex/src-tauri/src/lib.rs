@@ -1351,6 +1351,22 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
     )
     .map_err(|e| e.to_string())?;
 
+    // Cluster 14 v1.6 schema migration: add per-instance time
+    // override columns. NULL = inherit master's computed start/end
+    // for this occurrence; non-NULL = the user dragged this single
+    // instance to a new time. Composes with skipped/actual_minutes
+    // — the override row's PK stays at the master-computed
+    // instance_start_unix; the new fields hold the user-chosen new
+    // times.
+    let _ = conn.execute(
+        "ALTER TABLE event_instance_overrides ADD COLUMN start_at_override INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE event_instance_overrides ADD COLUMN end_at_override INTEGER",
+        [],
+    );
+
     // Cluster 3 schema migration: add injected_at column for tracking
     // pink marks that have already been carried into a daily note. The
     // ALTER TABLE will fail if the column already exists; ignore that.
@@ -5629,6 +5645,19 @@ pub struct InstanceOverride {
     pub skipped: bool,
     #[serde(default)]
     pub actual_minutes: Option<i64>,
+    /// Cluster 14 v1.6 — when non-None, expand_recurrence renders
+    /// this single occurrence at this start (in UTC unix seconds)
+    /// instead of the master-computed start. The PK
+    /// `instance_start_unix` still tracks the original computed
+    /// start so future drags / clears find the right row.
+    #[serde(default)]
+    pub start_at_override: Option<i64>,
+    /// Cluster 14 v1.6 — companion to start_at_override. Both must
+    /// be Some for the time override to apply (the duration
+    /// inheritance fallback is intentional: a half-set override
+    /// would render an event with mismatched start/end).
+    #[serde(default)]
+    pub end_at_override: Option<i64>,
     pub created_at_unix: i64,
     pub updated_at_unix: i64,
 }
@@ -5642,6 +5671,7 @@ fn load_overrides_for_master(
     let mut stmt = conn
         .prepare(
             "SELECT master_event_id, instance_start_unix, skipped, actual_minutes,
+                    start_at_override, end_at_override,
                     created_at_unix, updated_at_unix
              FROM event_instance_overrides
              WHERE master_event_id = ?1",
@@ -5654,8 +5684,10 @@ fn load_overrides_for_master(
                 instance_start_unix: row.get(1)?,
                 skipped: row.get::<_, i64>(2)? != 0,
                 actual_minutes: row.get(3)?,
-                created_at_unix: row.get(4)?,
-                updated_at_unix: row.get(5)?,
+                start_at_override: row.get(4)?,
+                end_at_override: row.get(5)?,
+                created_at_unix: row.get(6)?,
+                updated_at_unix: row.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -5777,15 +5809,32 @@ fn expand_recurrence(
         // with a non-null actual_minutes set the instance's value (so
         // the aggregator's recurring branch can distinguish "user
         // recorded a custom actual" from "auto-credit").
+        // Cluster 14 v1.6: when the override row also carries
+        // start_at_override / end_at_override (set by drag-on-instance),
+        // render this single occurrence at the user-chosen times. The
+        // override map is still keyed by the master-computed start
+        // (`start_at`), so future drags on the shifted instance find
+        // the same row via resolve_override_pk on the backend.
         let override_for_this = overrides.get(&start_at);
         if let Some(ov) = override_for_this {
             if ov.skipped {
                 return;
             }
         }
-        let end_at = start_at + duration;
-        // Only include if the instance overlaps the visible window.
-        if start_at < window_end && end_at > window_start {
+        let (effective_start, effective_end) = match override_for_this {
+            Some(ov) => match (ov.start_at_override, ov.end_at_override) {
+                (Some(s), Some(e)) if e > s => (s, e),
+                // Half-set override (one column null) is treated as
+                // "no time override" — fall back to computed times.
+                _ => (start_at, start_at + duration),
+            },
+            None => (start_at, start_at + duration),
+        };
+        // Only include if the EFFECTIVE instance overlaps the visible
+        // window. A drag could move an occurrence into or out of the
+        // displayed range; the window check uses the rendered times,
+        // not the master-computed ones.
+        if effective_start < window_end && effective_end > window_start {
             let actual = match override_for_this {
                 Some(ov) => ov.actual_minutes.or(master.actual_minutes),
                 None => master.actual_minutes,
@@ -5793,8 +5842,8 @@ fn expand_recurrence(
             out.push(Event {
                 id: master.id.clone(),
                 title: master.title.clone(),
-                start_at,
-                end_at,
+                start_at: effective_start,
+                end_at: effective_end,
                 all_day: master.all_day,
                 category: master.category.clone(),
                 status: master.status.clone(),
@@ -6334,6 +6383,37 @@ fn get_time_tracking_aggregates(
 // rollup for the Trends tab.
 // ===========================================================================
 
+/// Cluster 14 v1.6 — resolve the override-row PK for an instance.
+///
+/// The override row's primary key is the master-COMPUTED instance
+/// start (the value `expand_recurrence` walks). After a v1.6 drag,
+/// the calendar's UI displays the instance at the override's
+/// `start_at_override` time, and the next time the user touches that
+/// instance the frontend has only that displayed start_at — not the
+/// original computed PK.
+///
+/// This helper handles both:
+///   - input == an unmodified computed start  → return it as PK
+///   - input == a previously-shifted start    → look up the row
+///                                              whose `start_at_override`
+///                                              matches and return its
+///                                              actual PK
+///
+/// Used by every override-mutation command (set / delete / get /
+/// time-set) so the modal "Save just this" path and the drag commit
+/// stay coherent against the same row.
+fn resolve_override_pk(conn: &Connection, master_id: &str, instance_start_unix: i64) -> i64 {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT instance_start_unix FROM event_instance_overrides
+             WHERE master_event_id = ?1 AND start_at_override = ?2",
+            params![master_id, instance_start_unix],
+            |row| row.get(0),
+        )
+        .ok();
+    existing.unwrap_or(instance_start_unix)
+}
+
 /// Upsert an override for a single recurring instance. Identified by
 /// (master_event_id, instance_start_unix). When `skipped` is true, the
 /// instance is dropped from calendar lists and aggregates entirely.
@@ -6371,6 +6451,9 @@ fn set_event_instance_override(
             master_id
         ));
     }
+    // Cluster 14 v1.6 — accept either the original computed start or
+    // a previously-shifted start; resolve to the right PK either way.
+    let pk = resolve_override_pk(&conn, &master_id, instance_start_unix);
     let now = unix_now();
     conn.execute(
         "INSERT INTO event_instance_overrides
@@ -6383,7 +6466,7 @@ fn set_event_instance_override(
              updated_at_unix = excluded.updated_at_unix",
         params![
             master_id,
-            instance_start_unix,
+            pk,
             if skipped { 1i64 } else { 0i64 },
             cleaned_actual,
             now
@@ -6393,9 +6476,61 @@ fn set_event_instance_override(
     Ok(())
 }
 
+/// Cluster 14 v1.6 — upsert the time portion of an instance override.
+/// Used by the WeekView drag-on-recurring-instance commit. Touches
+/// only `start_at_override`, `end_at_override`, and `updated_at_unix`
+/// — if a row already exists carrying `skipped` or `actual_minutes`,
+/// those values survive. Refuses non-recurring masters and bad time
+/// ranges.
+#[tauri::command]
+fn set_event_instance_time_override(
+    vault_path: String,
+    master_id: String,
+    instance_start_unix: i64,
+    start_at: i64,
+    end_at: i64,
+) -> Result<(), String> {
+    if master_id.trim().is_empty() {
+        return Err("master_id required".into());
+    }
+    if end_at <= start_at {
+        return Err("end_at must be greater than start_at".into());
+    }
+    let conn = open_or_init_db(&vault_path)?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE id = ?1 AND recurrence_rule IS NOT NULL",
+            params![master_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if exists == 0 {
+        return Err(format!(
+            "Event `{}` not found or is not a recurring series.",
+            master_id
+        ));
+    }
+    let pk = resolve_override_pk(&conn, &master_id, instance_start_unix);
+    let now = unix_now();
+    conn.execute(
+        "INSERT INTO event_instance_overrides
+            (master_event_id, instance_start_unix, skipped, actual_minutes,
+             start_at_override, end_at_override,
+             created_at_unix, updated_at_unix)
+         VALUES (?1, ?2, 0, NULL, ?3, ?4, ?5, ?5)
+         ON CONFLICT(master_event_id, instance_start_unix) DO UPDATE SET
+             start_at_override = excluded.start_at_override,
+             end_at_override = excluded.end_at_override,
+             updated_at_unix = excluded.updated_at_unix",
+        params![master_id, pk, start_at, end_at, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Drop the override for one instance. Functionally equivalent to
-/// "revert to series default" (auto-credit, no skip). No-op if no
-/// override row existed.
+/// "revert to series default" (auto-credit, no skip, no time shift).
+/// No-op if no override row existed.
 #[tauri::command]
 fn delete_event_instance_override(
     vault_path: String,
@@ -6403,10 +6538,11 @@ fn delete_event_instance_override(
     instance_start_unix: i64,
 ) -> Result<(), String> {
     let conn = open_or_init_db(&vault_path)?;
+    let pk = resolve_override_pk(&conn, &master_id, instance_start_unix);
     conn.execute(
         "DELETE FROM event_instance_overrides
          WHERE master_event_id = ?1 AND instance_start_unix = ?2",
-        params![master_id, instance_start_unix],
+        params![master_id, pk],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -6421,21 +6557,25 @@ fn get_event_instance_override(
     instance_start_unix: i64,
 ) -> Result<Option<InstanceOverride>, String> {
     let conn = open_or_init_db(&vault_path)?;
+    let pk = resolve_override_pk(&conn, &master_id, instance_start_unix);
     let row = conn
         .query_row(
             "SELECT master_event_id, instance_start_unix, skipped, actual_minutes,
+                    start_at_override, end_at_override,
                     created_at_unix, updated_at_unix
              FROM event_instance_overrides
              WHERE master_event_id = ?1 AND instance_start_unix = ?2",
-            params![master_id, instance_start_unix],
+            params![master_id, pk],
             |row| {
                 Ok(InstanceOverride {
                     master_event_id: row.get(0)?,
                     instance_start_unix: row.get(1)?,
                     skipped: row.get::<_, i64>(2)? != 0,
                     actual_minutes: row.get(3)?,
-                    created_at_unix: row.get(4)?,
-                    updated_at_unix: row.get(5)?,
+                    start_at_override: row.get(4)?,
+                    end_at_override: row.get(5)?,
+                    created_at_unix: row.get(6)?,
+                    updated_at_unix: row.get(7)?,
                 })
             },
         )
@@ -8582,6 +8722,8 @@ pub fn run() {
             get_time_tracking_daily_rollup,
             // Cluster 14 v1.4 — daily-note splice
             regenerate_time_tracking_section,
+            // Cluster 14 v1.6 — per-instance time override (drag-shift)
+            set_event_instance_time_override,
             // Cluster 17 v1.1 — typedBlock title-bar Ctrl+Click target resolver
             resolve_typed_block_target,
             // Cluster 19 v1.0 — Image support

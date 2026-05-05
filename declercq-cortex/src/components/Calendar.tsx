@@ -412,13 +412,44 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
             categories={categories}
             onSlotDraft={openNewEvent}
             onEventClick={openExistingEvent}
-            onEventReposition={(ev, newStart, newEnd) => {
-              // Cluster 11 v1.6 — commit a drag-resize / drag-move
-              // by routing through saveEdit, which preserves every
-              // unchanged field and triggers reload + daily-note
-              // regen. Recurring events: shifts the whole series
-              // (master record). v1.6 doesn't ship per-instance
-              // time overrides — that's still a v1.3 backlog item.
+            onEventReposition={async (ev, newStart, newEnd) => {
+              // Cluster 11 v1.6 + Cluster 14 v1.6 — drag commit
+              // routing.
+              //
+              // Non-recurring events: route through saveEdit, which
+              // preserves every unchanged field and triggers reload
+              // + regenerate-daily-note.
+              //
+              // Recurring events: route through the per-instance
+              // time-override path so dragging one occurrence shifts
+              // ONLY that occurrence, not the whole series. This
+              // closes the v1.3 backlog item ("title/time overrides
+              // on a single instance"). instance_start_unix passed
+              // is the event's CURRENT start_at; the backend's
+              // resolve_override_pk handles the case where this
+              // instance has already been shifted (matches by
+              // start_at_override and updates the existing row
+              // instead of creating a duplicate).
+              //
+              // Skipped instances never reach this callback (they
+              // don't render); time + skip overrides compose on the
+              // same row via separate UPSERT command surfaces.
+              if (ev.recurrence_rule) {
+                try {
+                  await invoke("set_event_instance_time_override", {
+                    vaultPath,
+                    masterId: ev.id,
+                    instanceStartUnix: ev.start_at,
+                    startAt: newStart,
+                    endAt: newEnd,
+                  });
+                  reload();
+                  regenerateTodaysDailyNote();
+                } catch (e) {
+                  setError(`Save failed: ${e}`);
+                }
+                return;
+              }
               saveEdit({
                 id: ev.id,
                 title: ev.title,
