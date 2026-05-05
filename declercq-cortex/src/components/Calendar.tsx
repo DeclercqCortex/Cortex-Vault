@@ -257,6 +257,14 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
     skipped: boolean;
     actualMinutes: number | null;
     clear?: boolean;
+    /** Cluster 11 v1.7 — when present, also dispatch to
+     *  set_event_instance_title_override. Empty string clears the
+     *  column. */
+    titleOverride?: string;
+    /** Cluster 11 v1.7 — when both are present, also dispatch to
+     *  set_event_instance_time_override. */
+    startAtOverride?: number;
+    endAtOverride?: number;
   }) {
     try {
       if (args.clear) {
@@ -266,6 +274,7 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
           instanceStartUnix: args.instanceStartUnix,
         });
       } else {
+        // Skip / actual_minutes — existing v1.3 surface.
         await invoke("set_event_instance_override", {
           vaultPath,
           masterId: args.masterId,
@@ -273,6 +282,33 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
           skipped: args.skipped,
           actualMinutes: args.actualMinutes,
         });
+        // Cluster 11 v1.7 — title override. Dispatch only when the
+        // modal computed a delta vs the displayed master title; the
+        // command stores empty as NULL so the row's title_override
+        // column reverts to "inherit master."
+        if (args.titleOverride !== undefined) {
+          await invoke("set_event_instance_title_override", {
+            vaultPath,
+            masterId: args.masterId,
+            instanceStartUnix: args.instanceStartUnix,
+            titleOverride: args.titleOverride,
+          });
+        }
+        // Cluster 11 v1.7 — time override. Same v1.6 path the WeekView
+        // drag uses; reusing here lets a modal-typed time edit shift
+        // a single occurrence without renaming the whole series.
+        if (
+          args.startAtOverride !== undefined &&
+          args.endAtOverride !== undefined
+        ) {
+          await invoke("set_event_instance_time_override", {
+            vaultPath,
+            masterId: args.masterId,
+            instanceStartUnix: args.instanceStartUnix,
+            startAt: args.startAtOverride,
+            endAt: args.endAtOverride,
+          });
+        }
       }
       closeEdit();
       reload();

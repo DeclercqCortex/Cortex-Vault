@@ -35,15 +35,31 @@ interface EventEditModalProps {
     skipped: boolean;
     actualMinutes: number | null;
     clear?: boolean;
+    /** Cluster 11 v1.7 — when present, dispatched via
+     *  set_event_instance_title_override. undefined = "leave the
+     *  title-override column alone"; non-empty string = upsert; empty
+     *  string = clear the column back to NULL (and the instance reverts
+     *  to the master title). */
+    titleOverride?: string;
+    /** Cluster 11 v1.7 — when both are present, dispatched via
+     *  set_event_instance_time_override. undefined = "leave the time-
+     *  override columns alone." */
+    startAtOverride?: number;
+    endAtOverride?: number;
   }) => void;
 }
 
-/** Cluster 14 v1.3 — shape returned by `get_event_instance_override`. */
+/** Cluster 14 v1.3 — shape returned by `get_event_instance_override`.
+ *  Cluster 14 v1.6 added start_at_override / end_at_override.
+ *  Cluster 11 v1.7 added title_override. */
 interface InstanceOverride {
   master_event_id: string;
   instance_start_unix: number;
   skipped: boolean;
   actual_minutes: number | null;
+  start_at_override?: number | null;
+  end_at_override?: number | null;
+  title_override?: string | null;
   created_at_unix: number;
   updated_at_unix: number;
 }
@@ -282,11 +298,52 @@ export function EventEditModal({
       }
       actualNum = n;
     }
+    // Cluster 11 v1.7 — bundle title + time overrides on the same
+    // "Save just this" submit so a user can rename and / or shift one
+    // occurrence in a single click. We compare the modal inputs to the
+    // event's CURRENT displayed values (existingEvent.title /
+    // existingEvent.start_at / .end_at, which already reflect any
+    // active override). If they differ, we dispatch the corresponding
+    // override; otherwise we leave the columns alone so we don't
+    // re-write equivalent state.
+    let titleOverride: string | undefined = undefined;
+    let startAtOverride: number | undefined = undefined;
+    let endAtOverride: number | undefined = undefined;
+    if (!skipped) {
+      const trimmedTitle = title.trim();
+      if (!trimmedTitle) {
+        setError("Title is required.");
+        return;
+      }
+      if (trimmedTitle !== existingEvent.title) {
+        titleOverride = trimmedTitle;
+      }
+      const newStart = parseLocalInputValue(startLocal, allDay);
+      const newEnd = parseLocalInputValue(endLocal, allDay);
+      if (!Number.isFinite(newStart) || !Number.isFinite(newEnd)) {
+        setError("Start and end times are required.");
+        return;
+      }
+      if (newEnd <= newStart) {
+        setError("End must be after start.");
+        return;
+      }
+      if (
+        newStart !== existingEvent.start_at ||
+        newEnd !== existingEvent.end_at
+      ) {
+        startAtOverride = newStart;
+        endAtOverride = newEnd;
+      }
+    }
     onSaveInstanceOverride({
       masterId: existingEvent.id,
       instanceStartUnix,
       skipped,
       actualMinutes: actualNum,
+      titleOverride,
+      startAtOverride,
+      endAtOverride,
     });
   }
 
@@ -876,7 +933,7 @@ export function EventEditModal({
               <button
                 onClick={() => submitInstanceOverride(false)}
                 style={styles.btnPrimary}
-                title="Save override for this single occurrence (actual_minutes only)"
+                title="Save title / time / actual-minutes overrides for this single occurrence"
               >
                 Save just this
               </button>

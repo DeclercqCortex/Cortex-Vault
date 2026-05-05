@@ -1367,6 +1367,16 @@ fn open_or_init_db(vault_path: &str) -> Result<Connection, String> {
         [],
     );
 
+    // Cluster 11 v1.7 schema migration: add per-instance title
+    // override column. NULL = inherit master's title; non-NULL = the
+    // user renamed this single occurrence via the modal's "Save just
+    // this" path. Composes with the v1.3 / v1.6 override columns on
+    // the same row.
+    let _ = conn.execute(
+        "ALTER TABLE event_instance_overrides ADD COLUMN title_override TEXT",
+        [],
+    );
+
     // Cluster 3 schema migration: add injected_at column for tracking
     // pink marks that have already been carried into a daily note. The
     // ALTER TABLE will fail if the column already exists; ignore that.
@@ -5658,6 +5668,13 @@ pub struct InstanceOverride {
     /// would render an event with mismatched start/end).
     #[serde(default)]
     pub end_at_override: Option<i64>,
+    /// Cluster 11 v1.7 — when Some, expand_recurrence renders this
+    /// single occurrence with this title instead of the master's.
+    /// Empty string is treated identically to None at the modal
+    /// layer (clear-by-blank), so we never persist a literal empty
+    /// override string.
+    #[serde(default)]
+    pub title_override: Option<String>,
     pub created_at_unix: i64,
     pub updated_at_unix: i64,
 }
@@ -5671,7 +5688,7 @@ fn load_overrides_for_master(
     let mut stmt = conn
         .prepare(
             "SELECT master_event_id, instance_start_unix, skipped, actual_minutes,
-                    start_at_override, end_at_override,
+                    start_at_override, end_at_override, title_override,
                     created_at_unix, updated_at_unix
              FROM event_instance_overrides
              WHERE master_event_id = ?1",
@@ -5686,8 +5703,9 @@ fn load_overrides_for_master(
                 actual_minutes: row.get(3)?,
                 start_at_override: row.get(4)?,
                 end_at_override: row.get(5)?,
-                created_at_unix: row.get(6)?,
-                updated_at_unix: row.get(7)?,
+                title_override: row.get(6)?,
+                created_at_unix: row.get(7)?,
+                updated_at_unix: row.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -5839,9 +5857,20 @@ fn expand_recurrence(
                 Some(ov) => ov.actual_minutes.or(master.actual_minutes),
                 None => master.actual_minutes,
             };
+            // Cluster 11 v1.7 — title override: if the override row
+            // carries a non-empty title_override, render this single
+            // occurrence with that title. Empty string at this layer
+            // means "no override" (the modal clears via empty input).
+            let effective_title = match override_for_this {
+                Some(ov) => match &ov.title_override {
+                    Some(t) if !t.is_empty() => t.clone(),
+                    _ => master.title.clone(),
+                },
+                None => master.title.clone(),
+            };
             out.push(Event {
                 id: master.id.clone(),
-                title: master.title.clone(),
+                title: effective_title,
                 start_at: effective_start,
                 end_at: effective_end,
                 all_day: master.all_day,
@@ -6476,6 +6505,58 @@ fn set_event_instance_override(
     Ok(())
 }
 
+/// Cluster 11 v1.7 — upsert the title portion of an instance
+/// override. Touches only `title_override` and `updated_at_unix`.
+/// Empty input clears the override (sets the column back to NULL)
+/// so the modal's "Save just this" with the master title still in
+/// the input becomes a no-op for the title column. Refuses non-
+/// recurring masters.
+#[tauri::command]
+fn set_event_instance_title_override(
+    vault_path: String,
+    master_id: String,
+    instance_start_unix: i64,
+    title_override: String,
+) -> Result<(), String> {
+    if master_id.trim().is_empty() {
+        return Err("master_id required".into());
+    }
+    let conn = open_or_init_db(&vault_path)?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE id = ?1 AND recurrence_rule IS NOT NULL",
+            params![master_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if exists == 0 {
+        return Err(format!(
+            "Event `{}` not found or is not a recurring series.",
+            master_id
+        ));
+    }
+    let pk = resolve_override_pk(&conn, &master_id, instance_start_unix);
+    // Empty / whitespace-only input clears the override (NULL on disk).
+    let cleaned: Option<String> = if title_override.trim().is_empty() {
+        None
+    } else {
+        Some(title_override)
+    };
+    let now = unix_now();
+    conn.execute(
+        "INSERT INTO event_instance_overrides
+            (master_event_id, instance_start_unix, skipped, actual_minutes,
+             title_override, created_at_unix, updated_at_unix)
+         VALUES (?1, ?2, 0, NULL, ?3, ?4, ?4)
+         ON CONFLICT(master_event_id, instance_start_unix) DO UPDATE SET
+             title_override = excluded.title_override,
+             updated_at_unix = excluded.updated_at_unix",
+        params![master_id, pk, cleaned, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Cluster 14 v1.6 — upsert the time portion of an instance override.
 /// Used by the WeekView drag-on-recurring-instance commit. Touches
 /// only `start_at_override`, `end_at_override`, and `updated_at_unix`
@@ -6561,7 +6642,7 @@ fn get_event_instance_override(
     let row = conn
         .query_row(
             "SELECT master_event_id, instance_start_unix, skipped, actual_minutes,
-                    start_at_override, end_at_override,
+                    start_at_override, end_at_override, title_override,
                     created_at_unix, updated_at_unix
              FROM event_instance_overrides
              WHERE master_event_id = ?1 AND instance_start_unix = ?2",
@@ -6574,8 +6655,9 @@ fn get_event_instance_override(
                     actual_minutes: row.get(3)?,
                     start_at_override: row.get(4)?,
                     end_at_override: row.get(5)?,
-                    created_at_unix: row.get(6)?,
-                    updated_at_unix: row.get(7)?,
+                    title_override: row.get(6)?,
+                    created_at_unix: row.get(7)?,
+                    updated_at_unix: row.get(8)?,
                 })
             },
         )
@@ -8724,6 +8806,8 @@ pub fn run() {
             regenerate_time_tracking_section,
             // Cluster 14 v1.6 — per-instance time override (drag-shift)
             set_event_instance_time_override,
+            // Cluster 11 v1.7 — per-instance title override (modal rename)
+            set_event_instance_title_override,
             // Cluster 17 v1.1 — typedBlock title-bar Ctrl+Click target resolver
             resolve_typed_block_target,
             // Cluster 19 v1.0 — Image support
