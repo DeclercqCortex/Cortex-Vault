@@ -5005,3 +5005,809 @@ block the file open.
 ### Tag
 
 `cluster-14-v1.4-complete`.
+
+## Phase 3 — Cluster 11 v1.5 + Cluster 14 v1.5 — calendar layout polish + all-day exclusion
+
+Two clusters in one commit; the verify script applies two tags so
+each cluster's history captures its own change.
+
+### Cluster 11 v1.5 — calendar layout polish
+
+Three WeekView layout changes plus one MonthView parity tweak.
+
+1. **All-day events stay in the top all-day row.** The row already
+   existed (Cluster 16 v1.1.4); v1.5 just confirms the rule. No
+   code change in WeekView's all-day rendering.
+2. **Full-width overlay for time-grid overlap.** Pre-v1.5: when N
+   events overlapped at a given hour, column-packing split the day
+   into N vertical lanes (1/N width each). v1.5: every timed event
+   takes the FULL day-column width. Overlapping events stack via
+   z-index — later starts render on top so each block's title
+   appears at its own start time, above any earlier block that
+   extends past it. Same-start ties: shorter event on top so its
+   title stays visible. Implementation: `left: 0`,
+   `width: calc(100% - 6px)`, `zIndex: 1 + idx` (idx = position in
+   sorted array, sorted by start ASC then duration DESC),
+   `boxShadow: 0 0 0 1px var(--bg)` so a top layer reads as
+   separate. `layoutEventsForDay` simplified — drops the column-
+   packing algorithm entirely; returns `{ event, col: 0, cols: 1 }`
+   for every event.
+3. **Top-aligned wrapping block titles.** Was `whiteSpace: nowrap;
+   textOverflow: ellipsis`. v1.5: title wraps. Block uses
+   `display: flex; flexDirection: column; justifyContent:
+   flex-start` so the title sits at the block's start-time edge.
+   `wordBreak: break-word` for unbroken long words.
+   `overflow: hidden` clips wrapped text past the bottom edge. Net
+   effect: a 30-min block shows ~2 lines of a long title and clips;
+   a 2-h block shows the full title plus the time range.
+4. **MonthView all-day-first sort.** Each day cell's events are now
+   sorted with all-day events first so they appear at the top of
+   the cell, mirroring WeekView's dedicated row at the top of the
+   week grid.
+
+### Cluster 14 v1.5 — exclude all-day events from time tracking
+
+All-day events (vacation, holiday, anniversary, conference day) are
+markers, not work the user is tracking. Including them rolled 1440
+planned minutes per all-day-event into the totals — distorted
+category aggregates and ratio.
+
+v1.5 adds an early `if evt.all_day { continue; }` in three
+aggregator paths:
+
+- `get_time_tracking_aggregates` (Table view, pie, CSV export)
+- `get_time_tracking_daily_rollup` (Trends tab, sparklines)
+- `aggregate_time_tracking_in_window` (daily-note splice helper)
+
+All three use `collect_events_in_window`, which expands recurring
+series first; the per-iteration filter drops all-day events before
+any planned/actual contribution lands. So a recurring all-day
+series (e.g. annual holiday) renders in the WeekView all-day row
+but contributes nothing to Time tracking.
+
+Skipped recurring instances were already filtered upstream by
+`expand_recurrence` (Cluster 14 v1.3 override semantics) and stay
+filtered. All-day exclusion composes cleanly on top.
+
+UI copy: TimeTracking.tsx subtitle now says "All-day events are
+excluded." so the rule is visible without reading the source.
+
+### Architectural decision (shared)
+
+- **Visual signalling vs spatial signalling for overlap.** Column-
+  packing made overlap unmissable but ate horizontal space —
+  every event got narrower as overlap grew, and a heavy-overlap
+  day showed five 20%-wide slivers nobody could read. Z-index
+  stacking trades "you can see all blocks at full width" for
+  "the body of an earlier block disappears under a later block's
+  title until the later block ends." For a one-week view at a
+  glance, the latter is the right trade: the user sees what's
+  starting NOW prominently, with earlier-but-still-running
+  context bleeding through where the later events don't reach.
+
+### Files touched
+
+- `src/components/WeekView.tsx` — overlap layout simplification,
+  block style changes, top-alignment.
+- `src/components/MonthView.tsx` — sort all-day-first per cell.
+- `src/components/TimeTracking.tsx` — subtitle copy.
+- `src-tauri/src/lib.rs` — three `if evt.all_day { continue; }`
+  filters in the aggregator paths.
+- `verify-cluster-11-v1.5.ps1` — dual-tag verify script.
+
+### Tags
+
+`cluster-11-v1.5-complete`, `cluster-14-v1.5-complete`.
+
+## Phase 3 — Cluster 11 v1.6 — drag-resize and drag-move on calendar events
+
+Three drag operations on event blocks in WeekView, all with 15-min
+snap.
+
+### What ships
+
+- **Drag-resize from the BOTTOM edge.** Pull the bottom edge down
+  to extend `end_at`, up to shrink. Snaps to `DRAG_SNAP_MIN`
+  (15 min). Floors at `start_at + 15 min` so an event can't
+  collapse to zero or negative duration.
+- **Drag-resize from the TOP edge.** Symmetric — pull the top
+  edge up to extend `start_at` backward, down to shrink. Same
+  snap and floor (the floor is `end_at - 15 min`).
+- **Drag-move the body.** Drag the middle of an event block to
+  shift both `start_at` and `end_at` while preserving duration.
+  Cross-day move: drag the pointer into another day column and
+  the live preview hops to that day; on pointerup the event
+  commits to the new day.
+
+### Implementation
+
+- **Drag-kind detection** from `offsetY` in
+  `handleEventPointerDown`:
+  - top 8 px → `resize-top`
+  - bottom 8 px → `resize-bottom`
+  - else → `move`
+  For very short blocks (< 28 px) only `move` is allowed; the
+  user still has the modal for sub-15-min edits.
+- **During drag:** the dragged event renders at preview position
+  with 85% opacity and z-index 100 (above all peers). Its origin-
+  day render is suppressed during a cross-day move so the user
+  sees one live preview, not a duplicate.
+- **Window-level `pointermove` / `pointerup` listeners** attach
+  on dragstart and detach on dragend. Cross-column hit-testing
+  walks `dayColRefs` to find which day's column the pointer is
+  over.
+- **Click vs drag** is gated by a 4-px movement threshold. Below
+  threshold the click handler runs (open edit modal); above
+  threshold the click that follows pointerup is swallowed via
+  `swallowClickRef` so the modal doesn't pop after a drag commit.
+- **Read-only events** (Google-synced, `source === 'google'`) opt
+  out of drag entirely — pointerdown returns early, the click
+  path still opens the read-only modal.
+- **Recurring events** (in v1.6): a drag commits via
+  `update_event` on the master, shifting EVERY occurrence. v1.6
+  of Cluster 14 fixes this to use a per-instance time override;
+  see that section.
+- **Commit** routes through `Calendar.saveEdit` (via
+  `onEventReposition`) which preserves every other field
+  (`recurrence_rule`, `notify_*`, `actual_minutes`, body, status,
+  category) and triggers reload + daily-note regen.
+
+### Architectural decisions
+
+- **Pointer events not mouse events.** Pointer events capture
+  touch + pen + mouse uniformly and don't fire phantom click
+  events on a long touch. Tauri's WebView is Chromium so pointer
+  is reliable.
+- **Window-level listeners during drag.** A pointer that leaves
+  the day-column wouldn't fire move events on the column itself.
+  Window listeners ensure we always get the move/up signal,
+  including when the pointer crosses out of the calendar entirely
+  (we then snap-to-edge for the preview but still commit on up).
+- **Snap on the preview, not just on commit.** The user sees the
+  block move in 15-min increments rather than pixel-by-pixel; the
+  visual feedback matches the eventual commit.
+
+### Files touched
+
+- `src/components/WeekView.tsx` — pointer handlers, preview
+  rendering, drag-kind state, window-listener wiring,
+  cross-column hit-testing.
+- `src/components/Calendar.tsx` — `onEventReposition` callback,
+  `saveEdit` plumbing.
+- `verify-cluster-11-v1.6.ps1`.
+
+### Tag
+
+`cluster-11-v1.6-complete`.
+
+## Phase 3 — Cluster 14 v1.6 — per-instance time overrides via drag
+
+Closes a v1.3 backlog item that became visible the moment Cluster
+11 v1.6 shipped: dragging a single occurrence of a recurring event
+in v1.6 routed through `update_event` on the master and shifted
+EVERY occurrence — surprising for a user who only meant to nudge
+one Wednesday.
+
+### Schema migration
+
+Idempotent ALTER TABLE adds two nullable columns to
+`event_instance_overrides`:
+
+- `start_at_override INTEGER` — UTC unix seconds; the instance's
+  new start time
+- `end_at_override INTEGER` — UTC unix seconds; the instance's
+  new end time
+
+Both must be `Some` for the override to apply (a half-set state
+is treated as "no time override" and falls back to the master-
+computed times — defensive for partial writes).
+
+`InstanceOverride` Rust struct gains the two fields; serde
+defaults to None for legacy rows.
+
+### Recurrence expansion
+
+`expand_recurrence`'s `push_instance` closure applies the time
+override AFTER the skipped check and BEFORE the window filter:
+
+```
+let (effective_start, effective_end) = match (start_or, end_or) {
+    (Some(s), Some(e)) if e > s => (s, e),
+    _ => (computed_start, computed_start + duration),
+};
+```
+
+The window check uses the EFFECTIVE times, so a drag can move an
+occurrence into or out of the visible range and the calendar
+updates accordingly.
+
+### `resolve_override_pk` helper
+
+```
+resolve_override_pk(conn, master_id, instance_start_unix) -> i64
+```
+
+- if a row exists where `start_at_override === input` → return
+  that row's PK (the original computed start)
+- else → return the input (it IS the original computed start)
+
+Used by every override-mutation surface (`set` / `delete` / `get`
+/ `time-set`) so the modal "Save just this" path and a re-drag
+commit stay coherent against the same row. This is the linchpin
+that makes "drag a previously-shifted instance again" not create
+a second override row.
+
+### New Tauri command
+
+`set_event_instance_time_override(vault_path, master_id,
+instance_start_unix, start_at, end_at)` — UPSERT touching only
+`start_at_override` + `end_at_override` + `updated_at_unix`.
+Existing `skipped` / `actual_minutes` values survive.
+
+Existing override commands (`set_event_instance_override`,
+`delete_event_instance_override`, `get_event_instance_override`)
+now use `resolve_override_pk` to handle both fresh inputs and
+previously-shifted starts.
+
+### Frontend
+
+`Calendar.tsx`'s `onEventReposition` callback (passed into
+WeekView) now branches on `ev.recurrence_rule`:
+
+- non-recurring → existing `saveEdit` path (whole-event update
+  via `update_event`).
+- recurring → `set_event_instance_time_override` with the event's
+  CURRENT `start_at` as `instance_start_unix`. The backend
+  resolves to the right PK whether this is a first drag or a
+  re-drag.
+
+Both paths trigger `reload()` + `regenerateTodaysDailyNote()`.
+
+### Architectural decisions
+
+- **Per-column UPSERTs are orthogonal.** Every override-mutation
+  command touches only its own columns and `updated_at_unix`,
+  leaving the rest alone. This is what makes "skip just this" +
+  "drag time" + "set actual_minutes 25" compose into a single row
+  with all four columns set.
+- **`resolve_override_pk` lives in Rust, not the frontend.** The
+  frontend doesn't need to know that an instance has been
+  previously shifted; it just sends the event's current
+  `start_at`. The backend disambiguates. This keeps the override-
+  table internals invisible to UI code.
+
+### Files touched
+
+- `src-tauri/src/lib.rs` — schema migration, `InstanceOverride`,
+  `expand_recurrence`, `resolve_override_pk`,
+  `set_event_instance_time_override`, mutations of three existing
+  override commands.
+- `src/components/Calendar.tsx` — `onEventReposition` branches
+  on `recurrence_rule`.
+- `verify-cluster-14-v1.6.ps1`.
+
+### Tag
+
+`cluster-14-v1.6-complete`.
+
+## Phase 3 — Cluster 11 v1.7 — per-instance title overrides + modal time editor
+
+Closes two pieces from the v1.3 / v1.6 backlog:
+
+- **Per-instance title override.** Rename one occurrence of a
+  recurring series via the modal's "Save just this" path (one
+  Wednesday standup becomes "Demo prep" while every other day
+  stays "Standup").
+- **Modal time editor for instance mode.** When the user changes
+  start / end time inputs in the modal AND clicks "Save just
+  this", that single occurrence shifts (same backend path as the
+  v1.6 drag). Was previously a no-op — the modal silently
+  dropped time edits in instance mode.
+
+### Schema migration
+
+Idempotent ALTER TABLE adds one column to
+`event_instance_overrides`:
+
+- `title_override TEXT` — NULL = inherit `master.title`; non-NULL
+  = render this single occurrence with the override's title.
+
+`InstanceOverride` struct + `load_overrides_for_master` SELECT
+updated to include the new column. `expand_recurrence`'s
+`push_instance` closure renders an `effective_title` from the
+override row (when non-empty) and writes it to the expanded
+Event's title field — same shape as the existing time / actual
+override branches.
+
+`get_event_instance_override` SELECT also reads `title_override`
+so a future v1.8 modal can preview existing overrides.
+
+### New Tauri command
+
+`set_event_instance_title_override(vault_path, master_id,
+instance_start_unix, title_override)`:
+
+- UPSERT touching only `title_override` + `updated_at_unix`
+- Empty / whitespace-only input clears the column to NULL (so
+  the instance reverts to the master title)
+- Refuses non-recurring masters
+- Uses `resolve_override_pk` so it matches the existing row even
+  if the input is a v1.6-shifted start (a previously time-
+  overridden instance can still be renamed)
+
+### Frontend — bundled instance dispatch
+
+`EventEditModal`:
+
+- `onSaveInstanceOverride` arg shape grows three optional fields:
+  `titleOverride`, `startAtOverride`, `endAtOverride`. All three
+  are `undefined` by default, meaning "leave the column alone."
+- `submitInstanceOverride(false)` (the "Save just this" handler)
+  bundles the deltas. Compared against the DISPLAYED values
+  (which already include any active override), so equivalent
+  state is a no-op:
+  - title differs from `existingEvent.title` → `titleOverride =
+    trimmed input`
+  - start / end differ → `startAtOverride` / `endAtOverride`
+- "Save just this" button text updated to reflect the broader
+  scope.
+
+`Calendar.saveInstanceOverride`:
+
+- Sequence per submit (skipping branches whose deltas are
+  undefined):
+  1. `set_event_instance_override` (skip / actual_minutes —
+     existing v1.3)
+  2. `set_event_instance_title_override` (when `titleOverride`
+     present)
+  3. `set_event_instance_time_override` (when start+end present)
+- All three commands resolve to the same row via
+  `resolve_override_pk`. Reload + regenerate-daily-note runs
+  once at the end.
+
+### Composition rule
+
+A single override row can carry: `skipped`, `actual_minutes`,
+`start_at_override`, `end_at_override`, `title_override`. Setting
+one leaves the others untouched (per-column UPSERTs are
+orthogonal). "Clear override" still wipes the entire row via
+`delete_event_instance_override` — there's no per-column clear
+UI in v1.7.
+
+### Files touched
+
+- `src-tauri/src/lib.rs` — migration, struct field, expand
+  branch, new command, registration.
+- `src/components/EventEditModal.tsx` — bundled arg shape, delta
+  detection, button copy.
+- `src/components/Calendar.tsx` — `saveInstanceOverride`
+  three-step dispatch.
+- `verify-cluster-11-v1.7.ps1`.
+
+### Tag
+
+`cluster-11-v1.7-complete`.
+
+## Phase 3 — Cluster 19 v1.1 — image flip controls
+
+Two new boolean attributes on the cortexImage TipTap atom node and
+matching context-menu entries.
+
+### What ships
+
+- **`flipH`** (horizontal mirror, `scaleX(-1)`)
+- **`flipV`** (vertical mirror, `scaleY(-1)`)
+
+Both attrs round-trip via `data-flip-h="1"` / `data-flip-v="1"`
+through tiptap-markdown's `html: true`, the same way rotation,
+width, and wrap mode do. False (default) emits no attr, keeping
+simple cases clean on disk.
+
+`CortexImageNodeView` composes flip with rotation in a single
+CSS transform string: `rotate(Xdeg) scale(±1, ±1)`. Order is
+rotate-then-scale so a rotated-and-flipped image mirrors across
+the rotated axes (matches Photoshop / Figma compose order).
+Identity (no rotation, no flip) emits no transform at all.
+
+`ImageContextMenu` grows a "Flip" section with two toggles:
+
+- "Flip horizontal" (active dot when `flipH` is true)
+- "Flip vertical" (active dot when `flipV` is true)
+
+Both toggle the corresponding attr on click.
+`handleImageMenuAction` reads the current value from the LIVE doc
+(not the menu snapshot) before flipping, so a rapid double-toggle
+ends back at identity rather than racing on stale state.
+
+### Architectural decision
+
+- **Flip is a transform attr, not a separate node.** Could have
+  been a "flipped" wrapper node, but that would interact poorly
+  with rotation (which is also a transform attr) — you'd have to
+  decide whether rotation lives on the wrapper or the inner. As
+  attrs they compose naturally: one CSS string, one node, one
+  set of crop/wrap interactions.
+
+### Files touched
+
+- `src/components/CortexImageNodeView.tsx` — attr defs,
+  transform compose.
+- `src/components/ImageContextMenu.tsx` — Flip section, active
+  dots.
+- `src/App.tsx` (or wherever `handleImageMenuAction` lives) —
+  toggle reads live doc value.
+- `verify-cluster-19-v1.1.ps1`.
+
+### Tag
+
+`cluster-19-v1.1-complete`.
+
+## Phase 3 — Cluster 19 v1.2 — non-destructive crop + orphan-attachments GC + multi-select
+
+Closes the v1.0.3 backlog ("orphan-attachments GC, crop / flip
+controls, multi-select"). Flip already shipped in v1.1; v1.2 adds
+the remaining three.
+
+### 1) Crop image — non-destructive
+
+Crop is now stored as four attrs on the cortexImage node —
+`cropX`, `cropY`, `cropW`, `cropH` (in NATURAL pixels) — and
+round-trips via `data-crop-x/y/w/h`. The image's `src` never
+changes; the original bytes stay on disk; re-cropping always
+opens the modal on the original. All four attrs must be non-null
+for the crop to apply (defensive partial-set fallback).
+
+**Render.** When crop is active and the image's natural
+dimensions have loaded, the NodeView wraps `<img>` in a
+crop-wrapper with `overflow: hidden` and dimensions =
+`(cropW, cropH)` at scale; the inner img is positioned at
+`(-cropX, -cropY)` with displayed size = `naturalW` at scale, so
+only the crop region is visible. Rotation + flip transforms move
+from the `<img>` to the crop-wrapper so the rotation rotates the
+CROPPED result (matches "rotate this photo I just cropped"
+mental model), not the full natural image inside the clip
+window.
+
+**Modal.** `CropModal` seeds its rect from any existing
+`cropX/Y/W/H` attrs the host passes via the new `initialCrop`
+prop. The displayed image is always the ORIGINAL, so re-cropping
+shows where the current crop sits and the user can drag to
+expand outward as well as shrink inward. Apply → modal calls
+back with the new `{x, y, w, h}` rect; the host writes the four
+attrs. Reset → modal calls back with `null`; the host clears the
+four attrs (image reverts to un-cropped). Cancel → close, no
+change.
+
+The previous `save_cropped_image` Tauri command and the
+canvas → `toBlob` → bytes path are gone from the frontend (the
+command is still registered in `invoke_handler` for backwards-
+compat with notes that reference cropped files written under the
+destructive scheme; those files render normally as plain images).
+No new files are written when a user crops in v1.2.
+
+**Composition with other attrs.** Rotation / flip / wrap /
+annotation carry through unchanged. `width` resets to null on
+Apply so the user-set pixel width (which referenced the previous
+`cropW`'s natural aspect) doesn't carry over confusingly; the
+new cropped image then displays at its natural `cropW × cropH`
+until the user resizes again.
+
+### 2) Orphan-attachments GC
+
+**Backend.** `find_orphan_attachments(vault_path)` walks the
+vault via `walkdir::WalkDir`; for each `*.md` file it checks the
+companion `<note-stem>-attachments/` directory and lists files
+whose `<dir-basename>/<file>` relative path doesn't appear as a
+substring in the note's text. Returns `Vec<OrphanAttachment>`
+with `note_path` / `note_relative` / `attachment_path` /
+`attachment_relative` / `file_size`. Stable sort (note_relative
+ASC, then attachment ASC).
+
+**Backend.** `delete_orphan_attachment(vault_path,
+attachment_path)` — vault-prefix safety check, then
+`fs::remove_file`.
+
+**Frontend.** `OrphanAttachmentsModal` lists the orphans. Each
+row shows note path, attachment relative path, file size, and a
+Delete button. After delete, the row is removed from the
+in-memory list. Reload button re-runs the scan.
+
+**Trigger.** `Ctrl+Shift+O` opens the modal globally
+(App.tsx keyboard handler, gated behind no-modifier-key
+conflicts). New shortcut documented in `ShortcutsHelp`.
+
+**Caveat (documented in modal copy).** A freshly-dropped image
+that hasn't been saved yet is technically orphaned — the .md on
+disk doesn't reference it. Save the note before running the GC.
+
+### 3) Multi-select on images
+
+`imageMultiSelect` ProseMirror plugin in
+`src/editor/imageMultiSelect.ts`. State is a `Set<number>` of
+cortexImage positions in the doc, updated via three meta kinds:
+`toggle`, `clear`, `set`. On every doc change the plugin remaps
+stored positions through the transaction's mapping and drops any
+that no longer point at a cortexImage node.
+
+**Decorations.** `Decoration.node` with class
+`cortex-image-multi-selected`. The NodeView's wrapper picks up
+the class; CSS in `src/index.css` renders the visible ring.
+
+**Click handler.**
+
+- **`Alt+click`** on a cortexImage toggles its position in the
+  set. Ctrl/Cmd is deliberately NOT bound — that modifier is the
+  annotation-edit popover trigger from Cluster 19 v1.0.2 and
+  binding multi-select to it would silently steal annotation
+  edits whenever the set was non-empty.
+- **Plain click** on any image (no modifier) clears the set if
+  non-empty and falls through so the default ProseMirror
+  NodeSelection still takes effect.
+
+> **Implementation note** — the on-image Alt+click toggle is
+> dispatched from `CortexImageNodeView`'s React `onClick`, NOT
+> from the PM plugin's `handleClickOn`. In left/right/break wrap
+> modes the NodeView wrapper carries `data-drag-handle` (TipTap
+> drag protocol). HTML5 drag-prep on mousedown with Alt held
+> intercepts the click before PM's click pipeline runs, so
+> `handleClickOn` was silently dropped. The React onClick is a
+> plain DOM click and fires reliably regardless of drag-handle
+> wiring.
+
+**Key handlers.**
+
+- `Esc` → clear the set (if non-empty), consume.
+- `Delete` / `Backspace` → delete every selected node in
+  REVERSE position order so position offsets stay valid through
+  the successive transactions, then clear, consume.
+
+### Architectural decisions
+
+- **Non-destructive crop over destructive save.** v1.0 wrote a
+  cropped JPG/PNG to `<note>-attachments/` and rewrote the `src`.
+  This burned the crop into bytes — re-cropping was lossy
+  (re-cropping a JPEG's already-JPEG result re-compresses), and
+  expanding a crop required keeping the original around anyway.
+  Storing crop as attrs sidesteps both: original is the only
+  bitmap, every render computes the crop, re-cropping is always
+  on the original. The price is "cropped image at render time
+  has to know natural dimensions before it can compute the
+  clip" — handled by the NodeView's `onLoad` / `naturalWidth`
+  read.
+- **Alt+click for multi-select toggle.** Ctrl was reserved for
+  annotation; Shift was reserved for snap (rotation), and a
+  range-select on images doesn't make sense (images don't have
+  a linear order in a doc that's also full of text). Alt is
+  free and OS-conventional for "modify the modifier", which
+  fits "modify the click into a toggle".
+- **Multi-select operations beyond delete deferred.** Move /
+  resize / wrap / rotate / flip apply only to the topmost
+  single-selected image in v1.2; drag/resize/rotate handles
+  hide for multi-selected images. Beyond-delete bulk ops are
+  on the v1.3 backlog.
+
+### Files touched
+
+- `src-tauri/src/lib.rs` — `find_orphan_attachments`,
+  `delete_orphan_attachment`, `OrphanAttachment` struct,
+  `invoke_handler` registrations.
+- `src/components/CortexImageNodeView.tsx` — crop attrs +
+  crop-wrapper render + transform retargeting.
+- `src/components/CropModal.tsx` — `initialCrop` prop, original-
+  image background, Apply/Reset/Cancel callbacks.
+- `src/components/ImageContextMenu.tsx` — "Crop image…" entry.
+- `src/components/OrphanAttachmentsModal.tsx` — new file.
+- `src/editor/imageMultiSelect.ts` — new file.
+- `src/index.css` — `.cortex-image-multi-selected` ring.
+- `src/App.tsx` — Ctrl+Shift+O wiring, modal mount, plumbing
+  through to the active TabPane editor.
+- `src/components/ShortcutsHelp.tsx` — Ctrl+Shift+O row.
+- `verify-cluster-19-v1.2.ps1`.
+
+### Tag
+
+`cluster-19-v1.2-complete`.
+
+## Phase 3 — Cluster 19 v1.3 — multi-select-aware ops + bulk delete in orphan modal + live crop preview thumbnail
+
+Closes three of the four v1.2 backlog items. The fourth (drag the
+crop region directly on the image, in-place) is deferred to v1.4
+since it would essentially be a new ProseMirror plugin / NodeView
+mode and warrants a session of its own.
+
+### 1) Multi-select-aware ops beyond delete
+
+In v1.2, multi-select (Alt+click) selected images, but only Delete /
+Backspace acted on the set. Right-click → context menu still acted
+on a SINGLE image — whichever the user right-clicked. v1.3 lifts
+the menu into multi-aware mode.
+
+**Behaviour.** When right-clicking an image that is in the active
+multi-selection, the context menu acts on EVERY selected image. The
+menu header reads "N images selected" (above the existing section
+labels) and per-action behaviour is:
+
+- Wrap left / right / break / free → set wrap on all
+- Reset rotation → `rotation = 0` on all
+- Reset position → `freeX = freeY = null` on all
+- Reset width → `width = null` on all
+- Flip horizontal → toggle `flipH` per image
+- Flip vertical → toggle `flipV` per image
+- Delete → delete all (bulk, in REVERSE position order via
+  `deleteImagesBulk`)
+- Crop image… → DISABLED (single-image inherent)
+- Edit / add annotation… → DISABLED (single-image inherent)
+
+Right-clicking an image that is NOT in the multi-set drops the
+multi-set (mirrors the v1.2 plain-click behaviour) and the menu
+falls back to single-image mode.
+
+### Architecture
+
+**`computeMultiSnapshot(doc, positions)`** — module-level helper in
+Editor.tsx that walks the multi-set's positions and returns an
+`ImageContextMenuMulti` object:
+
+```
+{
+  count: number;
+  commonWrap: CortexImageWrap | null;  // null when heterogeneous
+  allFlipH: boolean;                    // every image has flipH=true
+  allFlipV: boolean;                    // every image has flipV=true
+  anyRotated: boolean;                  // ≥1 has non-zero rotation
+  anyFree: boolean;                     // ≥1 in free wrap with coords
+  anyHasWidth: boolean;                 // ≥1 has non-null width
+}
+```
+
+The "all/any" split matches the menu's needs: leading-dot consensus
+(only on when ALL match) for wrap and flip; enable rules
+(`disabled` when NONE qualify) for the three Reset entries.
+
+**`patchImageAttrsBulk(positions, patchOrFn)`** — applies a static
+patch object, OR a function `(currentAttrs) => patch`, to every
+cortexImage at the given positions in a single transaction. The
+function form is used by flip-h / flip-v so each image's own
+current attr is read independently — three images at `[T, F, T]`
+become `[F, T, F]` after one toggle, not `[F, F, F]`.
+
+**`deleteImagesBulk(positions)`** — deletes in REVERSE position
+order in a single transaction so each delete doesn't shift the
+offsets of the ones still to come. Also dispatches a `clear` meta
+on `imageMultiSelectKey` since the positions it referred to are
+gone.
+
+**Menu-open snapshot.** `Editor.tsx`'s `onMenu` listener captures
+the multi-set at the moment of right-click:
+
+- If the right-clicked pos is in the set AND `set.size > 1`:
+  store the sorted positions, compute the consensus snapshot,
+  open the menu with `multi !== null`.
+- Else: drop any active multi-set (`setMeta(...)` clear), store
+  `[pos]`, open the menu with `multi === null`.
+
+This means a right-click with a stale multi-set on an unrelated
+image clears the rings and acts on just that image — predictable
+even when the user has built up a stale selection.
+
+**ImageContextMenu** accepts a new `multi` prop (the snapshot
+above, or null for single mode). When non-null, it renders an
+"N images selected" header and switches every leading-dot /
+disabled-state predicate from `attrs.X` to the consensus from
+`multi`.
+
+### 2) Checkbox-driven bulk delete in OrphanAttachmentsModal
+
+v1.2 had per-row Delete + a "Delete all" sweep. v1.3 adds the
+middle ground: select a subset and delete just those.
+
+- New leftmost column with per-row checkbox.
+- Header row's leftmost cell is a tri-state "select all" checkbox:
+  - all checked when `selected.size === orphans.length` (and
+    non-zero)
+  - none checked when `selected.size === 0`
+  - indeterminate otherwise — set imperatively via a ref since
+    HTML checkboxes don't have an indeterminate attribute
+- Clicking the header checkbox flips all-or-none.
+- New "Delete selected (N)" toolbar button between Refresh and
+  Delete all. Disabled when `N === 0`. Confirms with a count + size
+  total before deleting; sequences the deletes; surfaces failures
+  in a single error block.
+- Per-row Delete and "Delete all" preserved (regression-free).
+- `selected` is reset on every refresh (the underlying paths may
+  have changed) and after each successful delete (so a re-click on
+  Delete selected doesn't try to re-delete a now-gone path).
+
+### 3) Live crop preview thumbnail in CropModal
+
+Small `<canvas>` in the modal's status row, scaled to fit within
+160 × 120 px while preserving the rect's aspect.
+
+A `useEffect` redraws on every change to `rect` / `natural` /
+`thumbDims.{w,h}` via:
+
+```
+ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h,
+              0, 0, thumbDims.w, thumbDims.h);
+```
+
+Native dimensions are taken from the same `<img>` the modal
+renders for the main view, so cross-origin and load-state concerns
+are already handled by the time the rect is interactive. A defensive
+try/catch guards against the (rare) cross-origin-tainted-canvas case.
+
+The thumbnail is wrapped with a "PREVIEW" label so the panel is
+self-documenting; placeholder size before the rect lands matches
+the 160 × 120 default so layout stays stable.
+
+### Architectural decisions
+
+- **Per-image flip toggle in multi-mode, not majority-vote.** With
+  three images at `[T, F, T]`, the user pressing "Flip horizontal"
+  could mean either "flip each to its opposite" (`[F, T, F]`) or
+  "set all to NOT majority" (`[F, F, F]`). The first is what a
+  selection of three independent toggles would do in any other
+  desktop app; the second is overloaded with the common case
+  "homogenise this set." Per-image is the more predictable
+  reading and the bulk-patch function-form is the cleanest way
+  to express it.
+- **Drop-the-set-on-stranger-right-click.** Right-clicking an
+  image NOT in the multi-set could either (a) silently keep the
+  set and act on just the right-clicked one, or (b) clear the
+  set and act on just the right-clicked one. (a) makes the rings
+  on the previously-selected images surprising state — the user
+  sees three selected images but the action affects only one;
+  the "selected" visual is now lying. (b) is a small cost
+  (re-Alt+click to rebuild) but keeps the visual indicator
+  honest. Going with (b).
+- **Crop / Edit annotation disabled in multi-mode.** Both are
+  inherently single-image: crop opens a modal seeded with one
+  image's dimensions; annotations are per-image text. Multi-mode
+  versions of either would be conceptually awkward (which image
+  does the modal show? edit one annotation that applies to all?
+  edit each in turn?), so the v1.3 shape is to disable.
+- **Reset rotation / position / width are "any of" enabled.** If
+  even one image has rotation, the menu enables Reset rotation;
+  applying the bulk patch sets every image's rotation to 0
+  (no-op for the ones already at 0). Cleaner than computing
+  per-image enable states inside the menu, and matches the user
+  intent "I want all of these at zero, regardless of where they
+  are now."
+- **Tri-state checkbox indeterminate via ref.** HTML checkbox's
+  `indeterminate` is a property, not an attribute, so React's
+  declarative `checked={...}` doesn't surface it. The standard
+  React idiom is `useEffect` + `headerCheckRef.current.indeterminate
+  = ...`, which is what we use.
+- **Live preview canvas vs reusing the main image element.** A
+  CSS-cropped clone of the same `<img>` would technically work
+  for the preview, but composing transforms (rotation/flip) at
+  thumbnail scale gets awkward. The canvas path takes the rect
+  directly out of the image's natural pixels and downscales
+  inside `drawImage`, giving a clean copy of "what the cropped
+  output will look like" without inheriting any of the modal's
+  preview-scale baggage.
+
+### Files touched
+
+- `src/components/ImageContextMenu.tsx` — `multi` prop +
+  `ImageContextMenuMulti` interface, multi-mode header,
+  consensus-aware leading-dot / disabled logic, "N images" entries,
+  `title` attr on disabled items.
+- `src/components/Editor.tsx` — `imageMultiSelectKey` import,
+  `imageMenu` state grows `positions` + `multi`, `onMenu` capture
+  logic, `computeMultiSnapshot` helper, `patchImageAttrsBulk` and
+  `deleteImagesBulk` helpers, multi-aware `handleImageMenuAction`.
+- `src/components/OrphanAttachmentsModal.tsx` — `selected` set,
+  `headerCheckRef` for indeterminate, `toggleRow` / `toggleAll` /
+  `deleteSelected`, checkbox column in `<thead>` + `<tbody>`,
+  "Delete selected (N)" toolbar button, optimistic update on
+  per-row delete drops the path from `selected`.
+- `src/components/CropModal.tsx` — `previewCanvasRef`,
+  `MAX_THUMB_W` / `MAX_THUMB_H` constants, `thumbDims` IIFE,
+  redraw `useEffect`, `<canvas>` element + `thumbWrap` /
+  `thumbLabel` styles in the status row.
+- `verify-cluster-19-v1.3.ps1`.
+
+### Tag
+
+`cluster-19-v1.3-complete`.

@@ -1,8 +1,9 @@
-// OrphanAttachmentsModal — Cluster 19 v1.2.
+// OrphanAttachmentsModal — Cluster 19 v1.2; bulk-select added v1.3.
 //
 // Vault-maintenance modal: lists files inside `<note-stem>-attachments/`
 // directories that aren't referenced from their parent note's content.
-// User can per-row delete or "Delete all". Triggered by Ctrl+Shift+O
+// User can per-row delete, multi-select via checkboxes and "Delete
+// selected", or sweep with "Delete all". Triggered by Ctrl+Shift+O
 // from App.tsx (and listed in ShortcutsHelp).
 //
 // Detection rule mirrors the backend (`find_orphan_attachments`): an
@@ -13,9 +14,9 @@
 //
 // Safety: delete_orphan_attachment refuses paths outside the vault
 // (the backend re-validates). The modal asks for confirmation before
-// "Delete all".
+// "Delete selected" / "Delete all".
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 interface OrphanAttachment {
@@ -46,11 +47,19 @@ export function OrphanAttachmentsModal({
   const [orphans, setOrphans] = useState<OrphanAttachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
+  // Cluster 19 v1.3 — set of `attachment_path` strings the user has
+  // checked. Cleared on every successful delete + on every refresh
+  // (the underlying paths may have changed). The header checkbox
+  // ties to a tri-state derived from this set vs the current orphan
+  // list.
+  const [selected, setSelected] = useState<Set<string>>(new Set<string>());
+  const headerCheckRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     if (!vaultPath) return;
     setError(null);
     setOrphans(null);
+    setSelected(new Set<string>());
     try {
       const list = await invoke<OrphanAttachment[]>("find_orphan_attachments", {
         vaultPath,
@@ -75,9 +84,50 @@ export function OrphanAttachmentsModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [isOpen, refresh, onClose]);
 
+  // Cluster 19 v1.3 — tri-state header checkbox.
+  // unchecked  : selected.size === 0
+  // checked    : selected.size === orphans.length (and orphans.length > 0)
+  // indeterminate : 0 < selected.size < orphans.length
+  // Native checkboxes don't have an HTML attribute for indeterminate;
+  // we set it imperatively via a ref.
+  const allChecked = useMemo(
+    () => !!orphans && orphans.length > 0 && selected.size === orphans.length,
+    [orphans, selected],
+  );
+  const noneChecked = selected.size === 0;
+  useEffect(() => {
+    const el = headerCheckRef.current;
+    if (!el) return;
+    el.indeterminate = !allChecked && !noneChecked;
+  }, [allChecked, noneChecked]);
+
   if (!isOpen) return null;
 
   const totalBytes = orphans?.reduce((sum, o) => sum + o.file_size, 0) ?? 0;
+  const selectedBytes = orphans
+    ? orphans.reduce(
+        (sum, o) => (selected.has(o.attachment_path) ? sum + o.file_size : sum),
+        0,
+      )
+    : 0;
+
+  function toggleRow(o: OrphanAttachment) {
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(o.attachment_path)) next.delete(o.attachment_path);
+      else next.add(o.attachment_path);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    if (!orphans) return;
+    if (allChecked) {
+      setSelected(new Set<string>());
+    } else {
+      setSelected(new Set(orphans.map((o) => o.attachment_path)));
+    }
+  }
 
   async function deleteOne(o: OrphanAttachment) {
     setBusy(true);
@@ -93,10 +143,65 @@ export function OrphanAttachmentsModal({
       setOrphans((cur) =>
         cur ? cur.filter((x) => x.attachment_path !== o.attachment_path) : cur,
       );
+      // Drop from the selected set so a follow-up "Delete selected"
+      // doesn't try to re-delete a now-gone path.
+      setSelected((cur) => {
+        if (!cur.has(o.attachment_path)) return cur;
+        const next = new Set(cur);
+        next.delete(o.attachment_path);
+        return next;
+      });
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Cluster 19 v1.3 — delete every orphan whose attachment_path is in
+  // `selected`. Confirms first; sequences the deletes; surfaces
+  // errors. Optimistic local update on each success so partial
+  // failures still leave the rest of the list correct.
+  async function deleteSelected() {
+    if (!orphans || selected.size === 0) return;
+    if (
+      !window.confirm(
+        `Delete ${selected.size} selected orphan attachment${
+          selected.size === 1 ? "" : "s"
+        } (${formatBytes(selectedBytes)})? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const failed: string[] = [];
+    // Snapshot the targets so the ordered iteration is stable even as
+    // setOrphans optimistic updates fire in between awaits.
+    const targets = orphans.filter((o) => selected.has(o.attachment_path));
+    for (const o of targets) {
+      try {
+        await invoke("delete_orphan_attachment", {
+          vaultPath,
+          attachmentPath: o.attachment_path,
+        });
+        setOrphans((cur) =>
+          cur
+            ? cur.filter((x) => x.attachment_path !== o.attachment_path)
+            : cur,
+        );
+        setSelected((cur) => {
+          const next = new Set(cur);
+          next.delete(o.attachment_path);
+          return next;
+        });
+      } catch (e) {
+        failed.push(`${o.attachment_relative}: ${e}`);
+      }
+    }
+    setBusy(false);
+    if (failed.length > 0) {
+      setError(`Some deletes failed:\n${failed.join("\n")}`);
     }
   }
 
@@ -159,6 +264,19 @@ export function OrphanAttachmentsModal({
               {orphans.length === 1 ? "" : "s"} · {formatBytes(totalBytes)}
             </span>
           )}
+          {/* Cluster 19 v1.3 — delete just the checked subset. Disabled
+              when nothing is selected. Sits between Refresh and Delete
+              all so the user sees the scoped option before the sweep. */}
+          {orphans && orphans.length > 0 && (
+            <button
+              onClick={deleteSelected}
+              style={styles.btnDanger}
+              disabled={busy || selected.size === 0}
+              title="Delete every orphan you've checked"
+            >
+              Delete selected ({selected.size})
+            </button>
+          )}
           {orphans && orphans.length > 0 && (
             <button
               onClick={deleteAll}
@@ -188,6 +306,20 @@ export function OrphanAttachmentsModal({
             <table style={styles.table}>
               <thead>
                 <tr>
+                  {/* Cluster 19 v1.3 — header tri-state checkbox.
+                      Native indeterminate set imperatively via ref. */}
+                  <th style={{ ...styles.th, width: "28px" }}>
+                    <input
+                      ref={headerCheckRef}
+                      type="checkbox"
+                      checked={allChecked}
+                      onChange={toggleAll}
+                      disabled={busy}
+                      aria-label={
+                        allChecked ? "Deselect all" : "Select all orphans"
+                      }
+                    />
+                  </th>
                   <th style={styles.th}>Parent note</th>
                   <th style={styles.th}>Attachment</th>
                   <th style={{ ...styles.th, textAlign: "right" }}>Size</th>
@@ -197,6 +329,15 @@ export function OrphanAttachmentsModal({
               <tbody>
                 {orphans.map((o) => (
                   <tr key={o.attachment_path}>
+                    <td style={{ ...styles.td, textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(o.attachment_path)}
+                        onChange={() => toggleRow(o)}
+                        disabled={busy}
+                        aria-label={`Select ${o.attachment_relative}`}
+                      />
+                    </td>
                     <td style={styles.td}>
                       <code style={styles.code}>{o.note_relative}</code>
                     </td>

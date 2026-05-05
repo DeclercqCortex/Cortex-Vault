@@ -43,7 +43,7 @@ import {
 import { CortexColumnResize } from "../editor/CortexColumnResize";
 import { CortexTableView } from "../editor/CortexTableView";
 // Cluster 19 v1.0 — image embeds.
-import { CortexImage } from "../editor/CortexImageNode";
+import { CortexImage, type CortexImageWrap } from "../editor/CortexImageNode";
 import {
   CortexImageNodeView,
   EDIT_IMAGE_ANNOTATION_EVENT,
@@ -54,10 +54,17 @@ import {
   type ImageContextMenuDetail,
 } from "./CortexImageNodeView";
 import { ImageAnnotationPopover } from "./ImageAnnotationPopover";
-import { ImageContextMenu, type ImageContextAction } from "./ImageContextMenu";
+import {
+  ImageContextMenu,
+  type ImageContextAction,
+  type ImageContextMenuMulti,
+} from "./ImageContextMenu";
 import { CropModal } from "./CropModal";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { buildImageMultiSelectPlugin } from "../editor/imageMultiSelect";
+import {
+  buildImageMultiSelectPlugin,
+  imageMultiSelectKey,
+} from "../editor/imageMultiSelect";
 
 /**
  * Cluster 18 — table cells now carry verticalAlign (Cluster 16) AND
@@ -432,6 +439,57 @@ interface EditorProps {
  * ProseMirror's posAtCoords, then scan the surrounding text for an
  * enclosing `[[...]]` pair and emit onFollowWikilink with its contents.
  */
+
+/**
+ * Cluster 19 v1.3 — compute the multi-mode consensus snapshot from a
+ * sorted list of cortexImage positions. Used at menu-open time to
+ * power the "N images selected" context-menu state: leading-dot
+ * indicators (only on / only off when ALL match), enable rules for
+ * Reset rotation / Reset position / Reset width (any-of semantics).
+ */
+function computeMultiSnapshot(
+  doc: any,
+  positions: number[],
+): ImageContextMenuMulti {
+  let allFlipH = true;
+  let allFlipV = true;
+  let anyRotated = false;
+  let anyFree = false;
+  let anyHasWidth = false;
+  let commonWrap: CortexImageWrap | null = null;
+  let firstSeen = false;
+  for (const pos of positions) {
+    const node = doc.nodeAt(pos);
+    if (!node || node.type.name !== "cortexImage") continue;
+    const a = node.attrs as Record<string, unknown>;
+    if (!a.flipH) allFlipH = false;
+    if (!a.flipV) allFlipV = false;
+    if (typeof a.rotation === "number" && Math.abs(a.rotation) > 0.01) {
+      anyRotated = true;
+    }
+    if (a.wrapMode === "free" && (a.freeX != null || a.freeY != null)) {
+      anyFree = true;
+    }
+    if (a.width != null) anyHasWidth = true;
+    const wrap = a.wrapMode as CortexImageWrap;
+    if (!firstSeen) {
+      commonWrap = wrap;
+      firstSeen = true;
+    } else if (commonWrap !== wrap) {
+      commonWrap = null;
+    }
+  }
+  return {
+    count: positions.length,
+    commonWrap,
+    allFlipH,
+    allFlipV,
+    anyRotated,
+    anyFree,
+    anyHasWidth,
+  };
+}
+
 export function Editor({
   content,
   onChange,
@@ -655,6 +713,12 @@ export function Editor({
     x: number;
     y: number;
     attrs: ImageContextMenuDetail["attrs"];
+    /** Cluster 19 v1.3 — when the right-clicked image is in an active
+     *  multi-selection, this is the sorted list of every selected
+     *  image's position and the menu acts on all of them. In single
+     *  mode this is `[pos]` and `multi` is `null`. */
+    positions: number[];
+    multi: ImageContextMenuMulti | null;
   } | null>(null);
   // Cluster 19 v1.2 — Crop modal state. Opened from the context
   // menu's Crop entry; commits by writing the cropX/Y/W/H attrs on
@@ -704,11 +768,41 @@ export function Editor({
     function onMenu(e: Event) {
       const ce = e as CustomEvent<ImageContextMenuDetail>;
       if (!ce.detail) return;
+      // Cluster 19 v1.3 — capture the multi-selection at menu-open
+      // time. If the right-clicked image is in the multi-set, the
+      // menu acts on every selected image; otherwise we DROP the
+      // multi-set (matches the v1.2 plain-click behavior — clicking
+      // an unrelated image clears the selection) and act on just
+      // this one.
+      if (!editor) return;
+      const multiSet = imageMultiSelectKey.getState(editor.state);
+      const setPositions =
+        multiSet && multiSet.size > 0 ? Array.from(multiSet) : [];
+      const inMulti = setPositions.includes(ce.detail.pos);
+      let positions: number[];
+      let multi: ImageContextMenuMulti | null;
+      if (inMulti && setPositions.length > 1) {
+        positions = setPositions.sort((a, b) => a - b);
+        multi = computeMultiSnapshot(editor.state.doc, positions);
+      } else {
+        // Drop any active multi-set (the user right-clicked an image
+        // that isn't part of the current selection — fall back to
+        // single-image mode).
+        if (setPositions.length > 0 && !inMulti) {
+          editor.view.dispatch(
+            editor.state.tr.setMeta(imageMultiSelectKey, { kind: "clear" }),
+          );
+        }
+        positions = [ce.detail.pos];
+        multi = null;
+      }
       setImageMenu({
         pos: ce.detail.pos,
         x: ce.detail.x,
         y: ce.detail.y,
         attrs: ce.detail.attrs,
+        positions,
+        multi,
       });
     }
     dom.addEventListener(EDIT_IMAGE_ANNOTATION_EVENT, onAnnot);
@@ -758,9 +852,70 @@ export function Editor({
     return true;
   }
 
+  /** Cluster 19 v1.3 — apply a patch (or per-node patch function) to
+   *  every cortexImage at the given positions in a single transaction.
+   *  When `patchOrFn` is a function, it receives each image's current
+   *  attrs and returns the patch — used for toggles like flip-h /
+   *  flip-v that must read each image's state independently. */
+  function patchImageAttrsBulk(
+    positions: number[],
+    patchOrFn:
+      | Record<string, unknown>
+      | ((attrs: Record<string, unknown>) => Record<string, unknown>),
+  ): void {
+    if (!editor || positions.length === 0) return;
+    let tr = editor.state.tr;
+    // Iterate in DOC ORDER. We're not changing document size (only
+    // attrs), so positions don't shift between operations — but we
+    // still resolve each node from `tr.doc` rather than the original
+    // state so we observe the cumulative effects within the same
+    // transaction (relevant if we ever want bulk attribute additions
+    // that depend on each other; today it's a no-op since each pos
+    // touches a different node, but the shape is future-proofed).
+    for (const pos of positions) {
+      const node = tr.doc.nodeAt(pos);
+      if (!node || node.type.name !== "cortexImage") continue;
+      const patch =
+        typeof patchOrFn === "function"
+          ? patchOrFn(node.attrs as Record<string, unknown>)
+          : patchOrFn;
+      tr = tr.setNodeMarkup(pos, undefined, {
+        ...node.attrs,
+        ...patch,
+      });
+    }
+    editor.view.dispatch(tr);
+  }
+
+  /** Cluster 19 v1.3 — delete every cortexImage at the given positions
+   *  in a single transaction. Sorts in REVERSE position order so each
+   *  delete doesn't shift the offsets of the ones still to come. */
+  function deleteImagesBulk(positions: number[]): void {
+    if (!editor || positions.length === 0) return;
+    const sorted = [...positions].sort((a, b) => b - a);
+    let tr = editor.state.tr;
+    for (const pos of sorted) {
+      const node = tr.doc.nodeAt(pos);
+      if (node && node.type.name === "cortexImage") {
+        tr = tr.delete(pos, pos + node.nodeSize);
+      }
+    }
+    // Clear the multi-select set since the positions it referred to
+    // are gone.
+    tr.setMeta(imageMultiSelectKey, { kind: "clear" });
+    editor.view.dispatch(tr);
+  }
+
   function handleImageMenuAction(action: ImageContextAction) {
     if (!editor || !imageMenu) return;
     const pos = imageMenu.pos;
+    // Cluster 19 v1.3 — when the menu was opened with an active multi-
+    // selection that contains the right-clicked image, every bulk-
+    // applicable action iterates over imageMenu.positions. crop and
+    // edit-annotation stay single (the menu disables them in
+    // multi-mode anyway, but the dispatch still uses pos for safety).
+    const positions = imageMenu.positions;
+    const isMulti = positions.length > 1;
     switch (action.kind) {
       case "wrap": {
         // When leaving "free" mode, reset freeX/freeY so the image
@@ -771,22 +926,28 @@ export function Editor({
           patch.freeX = null;
           patch.freeY = null;
         }
-        patchImageAttrs(pos, patch);
+        if (isMulti) patchImageAttrsBulk(positions, patch);
+        else patchImageAttrs(pos, patch);
         break;
       }
       case "reset-rotation":
-        patchImageAttrs(pos, { rotation: 0 });
+        if (isMulti) patchImageAttrsBulk(positions, { rotation: 0 });
+        else patchImageAttrs(pos, { rotation: 0 });
         break;
       case "reset-position":
-        patchImageAttrs(pos, { freeX: null, freeY: null });
+        if (isMulti)
+          patchImageAttrsBulk(positions, { freeX: null, freeY: null });
+        else patchImageAttrs(pos, { freeX: null, freeY: null });
         break;
       case "set-width":
-        patchImageAttrs(pos, { width: action.width });
+        if (isMulti) patchImageAttrsBulk(positions, { width: action.width });
+        else patchImageAttrs(pos, { width: action.width });
         break;
       case "edit-annotation": {
         // Open the popover anchored to the image. We need the rect —
         // synthesise one from the right-click coords (a 1px point);
         // good enough for popover positioning.
+        // (Single-image only — disabled in multi-mode.)
         const synth = new DOMRect(imageMenu.x, imageMenu.y, 1, 1);
         let decoded = imageMenu.attrs.annotation;
         try {
@@ -797,19 +958,31 @@ export function Editor({
         setImageAnnotation({ pos, anchorRect: synth, annotation: decoded });
         break;
       }
-      // Cluster 19 v1.1 — flip toggles. Read the current attr from the
-      // doc (not the menu snapshot) so a rapid double-toggle ends up
-      // back at identity rather than racing on stale state.
+      // Cluster 19 v1.1 — flip toggles. In single mode, read the
+      // current attr from the doc (not the menu snapshot) so a rapid
+      // double-toggle ends back at identity. In multi mode, each
+      // image's own current attr is read inside the bulk patch
+      // function so the toggle is per-image (mixed states settle to
+      // their individual opposites — three images [T, F, T] become
+      // [F, T, F]).
       case "flip-h": {
-        const node = editor.state.doc.nodeAt(pos);
-        const cur = !!node?.attrs?.flipH;
-        patchImageAttrs(pos, { flipH: !cur });
+        if (isMulti) {
+          patchImageAttrsBulk(positions, (a) => ({ flipH: !a.flipH }));
+        } else {
+          const node = editor.state.doc.nodeAt(pos);
+          const cur = !!node?.attrs?.flipH;
+          patchImageAttrs(pos, { flipH: !cur });
+        }
         break;
       }
       case "flip-v": {
-        const node = editor.state.doc.nodeAt(pos);
-        const cur = !!node?.attrs?.flipV;
-        patchImageAttrs(pos, { flipV: !cur });
+        if (isMulti) {
+          patchImageAttrsBulk(positions, (a) => ({ flipV: !a.flipV }));
+        } else {
+          const node = editor.state.doc.nodeAt(pos);
+          const cur = !!node?.attrs?.flipV;
+          patchImageAttrs(pos, { flipV: !cur });
+        }
         break;
       }
       // Cluster 19 v1.2 — open the crop modal for this image.
@@ -848,11 +1021,15 @@ export function Editor({
         break;
       }
       case "delete": {
-        const node = editor.state.doc.nodeAt(pos);
-        if (node) {
-          editor.view.dispatch(
-            editor.state.tr.delete(pos, pos + node.nodeSize),
-          );
+        if (isMulti) {
+          deleteImagesBulk(positions);
+        } else {
+          const node = editor.state.doc.nodeAt(pos);
+          if (node) {
+            editor.view.dispatch(
+              editor.state.tr.delete(pos, pos + node.nodeSize),
+            );
+          }
         }
         break;
       }
@@ -1277,6 +1454,7 @@ export function Editor({
           x={imageMenu.x}
           y={imageMenu.y}
           attrs={imageMenu.attrs}
+          multi={imageMenu.multi}
           onAction={handleImageMenuAction}
           onClose={() => setImageMenu(null)}
         />

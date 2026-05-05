@@ -1,18 +1,17 @@
-// CropModal — Cluster 19 v1.2.
+// CropModal — Cluster 19 v1.2; live preview thumbnail added v1.3.
 //
 // Modal opened from ImageContextMenu's "Crop image…" entry. Renders
 // the source image inside a fixed-aspect frame with a draggable rect
-// overlay. On Apply, draws the rect's region to an offscreen canvas
-// at native resolution, exports PNG bytes, and ships them to the
-// `save_cropped_image` Tauri command. The host (Editor.tsx) replaces
-// the cortexImage node's `src` with the returned relative path.
+// overlay, plus (v1.3) a small live preview thumbnail next to the
+// status row showing what the cropped output will look like. On
+// Apply, the host writes the four cropX/Y/W/H attrs onto the
+// cortexImage node — non-destructive; no file is written.
 //
 // Interaction model:
 //   - Body drag inside the rect = move the rect (clamped to image bounds)
 //   - 4 corner handles = resize from that corner (rect stays inside image)
 //   - Pixel coordinates internally; rendered into a CSS-scaled preview
-//   - Apply uses the image's natural dimensions for the canvas, so the
-//     output is full-resolution regardless of how the preview is sized
+//   - Live preview canvas (v1.3) redraws on every rect / natural change
 //
 // Cancel and Esc close without writing. Apply is the only commit path.
 //
@@ -73,6 +72,13 @@ type DragMode =
 const MAX_PREVIEW_W = 720;
 const MAX_PREVIEW_H = 520;
 
+/** Cluster 19 v1.3 — Maximum thumbnail width / height for the live
+ *  cropped-output preview. The thumbnail aspect matches the rect's
+ *  aspect, fit within these bounds. Small enough to sit in the
+ *  status row without bloating modal width. */
+const MAX_THUMB_W = 160;
+const MAX_THUMB_H = 120;
+
 export function CropModal({
   isOpen,
   imageUrl,
@@ -82,6 +88,10 @@ export function CropModal({
 }: CropModalProps) {
   const imgRef = useRef<HTMLImageElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  // Cluster 19 v1.3 — live preview thumbnail of the current crop rect.
+  // Kept as a ref so we can imperatively drawImage on every rect
+  // change without going through React's render path.
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [rect, setRect] = useState<CropRect | null>(null);
   const [drag, setDrag] = useState<DragMode>({ kind: "none" });
@@ -145,6 +155,61 @@ export function CropModal({
   })();
   const previewW = natural ? Math.round(natural.w * scale) : 0;
   const previewH = natural ? Math.round(natural.h * scale) : 0;
+
+  // Cluster 19 v1.3 — live preview thumbnail dimensions. Match the
+  // current rect's aspect, scaled to fit within MAX_THUMB_W ×
+  // MAX_THUMB_H. Falls back to MAX_THUMB_W × (MAX_THUMB_W * 0.75)
+  // before the rect arrives so the layout stays stable.
+  const thumbDims = (() => {
+    if (!rect || rect.w <= 0 || rect.h <= 0) {
+      return { w: MAX_THUMB_W, h: Math.round(MAX_THUMB_W * 0.75) };
+    }
+    const sx = MAX_THUMB_W / rect.w;
+    const sy = MAX_THUMB_H / rect.h;
+    const s = Math.min(sx, sy);
+    return {
+      w: Math.max(1, Math.round(rect.w * s)),
+      h: Math.max(1, Math.round(rect.h * s)),
+    };
+  })();
+
+  // Cluster 19 v1.3 — redraw the preview canvas whenever the rect or
+  // natural dimensions change. Uses drawImage(img, sx, sy, sw, sh,
+  // 0, 0, dw, dh) so we sample directly from the loaded <img> at
+  // native resolution and let the canvas handle the downscale to
+  // thumbnail dimensions.
+  useEffect(() => {
+    const canvas = previewCanvasRef.current;
+    const img = imgRef.current;
+    if (!canvas || !img || !natural || !rect) return;
+    canvas.width = thumbDims.w;
+    canvas.height = thumbDims.h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    // Clear (canvas resize already does this, but be explicit so a
+    // 0×0-rect edge case still leaves a clean canvas).
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // ImageBitmapRenderingContext-free path: drawImage from an
+    // HTMLImageElement is universally supported.
+    try {
+      ctx.drawImage(
+        img,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        0,
+        0,
+        thumbDims.w,
+        thumbDims.h,
+      );
+    } catch {
+      // Cross-origin guard. Local file:// → asset:// shouldn't trip
+      // this, but be defensive: clear the canvas so the user sees a
+      // blank instead of stale pixels from a previous rect.
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }, [rect, natural, thumbDims.w, thumbDims.h]);
 
   // ---- pointer handlers (overlay-relative, then mapped to natural px) ----
 
@@ -408,6 +473,25 @@ export function CropModal({
           ) : (
             <span style={styles.dim}>Loading image…</span>
           )}
+          <div style={{ flex: 1 }} />
+          {/* Cluster 19 v1.3 — live preview thumbnail. Sits to the
+              right of the dimension status so the user can see what
+              the cropped output will look like as they drag. */}
+          <div style={styles.thumbWrap}>
+            <span style={styles.thumbLabel}>Preview</span>
+            <canvas
+              ref={previewCanvasRef}
+              style={{
+                width: thumbDims.w,
+                height: thumbDims.h,
+                background: "#222",
+                border: "1px solid var(--border)",
+                borderRadius: "3px",
+                display: "block",
+              }}
+              aria-label="Preview of the cropped image"
+            />
+          </div>
         </div>
 
         {error && <div style={styles.error}>{error}</div>}
@@ -514,6 +598,19 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "0.8rem",
   },
   dim: { color: "var(--text-2)" },
+  // Cluster 19 v1.3 — preview thumbnail container. Sits at the right
+  // end of the status row above the footer.
+  thumbWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.4rem",
+  },
+  thumbLabel: {
+    fontSize: "0.72rem",
+    color: "var(--text-2)",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.05em",
+  },
   error: {
     background: "var(--danger-bg, #ffe6e6)",
     color: "var(--danger)",

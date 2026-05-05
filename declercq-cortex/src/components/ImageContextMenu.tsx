@@ -1,4 +1,4 @@
-// ImageContextMenu — Cluster 19 v1.0.
+// ImageContextMenu — Cluster 19 v1.0; multi-mode added in v1.3.
 //
 // Right-click menu for a CortexImage. Mirrors the BlockContextMenu /
 // TableContextMenu pattern: a self-positioning floating panel with
@@ -8,6 +8,18 @@
 // Mounted by Editor.tsx in response to the
 // `cortex:image-context-menu` CustomEvent dispatched from the
 // CortexImage NodeView.
+//
+// Cluster 19 v1.3 — when the right-clicked image is part of an
+// active multi-selection, the host passes a non-null `multi` prop.
+// In that mode:
+//   - the menu header shows "N images selected"
+//   - leading-dot consensus is computed from the multi summary
+//     (dot only when ALL match), with hint text (rotation degrees,
+//     width pixels) suppressed since they're heterogeneous
+//   - crop and edit-annotation entries are disabled (single-image
+//     inherent)
+//   - all other actions still emit the same kind; the host
+//     iterates the multi-set and applies bulk
 
 import { useEffect, useRef } from "react";
 import type { CortexImageWrap } from "../editor/CortexImageNode";
@@ -29,6 +41,27 @@ export type ImageContextAction =
   | { kind: "crop" }
   | { kind: "delete" };
 
+/** Cluster 19 v1.3 — consensus snapshot of the multi-selection set,
+ *  computed by the host at menu-open time. `null` indicates single-
+ *  image mode (the v1.0–v1.2 path). */
+export interface ImageContextMenuMulti {
+  count: number;
+  /** Common wrap mode if all selected images share one; null when
+   *  the set is heterogeneous. */
+  commonWrap: CortexImageWrap | null;
+  /** True if EVERY selected image has flipH=true. */
+  allFlipH: boolean;
+  /** True if EVERY selected image has flipV=true. */
+  allFlipV: boolean;
+  /** True if AT LEAST ONE selected image has non-zero rotation. */
+  anyRotated: boolean;
+  /** True if AT LEAST ONE selected image is in free-position mode
+   *  with non-null freeX/freeY. */
+  anyFree: boolean;
+  /** True if AT LEAST ONE selected image has a non-null width. */
+  anyHasWidth: boolean;
+}
+
 export interface ImageContextMenuProps {
   /** Right-click coordinates in viewport pixels. */
   x: number;
@@ -45,6 +78,10 @@ export interface ImageContextMenuProps {
     flipH: boolean;
     flipV: boolean;
   };
+  /** Cluster 19 v1.3 — non-null when the right-clicked image is in an
+   *  active multi-selection set; the menu acts on every selected
+   *  image and shows a consensus header. */
+  multi?: ImageContextMenuMulti | null;
   onAction: (action: ImageContextAction) => void;
   onClose: () => void;
 }
@@ -55,10 +92,12 @@ export function ImageContextMenu({
   x,
   y,
   attrs,
+  multi,
   onAction,
   onClose,
 }: ImageContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const isMulti = !!multi && multi.count > 1;
 
   // Outside click + Esc → close.
   useEffect(() => {
@@ -132,28 +171,41 @@ export function ImageContextMenu({
         fontSize: "0.85rem",
       }}
     >
+      {isMulti && (
+        <div style={multiHeader} role="presentation">
+          {multi!.count} images selected
+        </div>
+      )}
       <div style={sectionLabel}>Wrap</div>
       <Item
         onClick={() => pick({ kind: "wrap", mode: "left" })}
-        leading={dot(attrs.wrapMode === "left")}
+        leading={dot(
+          isMulti ? multi!.commonWrap === "left" : attrs.wrapMode === "left",
+        )}
       >
         Wrap left
       </Item>
       <Item
         onClick={() => pick({ kind: "wrap", mode: "right" })}
-        leading={dot(attrs.wrapMode === "right")}
+        leading={dot(
+          isMulti ? multi!.commonWrap === "right" : attrs.wrapMode === "right",
+        )}
       >
         Wrap right
       </Item>
       <Item
         onClick={() => pick({ kind: "wrap", mode: "break" })}
-        leading={dot(attrs.wrapMode === "break")}
+        leading={dot(
+          isMulti ? multi!.commonWrap === "break" : attrs.wrapMode === "break",
+        )}
       >
         Break (no wrap)
       </Item>
       <Item
         onClick={() => pick({ kind: "wrap", mode: "free" })}
-        leading={dot(attrs.wrapMode === "free")}
+        leading={dot(
+          isMulti ? multi!.commonWrap === "free" : attrs.wrapMode === "free",
+        )}
       >
         Free position
       </Item>
@@ -162,40 +214,63 @@ export function ImageContextMenu({
       <div style={sectionLabel}>Adjust</div>
       <Item
         onClick={() => pick({ kind: "reset-rotation" })}
-        disabled={Math.abs(attrs.rotation) < 0.01}
+        disabled={
+          isMulti ? !multi!.anyRotated : Math.abs(attrs.rotation) < 0.01
+        }
       >
         Reset rotation
-        {attrs.rotation ? (
+        {!isMulti && attrs.rotation ? (
           <span style={hintStyle}>{attrs.rotation.toFixed(0)}°</span>
         ) : null}
       </Item>
       <Item
         onClick={() => pick({ kind: "reset-position" })}
-        disabled={attrs.wrapMode !== "free"}
+        disabled={isMulti ? !multi!.anyFree : attrs.wrapMode !== "free"}
       >
         Reset position
       </Item>
-      <Item onClick={() => pick({ kind: "set-width", width: null })}>
+      <Item
+        onClick={() => pick({ kind: "set-width", width: null })}
+        disabled={isMulti ? !multi!.anyHasWidth : attrs.width == null}
+      >
         Reset width
-        {attrs.width != null ? (
+        {!isMulti && attrs.width != null ? (
           <span style={hintStyle}>{attrs.width}px</span>
         ) : null}
       </Item>
 
       <div style={separator} />
       <div style={sectionLabel}>Flip</div>
-      <Item onClick={() => pick({ kind: "flip-h" })} leading={dot(attrs.flipH)}>
+      <Item
+        onClick={() => pick({ kind: "flip-h" })}
+        leading={dot(isMulti ? multi!.allFlipH : attrs.flipH)}
+      >
         Flip horizontal
       </Item>
-      <Item onClick={() => pick({ kind: "flip-v" })} leading={dot(attrs.flipV)}>
+      <Item
+        onClick={() => pick({ kind: "flip-v" })}
+        leading={dot(isMulti ? multi!.allFlipV : attrs.flipV)}
+      >
         Flip vertical
       </Item>
 
       <div style={separator} />
-      <Item onClick={() => pick({ kind: "crop" })}>Crop image…</Item>
+      {/* Cluster 19 v1.3 — Crop and Edit/Add annotation are inherently
+          single-image actions; disabled when in multi-mode. */}
+      <Item
+        onClick={() => pick({ kind: "crop" })}
+        disabled={isMulti}
+        title={isMulti ? "Crop one image at a time" : undefined}
+      >
+        Crop image…
+      </Item>
 
       <div style={separator} />
-      <Item onClick={() => pick({ kind: "edit-annotation" })}>
+      <Item
+        onClick={() => pick({ kind: "edit-annotation" })}
+        disabled={isMulti}
+        title={isMulti ? "Annotate one image at a time" : undefined}
+      >
         {attrs.annotation ? "Edit annotation…" : "Add annotation…"}
       </Item>
 
@@ -204,7 +279,7 @@ export function ImageContextMenu({
         onClick={() => pick({ kind: "delete" })}
         style={{ color: "var(--danger)" }}
       >
-        Delete image
+        {isMulti ? `Delete ${multi!.count} images` : "Delete image"}
       </Item>
     </div>
   );
@@ -216,14 +291,25 @@ interface ItemProps {
   leading?: React.ReactNode;
   disabled?: boolean;
   style?: React.CSSProperties;
+  /** Native tooltip for the item. Used in v1.3 for the
+   *  multi-mode-disabled hover hint on Crop / Edit annotation. */
+  title?: string;
 }
-function Item({ onClick, children, leading, disabled, style }: ItemProps) {
+function Item({
+  onClick,
+  children,
+  leading,
+  disabled,
+  style,
+  title,
+}: ItemProps) {
   return (
     <button
       type="button"
       role="menuitem"
       onClick={disabled ? undefined : onClick}
       aria-disabled={disabled}
+      title={title}
       style={{
         display: "flex",
         alignItems: "center",
@@ -261,6 +347,18 @@ const sectionLabel: React.CSSProperties = {
   textTransform: "uppercase",
   letterSpacing: "0.05em",
   color: "var(--text-muted)",
+};
+// Cluster 19 v1.3 — multi-mode header. Sits at the very top of the
+// menu, above the existing section labels, so the user sees that
+// every action is about to act on a multi-set, not just the
+// right-clicked image.
+const multiHeader: React.CSSProperties = {
+  padding: "5px 6px 4px",
+  margin: "0 0 2px",
+  fontSize: "0.78rem",
+  fontWeight: 600,
+  color: "var(--accent)",
+  borderBottom: "1px solid var(--border)",
 };
 const separator: React.CSSProperties = {
   height: "1px",
