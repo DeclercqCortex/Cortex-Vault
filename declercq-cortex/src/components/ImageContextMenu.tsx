@@ -18,6 +18,10 @@ export type ImageContextAction =
   | { kind: "reset-position" }
   | { kind: "set-width"; width: number | null }
   | { kind: "edit-annotation" }
+  // Cluster 19 v1.1 — flip toggles. The host applies via
+  // editor.commands.updateAttributes({ flipH: !current.flipH }) etc.
+  | { kind: "flip-h" }
+  | { kind: "flip-v" }
   | { kind: "delete" };
 
 export interface ImageContextMenuProps {
@@ -30,6 +34,11 @@ export interface ImageContextMenuProps {
     rotation: number;
     width: number | null;
     annotation: string;
+    /** Cluster 19 v1.1 — flip state, used to render the active dot
+     *  next to "Flip horizontal" / "Flip vertical" so the menu shows
+     *  whether the toggle is currently on. */
+    flipH: boolean;
+    flipV: boolean;
   };
   onAction: (action: ImageContextAction) => void;
   onClose: () => void;
@@ -166,6 +175,15 @@ export function ImageContextMenu({
         {attrs.width != null ? (
           <span style={hintStyle}>{attrs.width}px</span>
         ) : null}
+      </Item>
+
+      <div style={separator} />
+      <div style={sectionLabel}>Flip</div>
+      <Item onClick={() => pick({ kind: "flip-h" })} leading={dot(attrs.flipH)}>
+        Flip horizontal
+      </Item>
+      <Item onClick={() => pick({ kind: "flip-v" })} leading={dot(attrs.flipV)}>
+        Flip vertical
       </Item>
 
       <div style={separator} />

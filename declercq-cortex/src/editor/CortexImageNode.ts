@@ -177,6 +177,29 @@ export const CortexImage = Node.create({
           return { "data-annotation": String(attrs.annotation) };
         },
       },
+      /** Cluster 19 v1.1 — horizontal flip. true = the image is
+       *  mirrored across its vertical axis. Composes with rotation
+       *  and vertical flip via the NodeView's CSS transform. Saved
+       *  as `data-flip-h="1"` only when set, to keep simple cases
+       *  clean on disk (matches the rotation / width attr style). */
+      flipH: {
+        default: false as boolean,
+        parseHTML: (el) => el.getAttribute("data-flip-h") === "1",
+        renderHTML: (attrs) => {
+          if (!attrs.flipH) return {};
+          return { "data-flip-h": "1" };
+        },
+      },
+      /** Cluster 19 v1.1 — vertical flip. true = mirrored across the
+       *  horizontal axis. */
+      flipV: {
+        default: false as boolean,
+        parseHTML: (el) => el.getAttribute("data-flip-v") === "1",
+        renderHTML: (attrs) => {
+          if (!attrs.flipV) return {};
+          return { "data-flip-v": "1" };
+        },
+      },
     };
   },
 

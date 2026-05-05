@@ -53,6 +53,10 @@ export interface ImageContextMenuDetail {
     rotation: number;
     width: number | null;
     annotation: string;
+    /** Cluster 19 v1.1 — flip state, surfaced in the context menu so
+     *  the active dot reflects whether the toggle is currently on. */
+    flipH: boolean;
+    flipV: boolean;
   };
 }
 
@@ -107,6 +111,12 @@ export function CortexImageNodeView(props: NodeViewProps) {
   const rotation = (node.attrs.rotation as number) ?? 0;
   const width = node.attrs.width as number | null;
   const annotation = (node.attrs.annotation as string) ?? "";
+  // Cluster 19 v1.1 — flip composes with rotation in the CSS transform.
+  // scaleX(-1) horizontally mirrors; scaleY(-1) vertically mirrors.
+  // Both true = effectively a 180° rotation visually, but kept on the
+  // flip axes so user-set rotation is preserved as its own attr.
+  const flipH = !!node.attrs.flipH;
+  const flipV = !!node.attrs.flipV;
   const src = node.attrs.src as string;
 
   // The note path is published into storage by Editor.tsx whenever the
@@ -388,14 +398,14 @@ export function CortexImageNodeView(props: NodeViewProps) {
             pos,
             x: e.clientX,
             y: e.clientY,
-            attrs: { wrapMode, rotation, width, annotation },
+            attrs: { wrapMode, rotation, width, annotation, flipH, flipV },
           },
           bubbles: true,
         },
       );
       editor.view.dom.dispatchEvent(evt);
     },
-    [editor, getPos, wrapMode, rotation, width, annotation],
+    [editor, getPos, wrapMode, rotation, width, annotation, flipH, flipV],
   );
 
   // ---- styles -------------------------------------------------------------
@@ -411,8 +421,19 @@ export function CortexImageNodeView(props: NodeViewProps) {
     wrapStyle.top = `${freeY}px`;
   }
 
+  // Cluster 19 v1.1 — compose rotation + flip in a single transform
+  // string. Order: rotate first, then scale, so a rotated-then-flipped
+  // image mirrors across the rotated axes (matches how Photoshop /
+  // Figma compose these). Identity (no rotation, no flip) emits no
+  // transform so the simple case stays clean.
+  const flipScaleX = flipH ? -1 : 1;
+  const flipScaleY = flipV ? -1 : 1;
+  const transformParts: string[] = [];
+  if (rotation) transformParts.push(`rotate(${rotation.toFixed(2)}deg)`);
+  if (flipH || flipV)
+    transformParts.push(`scale(${flipScaleX}, ${flipScaleY})`);
   const imgStyle: React.CSSProperties = {
-    transform: rotation ? `rotate(${rotation.toFixed(2)}deg)` : undefined,
+    transform: transformParts.length > 0 ? transformParts.join(" ") : undefined,
   };
   if (width != null) {
     imgStyle.width = `${width}px`;

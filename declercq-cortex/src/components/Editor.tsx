@@ -774,6 +774,21 @@ export function Editor({
         setImageAnnotation({ pos, anchorRect: synth, annotation: decoded });
         break;
       }
+      // Cluster 19 v1.1 — flip toggles. Read the current attr from the
+      // doc (not the menu snapshot) so a rapid double-toggle ends up
+      // back at identity rather than racing on stale state.
+      case "flip-h": {
+        const node = editor.state.doc.nodeAt(pos);
+        const cur = !!node?.attrs?.flipH;
+        patchImageAttrs(pos, { flipH: !cur });
+        break;
+      }
+      case "flip-v": {
+        const node = editor.state.doc.nodeAt(pos);
+        const cur = !!node?.attrs?.flipV;
+        patchImageAttrs(pos, { flipV: !cur });
+        break;
+      }
       case "delete": {
         const node = editor.state.doc.nodeAt(pos);
         if (node) {
