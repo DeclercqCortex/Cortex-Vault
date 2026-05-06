@@ -1447,7 +1447,8 @@ body.cortex-mod-pressed .cortex-image:hover {
 /* Minimize-toolbar-to-bar — when the user toggles minimize from the
  * polish group, every group hides except a tiny "expand" handle, so
  * the toolbar shrinks to a thin strip without losing access. */
-.cortex-editor-toolbar.minimized > .cortex-editor-toolbar-group:not(.cortex-tb-keep-minimized) {
+.cortex-editor-toolbar.minimized
+  > .cortex-editor-toolbar-group:not(.cortex-tb-keep-minimized) {
   display: none !important;
 }
 .cortex-editor-toolbar.minimized {
@@ -1649,13 +1650,25 @@ body.cortex-marker-active * {
 
 /* Gradient text (background-clip: text) */
 .tx-gradient-golden {
-  background: linear-gradient(120deg, #fff5b1 0%, #f7d35a 30%, #d49a17 60%, #7a5310 100%);
+  background: linear-gradient(
+    120deg,
+    #fff5b1 0%,
+    #f7d35a 30%,
+    #d49a17 60%,
+    #7a5310 100%
+  );
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
 .tx-gradient-silver {
-  background: linear-gradient(120deg, #e8e8e8 0%, #ffffff 30%, #b8b8b8 70%, #909090 100%);
+  background: linear-gradient(
+    120deg,
+    #e8e8e8 0%,
+    #ffffff 30%,
+    #b8b8b8 70%,
+    #909090 100%
+  );
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -1697,89 +1710,216 @@ body.cortex-marker-active * {
 /* Animations (CSS keyframes; respect prefers-reduced-motion +
    the body.cortex-anim-paused class). */
 @keyframes cortex-anim-pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.08); }
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.08);
+  }
 }
 @keyframes cortex-anim-bounce {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
 }
 @keyframes cortex-anim-shake {
-  0%, 100% { transform: translateX(0); }
-  20% { transform: translateX(-2px); }
-  40% { transform: translateX(3px); }
-  60% { transform: translateX(-3px); }
-  80% { transform: translateX(2px); }
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-2px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
 }
 @keyframes cortex-anim-wave {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
 }
 @keyframes cortex-anim-marquee {
-  from { transform: translateX(0); }
-  to { transform: translateX(-100%); }
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
 }
 @keyframes cortex-anim-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 @keyframes cortex-anim-colorcycle {
-  0% { color: #ff4e50; }
-  17% { color: #f9d423; }
-  33% { color: #06d6a0; }
-  50% { color: #3a86ff; }
-  67% { color: #9d4edd; }
-  83% { color: #ff8c00; }
-  100% { color: #ff4e50; }
+  0% {
+    color: #ff4e50;
+  }
+  17% {
+    color: #f9d423;
+  }
+  33% {
+    color: #06d6a0;
+  }
+  50% {
+    color: #3a86ff;
+  }
+  67% {
+    color: #9d4edd;
+  }
+  83% {
+    color: #ff8c00;
+  }
+  100% {
+    color: #ff4e50;
+  }
 }
 @keyframes cortex-anim-gradient {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
 }
 @keyframes cortex-anim-glitch {
-  0%, 100% { text-shadow: 0 0 0 transparent; transform: translate(0); }
-  20% { text-shadow: -2px 0 #ff0080, 2px 0 #00fff7; transform: translate(-1px, 1px); }
-  40% { text-shadow: 2px 0 #ff0080, -2px 0 #00fff7; transform: translate(1px, -1px); }
-  60% { text-shadow: -1px 0 #ff0080, 1px 0 #00fff7; transform: translate(0, 1px); }
+  0%,
+  100% {
+    text-shadow: 0 0 0 transparent;
+    transform: translate(0);
+  }
+  20% {
+    text-shadow:
+      -2px 0 #ff0080,
+      2px 0 #00fff7;
+    transform: translate(-1px, 1px);
+  }
+  40% {
+    text-shadow:
+      2px 0 #ff0080,
+      -2px 0 #00fff7;
+    transform: translate(1px, -1px);
+  }
+  60% {
+    text-shadow:
+      -1px 0 #ff0080,
+      1px 0 #00fff7;
+    transform: translate(0, 1px);
+  }
 }
 @keyframes cortex-anim-flicker {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 @keyframes cortex-anim-heartbeat {
-  0%, 100% { transform: scale(1); }
-  10%, 30% { transform: scale(1.18); }
-  20%, 40% { transform: scale(1); }
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  10%,
+  30% {
+    transform: scale(1.18);
+  }
+  20%,
+  40% {
+    transform: scale(1);
+  }
 }
 @keyframes cortex-anim-float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
 }
 @keyframes cortex-anim-marching-ants {
-  to { background-position: 18px 0; }
+  to {
+    background-position: 18px 0;
+  }
 }
 
-.tx-anim-pulse { animation: cortex-anim-pulse 1.6s ease-in-out infinite; display: inline-block; }
-.tx-anim-bounce { animation: cortex-anim-bounce 1s ease-in-out infinite; display: inline-block; }
-.tx-anim-shake { animation: cortex-anim-shake 0.5s linear infinite; display: inline-block; }
-.tx-anim-wave { animation: cortex-anim-wave 2s ease-in-out infinite; display: inline-block; }
+.tx-anim-pulse {
+  animation: cortex-anim-pulse 1.6s ease-in-out infinite;
+  display: inline-block;
+}
+.tx-anim-bounce {
+  animation: cortex-anim-bounce 1s ease-in-out infinite;
+  display: inline-block;
+}
+.tx-anim-shake {
+  animation: cortex-anim-shake 0.5s linear infinite;
+  display: inline-block;
+}
+.tx-anim-wave {
+  animation: cortex-anim-wave 2s ease-in-out infinite;
+  display: inline-block;
+}
 .tx-anim-typewriter {
   display: inline-block;
   overflow: hidden;
   white-space: nowrap;
   border-right: 0.1em solid currentColor;
-  animation: cortex-anim-typing 2s steps(30, end) forwards, cortex-anim-blink 0.75s step-end infinite;
+  animation:
+    cortex-anim-typing 2s steps(30, end) forwards,
+    cortex-anim-blink 0.75s step-end infinite;
 }
-@keyframes cortex-anim-typing { from { width: 0; } to { width: 100%; } }
-@keyframes cortex-anim-blink { from, to { border-color: transparent; } 50% { border-color: currentColor; } }
+@keyframes cortex-anim-typing {
+  from {
+    width: 0;
+  }
+  to {
+    width: 100%;
+  }
+}
+@keyframes cortex-anim-blink {
+  from,
+  to {
+    border-color: transparent;
+  }
+  50% {
+    border-color: currentColor;
+  }
+}
 .tx-anim-marquee {
   display: inline-block;
   white-space: nowrap;
   animation: cortex-anim-marquee 12s linear infinite;
 }
-.tx-anim-fade { animation: cortex-anim-fade 1.6s ease-out 1 forwards; }
-.tx-anim-colorcycle { animation: cortex-anim-colorcycle 6s linear infinite; }
+.tx-anim-fade {
+  animation: cortex-anim-fade 1.6s ease-out 1 forwards;
+}
+.tx-anim-colorcycle {
+  animation: cortex-anim-colorcycle 6s linear infinite;
+}
 .tx-anim-animgradient {
   background-size: 200% 200% !important;
   animation: cortex-anim-gradient 5s ease infinite;
@@ -1788,9 +1928,17 @@ body.cortex-marker-active * {
   display: inline-block;
   animation: cortex-anim-glitch 1.6s steps(4) infinite;
 }
-.tx-anim-flicker { animation: cortex-anim-flicker 1.2s steps(2) infinite; }
-.tx-anim-heartbeat { animation: cortex-anim-heartbeat 1.2s ease-in-out infinite; display: inline-block; }
-.tx-anim-float { animation: cortex-anim-float 4s ease-in-out infinite; display: inline-block; }
+.tx-anim-flicker {
+  animation: cortex-anim-flicker 1.2s steps(2) infinite;
+}
+.tx-anim-heartbeat {
+  animation: cortex-anim-heartbeat 1.2s ease-in-out infinite;
+  display: inline-block;
+}
+.tx-anim-float {
+  animation: cortex-anim-float 4s ease-in-out infinite;
+  display: inline-block;
+}
 
 /* Pause-all rule. */
 body.cortex-anim-paused .tx-anim-pulse,
@@ -1904,11 +2052,26 @@ hr.cortex-page-break::after {
   padding: 0.6em 0.9em;
   margin: 0.6em 0;
 }
-.cortex-callout-info { --cortex-callout-accent: #3a86ff; --cortex-callout-bg: rgba(58, 134, 255, 0.07); }
-.cortex-callout-tip { --cortex-callout-accent: #06d6a0; --cortex-callout-bg: rgba(6, 214, 160, 0.07); }
-.cortex-callout-warning { --cortex-callout-accent: #ffd166; --cortex-callout-bg: rgba(255, 209, 102, 0.1); }
-.cortex-callout-danger { --cortex-callout-accent: #ef476f; --cortex-callout-bg: rgba(239, 71, 111, 0.07); }
-.cortex-callout-note { --cortex-callout-accent: #9d4edd; --cortex-callout-bg: rgba(157, 78, 221, 0.07); }
+.cortex-callout-info {
+  --cortex-callout-accent: #3a86ff;
+  --cortex-callout-bg: rgba(58, 134, 255, 0.07);
+}
+.cortex-callout-tip {
+  --cortex-callout-accent: #06d6a0;
+  --cortex-callout-bg: rgba(6, 214, 160, 0.07);
+}
+.cortex-callout-warning {
+  --cortex-callout-accent: #ffd166;
+  --cortex-callout-bg: rgba(255, 209, 102, 0.1);
+}
+.cortex-callout-danger {
+  --cortex-callout-accent: #ef476f;
+  --cortex-callout-bg: rgba(239, 71, 111, 0.07);
+}
+.cortex-callout-note {
+  --cortex-callout-accent: #9d4edd;
+  --cortex-callout-bg: rgba(157, 78, 221, 0.07);
+}
 
 /* Columns */
 .cortex-columns {
@@ -1916,8 +2079,12 @@ hr.cortex-page-break::after {
   gap: 1rem;
   margin: 0.6em 0;
 }
-.cortex-columns-2 { grid-template-columns: 1fr 1fr; }
-.cortex-columns-3 { grid-template-columns: 1fr 1fr 1fr; }
+.cortex-columns-2 {
+  grid-template-columns: 1fr 1fr;
+}
+.cortex-columns-3 {
+  grid-template-columns: 1fr 1fr 1fr;
+}
 .cortex-side-by-side {
   display: grid;
   grid-template-columns: 1fr 1px 1fr;
@@ -1929,8 +2096,14 @@ hr.cortex-page-break::after {
 }
 
 /* Tabs (simple, no JS — uses :checked + radios; kept basic for v1.0) */
-.cortex-tabs { margin: 0.6em 0; }
-.cortex-tabs-titles { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.cortex-tabs {
+  margin: 0.6em 0;
+}
+.cortex-tabs-titles {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
 .cortex-tab-title {
   padding: 4px 10px;
   cursor: pointer;
@@ -2096,3 +2269,336 @@ details.cortex-toggle[open] > summary {
 /* Selected-shape marquee + handle styling lives mostly in the
  * inline SVG attributes for portability, but the surrounding "we're
  * in shape editor mode" cue is the dimmed-doc rule above. */
+
+/* ===========================================================================
+ * Cluster 21 v1.1 — code block syntax highlighting + interactive Tabs /
+ *                   Collapsible NodeView styling.
+ * =========================================================================== */
+
+.cortex-code-block,
+.ProseMirror pre.cortex-code-block,
+.ProseMirror pre {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.7em 0.9em;
+  margin: 0.6em 0;
+  overflow-x: auto;
+  font-family:
+    "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  tab-size: 2;
+}
+.cortex-code-block code,
+.ProseMirror pre code {
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* hljs token theme — light mode */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-section,
+.hljs-name {
+  color: #af00db;
+}
+.hljs-string,
+.hljs-attr,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+  color: #a31515;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-meta {
+  color: #098658;
+}
+.hljs-comment,
+.hljs-quote,
+.hljs-deletion {
+  color: #6a9955;
+  font-style: italic;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-doctag {
+  color: #795e26;
+}
+.hljs-variable,
+.hljs-template-variable,
+.hljs-property {
+  color: #001080;
+}
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-tag {
+  color: #267f99;
+}
+.hljs-regexp {
+  color: #d16969;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}
+
+/* hljs token theme — dark mode (OS preference + manual class) */
+@media (prefers-color-scheme: dark) {
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-built_in,
+  .hljs-section,
+  .hljs-name {
+    color: #c586c0;
+  }
+  .hljs-string,
+  .hljs-attr,
+  .hljs-symbol,
+  .hljs-bullet,
+  .hljs-addition {
+    color: #ce9178;
+  }
+  .hljs-number,
+  .hljs-literal,
+  .hljs-meta {
+    color: #b5cea8;
+  }
+  .hljs-comment,
+  .hljs-quote,
+  .hljs-deletion {
+    color: #6a9955;
+    font-style: italic;
+  }
+  .hljs-title,
+  .hljs-title.function_,
+  .hljs-doctag {
+    color: #dcdcaa;
+  }
+  .hljs-variable,
+  .hljs-template-variable,
+  .hljs-property {
+    color: #9cdcfe;
+  }
+  .hljs-type,
+  .hljs-class .hljs-title,
+  .hljs-tag {
+    color: #4ec9b0;
+  }
+  .hljs-regexp {
+    color: #d16969;
+  }
+}
+body.cortex-theme-dark .hljs-keyword,
+body.cortex-theme-dark .hljs-selector-tag,
+body.cortex-theme-dark .hljs-built_in,
+body.cortex-theme-dark .hljs-section,
+body.cortex-theme-dark .hljs-name {
+  color: #c586c0;
+}
+body.cortex-theme-dark .hljs-string,
+body.cortex-theme-dark .hljs-attr,
+body.cortex-theme-dark .hljs-symbol,
+body.cortex-theme-dark .hljs-bullet,
+body.cortex-theme-dark .hljs-addition {
+  color: #ce9178;
+}
+body.cortex-theme-dark .hljs-number,
+body.cortex-theme-dark .hljs-literal,
+body.cortex-theme-dark .hljs-meta {
+  color: #b5cea8;
+}
+body.cortex-theme-dark .hljs-title,
+body.cortex-theme-dark .hljs-title.function_,
+body.cortex-theme-dark .hljs-doctag {
+  color: #dcdcaa;
+}
+body.cortex-theme-dark .hljs-variable,
+body.cortex-theme-dark .hljs-template-variable,
+body.cortex-theme-dark .hljs-property {
+  color: #9cdcfe;
+}
+body.cortex-theme-dark .hljs-type,
+body.cortex-theme-dark .hljs-class .hljs-title,
+body.cortex-theme-dark .hljs-tag {
+  color: #4ec9b0;
+}
+
+/* ---------- Tabs NodeView (interactive in v1.1) ----------------------- */
+
+.cortex-tabs.cortex-tabs-nodeview .cortex-tabs-titles {
+  user-select: none;
+}
+.cortex-tabs.cortex-tabs-nodeview .cortex-tab-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+  transition: background 100ms ease;
+}
+.cortex-tabs.cortex-tabs-nodeview .cortex-tab-title:hover:not(.active) {
+  background: var(--bg-hover, #eee);
+}
+.cortex-tab-title-text {
+  cursor: pointer;
+  user-select: none;
+}
+.cortex-tab-title-text:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.cortex-tab-rename-input {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 6px;
+  min-width: 80px;
+  outline: none;
+}
+.cortex-tab-remove,
+.cortex-tab-add {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.cortex-tab-remove:hover {
+  background: var(--bg-hover, #eee);
+  color: var(--danger, #c00);
+}
+.cortex-tab-add {
+  margin-left: 4px;
+  padding: 4px 8px;
+  border: 1px dashed var(--border);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  font-size: 0.85rem;
+}
+.cortex-tab-add:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+/* Active panel selection — driven PURELY from the wrapper's
+ * data-active-tab attribute. Same rule set covers both the editor
+ * NodeView (which sets data-active-tab via React props) and the
+ * read-mode HTML (where renderHTML emits data-active-tab on the
+ * outer div). The earlier "JS toggles a class on the active child"
+ * approach mutated PM's owned DOM and tripped its MutationObserver,
+ * which kicked the cursor out of the tab on the first keystroke. */
+.cortex-tabs > .cortex-tab-body > * {
+  display: none;
+}
+.cortex-tabs[data-active-tab="0"] > .cortex-tab-body > *:nth-child(1),
+.cortex-tabs[data-active-tab="1"] > .cortex-tab-body > *:nth-child(2),
+.cortex-tabs[data-active-tab="2"] > .cortex-tab-body > *:nth-child(3),
+.cortex-tabs[data-active-tab="3"] > .cortex-tab-body > *:nth-child(4),
+.cortex-tabs[data-active-tab="4"] > .cortex-tab-body > *:nth-child(5),
+.cortex-tabs[data-active-tab="5"] > .cortex-tab-body > *:nth-child(6),
+.cortex-tabs[data-active-tab="6"] > .cortex-tab-body > *:nth-child(7),
+.cortex-tabs[data-active-tab="7"] > .cortex-tab-body > *:nth-child(8),
+.cortex-tabs[data-active-tab="8"] > .cortex-tab-body > *:nth-child(9),
+.cortex-tabs[data-active-tab="9"] > .cortex-tab-body > *:nth-child(10) {
+  display: block;
+}
+
+.cortex-tabs-empty {
+  padding: 4px 10px;
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+/* ---------- Collapsible NodeView (interactive in v1.1) ---------------- */
+
+.cortex-toggle.cortex-toggle-nodeview {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3em 0.6em;
+  margin: 0.5em 0;
+}
+.cortex-toggle.cortex-toggle-nodeview .cortex-toggle-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.cortex-toggle.cortex-toggle-nodeview .cortex-toggle-summary-text {
+  font-weight: 600;
+  cursor: pointer;
+  flex: 1;
+}
+.cortex-toggle.cortex-toggle-nodeview .cortex-toggle-summary-input {
+  flex: 1;
+  font-weight: 600;
+  font-family: inherit;
+  font-size: inherit;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+.cortex-toggle.cortex-toggle-nodeview .cortex-toggle-chevron {
+  background: none;
+  border: none;
+  padding: 2px;
+  margin: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 120ms ease;
+  transform: rotate(-90deg);
+}
+.cortex-toggle.cortex-toggle-nodeview.open .cortex-toggle-chevron {
+  transform: rotate(0deg);
+}
+.cortex-toggle.cortex-toggle-nodeview .cortex-toggle-chevron:hover {
+  color: var(--text);
+}
+.cortex-toggle.cortex-toggle-nodeview .cortex-toggle-body {
+  margin-top: 0.4em;
+}
+.cortex-toggle.cortex-toggle-nodeview:not(.open) .cortex-toggle-body {
+  display: none;
+}
+
+/* Toolbar language picker for code blocks. */
+.cortex-tb-lang-select {
+  height: 24px;
+  padding: 0 4px;
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  border-radius: 3px;
+  margin-left: 2px;
+  cursor: pointer;
+}
+.cortex-tb-lang-select:hover {
+  background: var(--bg-card);
+}
+.cortex-tb-lang-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

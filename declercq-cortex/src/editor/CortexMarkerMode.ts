@@ -30,9 +30,7 @@ export const cortexMarkerKey = new PluginKey<MarkerModeState>(
 );
 
 export function getMarkerState(state: EditorState): MarkerModeState {
-  return (
-    cortexMarkerKey.getState(state) ?? { active: false, color: "#ffd166" }
-  );
+  return cortexMarkerKey.getState(state) ?? { active: false, color: "#ffd166" };
 }
 
 /**

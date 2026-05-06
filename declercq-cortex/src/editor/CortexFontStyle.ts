@@ -80,7 +80,11 @@ export const CortexFontStyle = Mark.create({
   },
 
   renderHTML({ HTMLAttributes, mark }) {
-    const a = mark.attrs as { size: number | null; family: string | null; weight: string | number | null };
+    const a = mark.attrs as {
+      size: number | null;
+      family: string | null;
+      weight: string | number | null;
+    };
     const inline: string[] = [];
     if (a.size) inline.push(`font-size: ${a.size}px`);
     if (a.family) inline.push(`font-family: ${a.family}`);

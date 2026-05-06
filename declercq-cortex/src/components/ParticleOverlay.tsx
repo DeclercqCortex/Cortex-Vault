@@ -11,13 +11,7 @@
 // inside the editor wrapper. It rescans on doc changes (debounced)
 // and on resize.
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  type RefObject,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, type RefObject } from "react";
 import type { ParticleType } from "../editor/CortexParticleHost";
 
 interface ParticleOverlayProps {
@@ -116,7 +110,9 @@ const RENDERERS: Record<ParticleType, Renderer> = {
       p.vy += 0.06; // gravity
       ctx.save();
       ctx.translate(p.x, p.y);
-      ctx.rotate(((p.rot ?? 0) + (s.particles.indexOf(p) % 6) * 30) * (Math.PI / 180));
+      ctx.rotate(
+        ((p.rot ?? 0) + (s.particles.indexOf(p) % 6) * 30) * (Math.PI / 180),
+      );
       ctx.fillStyle = `hsl(${p.hue}, 90%, 60%)`;
       ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
       ctx.restore();

@@ -23,7 +23,11 @@ import {
 } from "react";
 import type { Editor } from "@tiptap/react";
 import { setMarkerMode } from "../editor/CortexMarkerMode";
-import { PARTICLE_TYPES, type ParticleType } from "../editor/CortexParticleHost";
+import {
+  PARTICLE_TYPES,
+  type ParticleType,
+} from "../editor/CortexParticleHost";
+import { CORTEX_CODE_LANGUAGES } from "../editor/CortexCodeBlock";
 
 // ---- Toolbar prefs (persisted in localStorage) ---------------------------
 
@@ -102,9 +106,15 @@ const MARK_PALETTE = [
 ];
 
 const FONT_FAMILIES = [
-  { label: "Sans-serif", value: 'system-ui, -apple-system, "Segoe UI", sans-serif' },
+  {
+    label: "Sans-serif",
+    value: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+  },
   { label: "Serif", value: 'ui-serif, Georgia, "Iowan Old Style", serif' },
-  { label: "Monospace", value: 'ui-monospace, "Cascadia Code", Consolas, monospace' },
+  {
+    label: "Monospace",
+    value: 'ui-monospace, "Cascadia Code", Consolas, monospace',
+  },
   { label: "Handwriting", value: '"Caveat", "Comic Sans MS", cursive' },
   { label: "Inter", value: '"Inter", system-ui, sans-serif' },
   { label: "JetBrains Mono", value: '"JetBrains Mono", monospace' },
@@ -288,8 +298,7 @@ export function EditorToolbar({
       if (!editor) return undefined;
       try {
         const { from, to } = editor.state.selection;
-        const target =
-          from !== to ? { from, to } : lastSelectionRef.current;
+        const target = from !== to ? { from, to } : lastSelectionRef.current;
         const chain = editor.chain().focus();
         if (target) chain.setTextSelection(target);
         return fn(chain);
@@ -314,7 +323,9 @@ export function EditorToolbar({
   const [markerMark, setMarkerMark] = useState<string>("yellow");
   const [recentTextColors, setRecentTextColors] = useState<string[]>([]);
   const [recentHighlights, setRecentHighlights] = useState<string[]>([]);
-  const [recentUnderlineColors, setRecentUnderlineColors] = useState<string[]>([]);
+  const [recentUnderlineColors, setRecentUnderlineColors] = useState<string[]>(
+    [],
+  );
   const counts = useLiveCounts(editor);
 
   // Body-level pause flag.
@@ -477,9 +488,7 @@ export function EditorToolbar({
     });
     const cat = categoryOf(effect);
     const filtered = existing.filter((e) => categoryOf(e) !== cat);
-    const next = existing.includes(effect)
-      ? filtered
-      : [...filtered, effect];
+    const next = existing.includes(effect) ? filtered : [...filtered, effect];
     let tr = editor.state.tr;
     tr = tr.removeMark(range.from, range.to, markType);
     if (next.length > 0) {
@@ -634,7 +643,9 @@ export function EditorToolbar({
           {"</>"}
         </TbBtn>
         <TbBtn
-          onClick={() => editor.chain().focus().unsetAllMarks().clearNodes().run()}
+          onClick={() =>
+            editor.chain().focus().unsetAllMarks().clearNodes().run()
+          }
           title="Clear formatting (Ctrl+\\)"
         >
           ✕
@@ -656,13 +667,11 @@ export function EditorToolbar({
           <s>S</s>
         </TbBtn>
         <TbBtn
-          active={editor.isActive("cortexUnderlineStyled" as any, { style: "double" })}
+          active={editor.isActive("cortexUnderlineStyled" as any, {
+            style: "double",
+          })}
           onClick={() =>
-            editor
-              .chain()
-              .focus()
-              .setUnderlineStyled({ style: "double" })
-              .run()
+            editor.chain().focus().setUnderlineStyled({ style: "double" }).run()
           }
           title="Double strike line"
         >
@@ -670,11 +679,7 @@ export function EditorToolbar({
         </TbBtn>
         <TbBtn
           onClick={() =>
-            editor
-              .chain()
-              .focus()
-              .setUnderlineStyled({ style: "dashed" })
-              .run()
+            editor.chain().focus().setUnderlineStyled({ style: "dashed" }).run()
           }
           title="Dashed strike line"
         >
@@ -761,6 +766,33 @@ export function EditorToolbar({
         >
           {"{}"}
         </TbBtn>
+        {/* Cluster 21 v1.1 — language picker for the active code block.
+            Visible only when the cursor is inside a codeBlock; sets
+            the `language` attr that CodeBlockLowlight reads for
+            syntax highlighting. */}
+        {editor.isActive("codeBlock") ? (
+          <select
+            className="cortex-tb-lang-select"
+            value={
+              (editor.getAttributes("codeBlock") as any).language || "plaintext"
+            }
+            onChange={(e) => {
+              const lang = e.target.value;
+              editor
+                .chain()
+                .focus()
+                .updateAttributes("codeBlock" as any, { language: lang })
+                .run();
+            }}
+            title="Code block language"
+          >
+            {CORTEX_CODE_LANGUAGES.map((l) => (
+              <option key={l.value} value={l.value}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <TbBtn
           onClick={() => {
             // Drop cap: apply mark to the first character of the
@@ -892,7 +924,8 @@ export function EditorToolbar({
         <TbBtn
           onClick={() => {
             const cur =
-              (editor.getAttributes("cortexFontStyle" as any) as any)?.size ?? 16;
+              (editor.getAttributes("cortexFontStyle" as any) as any)?.size ??
+              16;
             const idx = FONT_SIZES.findIndex((s) => s >= cur);
             const next = FONT_SIZES[Math.min(FONT_SIZES.length - 1, idx + 1)];
             editor.chain().focus().setFontSize(next).run();
@@ -904,7 +937,8 @@ export function EditorToolbar({
         <TbBtn
           onClick={() => {
             const cur =
-              (editor.getAttributes("cortexFontStyle" as any) as any)?.size ?? 16;
+              (editor.getAttributes("cortexFontStyle" as any) as any)?.size ??
+              16;
             const idx = FONT_SIZES.findIndex((s) => s >= cur);
             const next = FONT_SIZES[Math.max(0, idx - 1)];
             editor.chain().focus().setFontSize(next).run();
@@ -932,11 +966,16 @@ export function EditorToolbar({
           className="cortex-tb-btn"
           onChange={(e) => {
             const v = e.target.value;
-            editor.chain().focus().setFontFamily(v || null).run();
+            editor
+              .chain()
+              .focus()
+              .setFontFamily(v || null)
+              .run();
           }}
           style={{ minWidth: 100 }}
           value={
-            (editor.getAttributes("cortexFontStyle" as any) as any)?.family ?? ""
+            (editor.getAttributes("cortexFontStyle" as any) as any)?.family ??
+            ""
           }
         >
           <option value="">Default</option>
@@ -949,11 +988,16 @@ export function EditorToolbar({
         <select
           className="cortex-tb-btn"
           value={
-            (editor.getAttributes("cortexFontStyle" as any) as any)?.weight ?? ""
+            (editor.getAttributes("cortexFontStyle" as any) as any)?.weight ??
+            ""
           }
           onChange={(e) => {
             const v = e.target.value;
-            editor.chain().focus().setFontWeight(v ? Number(v) : null).run();
+            editor
+              .chain()
+              .focus()
+              .setFontWeight(v ? Number(v) : null)
+              .run();
           }}
           style={{ minWidth: 60 }}
         >
@@ -1051,9 +1095,7 @@ export function EditorToolbar({
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               if (!c.mark) return;
-              withSelection((chain) =>
-                chain.toggleColorMark(c.mark!).run(),
-              );
+              withSelection((chain) => chain.toggleColorMark(c.mark!).run());
             }}
           />
         ))}
@@ -1328,7 +1370,11 @@ export function EditorToolbar({
         </TbBtn>
         <TbBtn
           onClick={() =>
-            editor.chain().focus().insertContent("<hr class=\"cortex-page-break\" />").run()
+            editor
+              .chain()
+              .focus()
+              .insertContent('<hr class="cortex-page-break" />')
+              .run()
           }
           title="Page break"
         >
@@ -1441,8 +1487,14 @@ export function EditorToolbar({
                 type: "cortexColumns" as any,
                 attrs: { count: 2 },
                 content: [
-                  { type: "paragraph", content: [{ type: "text", text: "Left" }] },
-                  { type: "paragraph", content: [{ type: "text", text: "Right" }] },
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Left" }],
+                  },
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Right" }],
+                  },
                 ],
               })
               .run()
@@ -1496,8 +1548,22 @@ export function EditorToolbar({
               .focus()
               .insertContent({
                 type: "cortexTabsBlock" as any,
-                attrs: { tabs: "Tab 1|Tab 2" },
-                content: [{ type: "paragraph", content: [{ type: "text", text: "Tab content" }] }],
+                attrs: { tabs: "Tab 1|Tab 2", activeTab: 0 },
+                // Cluster 21 v1.1 — one paragraph per tab title.
+                // The NodeView shows children[activeTab]; without N
+                // children, switching to tab N>0 makes the body
+                // empty and typing pushes the cursor out of the
+                // block.
+                content: [
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Tab 1 content" }],
+                  },
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Tab 2 content" }],
+                  },
+                ],
               })
               .run()
           }
@@ -1516,28 +1582,41 @@ export function EditorToolbar({
               without inserting (was a bug previously where Cancel
               still inserted ❦). */}
           <div className="cortex-tb-grid-7">
-            {["❦", "✦", "◆", "※", "❖", "❀", "✿", "★", "☆", "•", "○", "─", "═", "✧"].map(
-              (g) => (
-                <button
-                  key={g}
-                  className="cortex-tb-btn"
-                  onClick={() => {
-                    editor
-                      .chain()
-                      .focus()
-                      .insertContent({
-                        type: "cortexDecoSeparator" as any,
-                        attrs: { glyph: g },
-                      })
-                      .run();
-                    setOpenPopover(null);
-                  }}
-                  style={{ fontSize: "1.1em" }}
-                >
-                  {g}
-                </button>
-              ),
-            )}
+            {[
+              "❦",
+              "✦",
+              "◆",
+              "※",
+              "❖",
+              "❀",
+              "✿",
+              "★",
+              "☆",
+              "•",
+              "○",
+              "─",
+              "═",
+              "✧",
+            ].map((g) => (
+              <button
+                key={g}
+                className="cortex-tb-btn"
+                onClick={() => {
+                  editor
+                    .chain()
+                    .focus()
+                    .insertContent({
+                      type: "cortexDecoSeparator" as any,
+                      attrs: { glyph: g },
+                    })
+                    .run();
+                  setOpenPopover(null);
+                }}
+                style={{ fontSize: "1.1em" }}
+              >
+                {g}
+              </button>
+            ))}
           </div>
         </TbPopover>
         <TbBtn
@@ -1549,7 +1628,10 @@ export function EditorToolbar({
                 type: "cortexCollapsible" as any,
                 attrs: { summary: "Click to expand" },
                 content: [
-                  { type: "paragraph", content: [{ type: "text", text: "Hidden content" }] },
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Hidden content" }],
+                  },
                 ],
               })
               .run()
@@ -1566,7 +1648,10 @@ export function EditorToolbar({
               .insertContent({
                 type: "cortexMarginNote" as any,
                 content: [
-                  { type: "paragraph", content: [{ type: "text", text: "Margin note" }] },
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Margin note" }],
+                  },
                 ],
               })
               .run()
@@ -1583,7 +1668,10 @@ export function EditorToolbar({
               .insertContent({
                 type: "cortexFrame" as any,
                 content: [
-                  { type: "paragraph", content: [{ type: "text", text: "Framed" }] },
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "Framed" }],
+                  },
                 ],
               })
               .run()
@@ -1696,10 +1784,7 @@ export function EditorToolbar({
         <TbBtn onClick={() => window.print()} title="Print / save as PDF">
           🖨
         </TbBtn>
-        <TbBtn
-          onClick={() => exportDocx(editor, notePath)}
-          title="Export DOCX"
-        >
+        <TbBtn onClick={() => exportDocx(editor, notePath)} title="Export DOCX">
           📄
         </TbBtn>
         <span style={countStyle} title="Words / characters / reading time">
@@ -1744,7 +1829,10 @@ export function EditorToolbar({
         >
           🔬
         </TbBtn>
-        <TbBtn onClick={() => onInsertWikilink?.()} title="Wikilink (Ctrl+Shift+W)">
+        <TbBtn
+          onClick={() => onInsertWikilink?.()}
+          title="Wikilink (Ctrl+Shift+W)"
+        >
           [[ ]]
         </TbBtn>
         <TbBtn
@@ -1811,7 +1899,9 @@ export function EditorToolbar({
           onClose={() => setFindOpen(false)}
         />
       )}
-      {outlineOpen && <OutlinePanel editor={editor} onClose={() => setOutlineOpen(false)} />}
+      {outlineOpen && (
+        <OutlinePanel editor={editor} onClose={() => setOutlineOpen(false)} />
+      )}
     </div>
   );
 }
@@ -1833,7 +1923,9 @@ function Group({
 }) {
   return (
     <div
-      className={"cortex-editor-toolbar-group" + (collapsed ? " collapsed" : "")}
+      className={
+        "cortex-editor-toolbar-group" + (collapsed ? " collapsed" : "")
+      }
       data-group={id}
     >
       <button
@@ -2133,7 +2225,12 @@ function OutlinePanel({
           key={`${it.pos}-${i}`}
           className={`cortex-outline-item h${Math.min(3, it.level)}`}
           onClick={() => {
-            editor.chain().focus().setTextSelection(it.pos + 1).scrollIntoView().run();
+            editor
+              .chain()
+              .focus()
+              .setTextSelection(it.pos + 1)
+              .scrollIntoView()
+              .run();
           }}
         >
           {it.text}
@@ -2171,10 +2268,7 @@ function useLiveCounts(editor: Editor | null) {
 
 // ---- Multi-color + sprinkle helpers --------------------------------------
 
-function applyMultiColor(
-  editor: Editor,
-  palette: { hex: string }[],
-): void {
+function applyMultiColor(editor: Editor, palette: { hex: string }[]): void {
   const { from, to } = editor.state.selection;
   if (from === to) return;
   const text = editor.state.doc.textBetween(from, to);
@@ -2184,12 +2278,7 @@ function applyMultiColor(
         `<span style="color: ${palette[i % palette.length].hex}">${ch}</span>`,
     )
     .join("");
-  editor
-    .chain()
-    .focus()
-    .deleteRange({ from, to })
-    .insertContent(html)
-    .run();
+  editor.chain().focus().deleteRange({ from, to }).insertContent(html).run();
 }
 
 function applyRandomSprinkle(editor: Editor): void {
@@ -2202,17 +2291,15 @@ function applyRandomSprinkle(editor: Editor): void {
       return `<span style="color: hsl(${hue}, 80%, 55%)">${ch}</span>`;
     })
     .join("");
-  editor
-    .chain()
-    .focus()
-    .deleteRange({ from, to })
-    .insertContent(html)
-    .run();
+  editor.chain().focus().deleteRange({ from, to }).insertContent(html).run();
 }
 
 // ---- DOCX export ---------------------------------------------------------
 
-async function exportDocx(editor: Editor, notePath: string | null): Promise<void> {
+async function exportDocx(
+  editor: Editor,
+  notePath: string | null,
+): Promise<void> {
   // v1.0: rough HTML → DOCX conversion via a Blob + the .doc extension.
   // Word will open .doc files containing HTML happily; full .docx
   // (which is a zip with XML inside) lands in v1.1 with a JS lib.
@@ -2225,7 +2312,7 @@ async function exportDocx(editor: Editor, notePath: string | null): Promise<void
   const a = document.createElement("a");
   a.href = url;
   const stem = notePath
-    ? notePath.split(/[/\\]/).pop()?.replace(/\.md$/, "") ?? "note"
+    ? (notePath.split(/[/\\]/).pop()?.replace(/\.md$/, "") ?? "note")
     : "note";
   a.download = `${stem}.doc`;
   document.body.appendChild(a);

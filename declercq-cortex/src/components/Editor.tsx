@@ -77,6 +77,11 @@ import { CortexFontStyle } from "../editor/CortexFontStyle";
 import { CortexUnderlineStyled } from "../editor/CortexUnderlineStyled";
 import { CortexTextEffect } from "../editor/CortexTextEffect";
 import { CortexParticleHost } from "../editor/CortexParticleHost";
+import { CortexCodeBlock } from "../editor/CortexCodeBlock";
+import {
+  CortexCollapsibleNodeView,
+  CortexTabsNodeView,
+} from "../editor/CortexBlockNodeViews";
 import {
   buildCortexMarkerPlugin,
   cortexMarkerKey,
@@ -567,12 +572,19 @@ export function Editor({
       // - paragraph / heading: replaced with AlignmentAwareParagraph /
       //   AlignmentAwareHeading so non-default textAlign attribute
       //   round-trips through markdown as inline HTML (Cluster 8 v2.1.4).
+      // Cluster 21 v1.1 — disable StarterKit's CodeBlock so the
+      // CodeBlockLowlight extension (with lowlight + highlight.js) is
+      // the only registered code-block node. The lowlight version
+      // renders <pre><code class="language-…"> with hljs token spans
+      // inside; the CSS in src/index.css themes those tokens.
       StarterKit.configure({
         strike: false,
         link: false,
         paragraph: false,
         heading: false,
+        codeBlock: false,
       }),
+      CortexCodeBlock,
       HtmlStrike,
       HtmlUnderline,
       AlignmentAwareParagraph,
@@ -712,14 +724,26 @@ export function Editor({
       CortexCallout,
       CortexColumns,
       CortexSideBySide,
-      CortexCollapsible,
+      // Cluster 21 v1.1 — interactive NodeView for collapsible
+      // (click-to-toggle + double-click-to-rename summary).
+      CortexCollapsible.extend({
+        addNodeView() {
+          return ReactNodeViewRenderer(CortexCollapsibleNodeView);
+        },
+      }),
       CortexMarginNote,
       CortexFrame,
       CortexPullQuote,
       CortexDecoSeparator,
       CortexPageBreak,
       CortexMathBlock,
-      CortexTabsBlock,
+      // Cluster 21 v1.1 — interactive NodeView for tabs
+      // (click-to-switch with active-tab persistence).
+      CortexTabsBlock.extend({
+        addNodeView() {
+          return ReactNodeViewRenderer(CortexTabsNodeView);
+        },
+      }),
       CortexFootnoteRef,
       CortexCitationRef,
       CortexMathInline,

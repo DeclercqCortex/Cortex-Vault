@@ -133,21 +133,32 @@ export const CortexCollapsible = Node.create({
       },
       open: {
         default: false,
-        parseHTML: (el) => el.hasAttribute("open"),
-        renderHTML: (a: Record<string, unknown>) => (a.open ? { open: "" } : {}),
+        parseHTML: (el) =>
+          el.hasAttribute("open") || el.getAttribute("data-open") === "true",
+        renderHTML: (a: Record<string, unknown>) =>
+          a.open ? { open: "", "data-open": "true" } : { "data-open": "false" },
       },
     };
   },
+  // Cluster 21 v1.1 — accept both the v1.0 native <details> emission
+  // and a generic .cortex-toggle wrapper (the NodeView's wrapper
+  // class), so on save we round-trip via the same parseHTML rules
+  // regardless of which renderer wrote the markup last.
   parseHTML() {
-    return [{ tag: "details.cortex-toggle" }];
+    return [{ tag: "details.cortex-toggle" }, { tag: "div.cortex-toggle" }];
   },
   renderHTML({ HTMLAttributes, node }) {
     const summary = String(node.attrs.summary ?? "Toggle");
+    const open = Boolean(node.attrs.open);
     return [
       "details",
       mergeAttributes(HTMLAttributes, { class: "cortex-toggle" }),
       ["summary", {}, summary],
-      ["div", { class: "cortex-toggle-body" }, 0],
+      [
+        "div",
+        { class: "cortex-toggle-body", "data-open": open ? "true" : "false" },
+        0,
+      ],
     ];
   },
 });
@@ -294,6 +305,17 @@ export const CortexTabsBlock = Node.create({
           "data-tabs": String(a.tabs ?? "Tab 1|Tab 2"),
         }),
       },
+      // Cluster 21 v1.1 — currently visible tab index, persisted
+      // through markdown round-trip via data-active-tab so a user
+      // who switches to tab 2 and saves the file reopens with
+      // tab 2 showing rather than always defaulting to the first.
+      activeTab: {
+        default: 0,
+        parseHTML: (el) => Number(el.getAttribute("data-active-tab") || 0),
+        renderHTML: (a: Record<string, unknown>) => ({
+          "data-active-tab": String(Number(a.activeTab) || 0),
+        }),
+      },
     };
   },
   parseHTML() {
@@ -304,18 +326,25 @@ export const CortexTabsBlock = Node.create({
       .split("|")
       .map((t) => t.trim())
       .filter(Boolean);
+    const active = Math.min(
+      Math.max(0, Number(node.attrs.activeTab) || 0),
+      Math.max(0, titles.length - 1),
+    );
     const titleEls: any[] = [
       "div",
       { class: "cortex-tabs-titles" },
       ...titles.map((t, i) => [
         "span",
-        { class: "cortex-tab-title" + (i === 0 ? " active" : "") },
+        { class: "cortex-tab-title" + (i === active ? " active" : "") },
         t,
       ]),
     ];
     return [
       "div",
-      mergeAttributes(HTMLAttributes, { class: "cortex-tabs" }),
+      mergeAttributes(HTMLAttributes, {
+        class: "cortex-tabs",
+        style: `--cortex-tab-active: ${active + 1}`,
+      }),
       titleEls,
       ["div", { class: "cortex-tab-body" }, 0],
     ];
@@ -342,11 +371,7 @@ export const CortexFootnoteRef = Mark.create({
     return [{ tag: "sup.cortex-fn" }];
   },
   renderHTML({ HTMLAttributes }) {
-    return [
-      "sup",
-      mergeAttributes(HTMLAttributes, { class: "cortex-fn" }),
-      0,
-    ];
+    return ["sup", mergeAttributes(HTMLAttributes, { class: "cortex-fn" }), 0];
   },
 });
 

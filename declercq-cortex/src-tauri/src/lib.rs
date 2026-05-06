@@ -5071,20 +5071,12 @@ fn iso_date_minus_one_day(iso: &str) -> Option<String> {
     Some(format!("{:04}-12-31", y - 1))
 }
 
-fn days_in_month(y: i32, m: u32) -> u32 {
-    match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 30,
-    }
-}
+// Cluster 22 v1.0 had a second `days_in_month` defined here for the
+// templates' date-token substitution. Removed in Cluster 21 v1.1 — the
+// calendar helper of the same name (defined further down near
+// `ymd_from_unix` / `days_from_civil`) handles all callers identically
+// for valid months. The two implementations only disagreed on the
+// `_` arm (30 vs 0) for invalid month inputs that never occur.
 
 /// Replace every `{{token}}` occurrence with its corresponding context
 /// value. Unknown tokens are left literal — that way a template that uses
@@ -5221,7 +5213,10 @@ fn resolve_template_body(
     match read_or_init_template(vault_path, doc_type) {
         Ok(body) => Some(body),
         Err(e) => {
-            eprintln!("[templates] read_or_init_template({}) failed: {}", doc_type, e);
+            eprintln!(
+                "[templates] read_or_init_template({}) failed: {}",
+                doc_type, e
+            );
             None
         }
     }

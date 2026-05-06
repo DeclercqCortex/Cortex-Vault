@@ -1335,399 +1335,399 @@ function App() {
         }}
       />
       <div style={baseStyles.appShell}>
-      <aside
-        style={{
-          ...baseStyles.sidebar,
-          width: sidebarCollapsed ? "32px" : "300px",
-          minWidth: sidebarCollapsed ? "32px" : "260px",
-          borderRight:
-            activeMode === "sidebar" &&
-            activeView !== "pdf-reader" &&
-            !sidebarCollapsed
-              ? "2px solid var(--accent)"
-              : "1px solid var(--border)",
-          boxShadow:
-            activeMode === "sidebar" &&
-            activeView !== "pdf-reader" &&
-            !sidebarCollapsed
-              ? "inset -1px 0 0 var(--accent)"
-              : "none",
-        }}
-      >
-        {sidebarCollapsed ? (
-          <div style={baseStyles.sidebarCollapsedStrip}>
-            <button
-              onClick={toggleSidebar}
-              style={baseStyles.sidebarToggleBtn}
-              title="Expand sidebar"
-              aria-label="Expand sidebar"
-            >
-              ▶
-            </button>
-          </div>
-        ) : (
-          <>
-            <header style={baseStyles.sidebarHeader}>
-              <div style={baseStyles.sidebarTitleRow}>
-                <button
-                  onClick={toggleSidebar}
-                  style={baseStyles.sidebarToggleBtn}
-                  title="Collapse sidebar"
-                  aria-label="Collapse sidebar"
-                >
-                  ◀
-                </button>
-                <strong style={baseStyles.sidebarTitle}>Cortex</strong>
-                <div style={baseStyles.sidebarActions}>
-                  <button
-                    onClick={openTodayDailyLog}
-                    style={baseStyles.changeBtn}
-                    title="Open today's daily log (Ctrl+D)"
-                  >
-                    Today
-                  </button>
-                  <button
-                    onClick={() => setPaletteOpen(true)}
-                    style={baseStyles.changeBtn}
-                    title="Search notes (Ctrl+K)"
-                  >
-                    Search
-                  </button>
-                  <button
-                    onClick={() => setHierarchyKind("note")}
-                    style={baseStyles.changeBtn}
-                    title="New note (Ctrl+N)"
-                  >
-                    + Note
-                  </button>
-                  <button
-                    onClick={() => setHierarchyKind("idea")}
-                    style={baseStyles.changeBtn}
-                    title="New idea (saved in 04-Ideas/)"
-                  >
-                    + Idea
-                  </button>
-                  <button
-                    onClick={() => {
-                      const handle = paneRefs.current[activeSlotIdx];
-                      if (handle) handle.setActiveView("idea-log");
-                    }}
-                    style={baseStyles.changeBtn}
-                    title="Open Idea Log (active slot)"
-                  >
-                    Ideas
-                  </button>
-                  <button
-                    onClick={() => setHierarchyKind("method")}
-                    style={baseStyles.changeBtn}
-                    title="New method (saved in 05-Methods/)"
-                  >
-                    + Method
-                  </button>
-                  <button
-                    onClick={() => {
-                      const handle = paneRefs.current[activeSlotIdx];
-                      if (handle) handle.setActiveView("methods-arsenal");
-                    }}
-                    style={baseStyles.changeBtn}
-                    title="Open Methods Arsenal (active slot)"
-                  >
-                    Methods
-                  </button>
-                  <button
-                    onClick={() => setHierarchyKind("protocol")}
-                    style={baseStyles.changeBtn}
-                    title="New protocol (saved in 06-Protocols/)"
-                  >
-                    + Protocol
-                  </button>
-                  <button
-                    onClick={() => {
-                      const handle = paneRefs.current[activeSlotIdx];
-                      if (handle) handle.setActiveView("protocols-log");
-                    }}
-                    style={baseStyles.changeBtn}
-                    title="Open Protocols Log (active slot)"
-                  >
-                    Protocols
-                  </button>
-                  <button
-                    onClick={() => setHierarchyKind("project")}
-                    style={baseStyles.changeBtn}
-                    title="New project (Ctrl+Shift+P)"
-                  >
-                    + Proj
-                  </button>
-                  <button
-                    onClick={() => setHierarchyKind("experiment")}
-                    style={baseStyles.changeBtn}
-                    title="New experiment (Ctrl+Shift+E)"
-                  >
-                    + Exp
-                  </button>
-                  <button
-                    onClick={() => setHierarchyKind("iteration")}
-                    style={baseStyles.changeBtn}
-                    title="New iteration (Ctrl+Shift+I)"
-                  >
-                    + Iter
-                  </button>
-                  <button
-                    onClick={() => setBlockModalOpen(true)}
-                    style={baseStyles.changeBtn}
-                    title="Insert experiment block (Ctrl+Shift+B)"
-                  >
-                    + Block
-                  </button>
-                  <ReviewsMenu onPick={pickDestination} />
-                  <button
-                    onClick={() => {
-                      const handle = paneRefs.current[activeSlotIdx];
-                      if (handle) handle.setActiveView("calendar");
-                    }}
-                    style={baseStyles.changeBtn}
-                    title="Open calendar"
-                  >
-                    Cal
-                  </button>
-                  <button
-                    onClick={() => {
-                      const handle = paneRefs.current[activeSlotIdx];
-                      if (handle) handle.setActiveView("time-tracking");
-                    }}
-                    style={baseStyles.changeBtn}
-                    title="Time tracking — planned vs actual"
-                  >
-                    ⏱ Time
-                  </button>
-                  <button
-                    onClick={() => setIntegrationsOpen(true)}
-                    style={baseStyles.changeBtn}
-                    title="Integrations settings (Ctrl+,)"
-                  >
-                    GH
-                  </button>
-                  <button
-                    onClick={() => setTemplatesModalOpen(true)}
-                    style={baseStyles.changeBtn}
-                    title="Document templates — edit per-type defaults"
-                  >
-                    Templates
-                  </button>
-                  <button
-                    onClick={() => setRefreshKey((k) => k + 1)}
-                    style={baseStyles.iconBtn}
-                    title="Refresh file tree"
-                    aria-label="Refresh file tree"
-                  >
-                    ↻
-                  </button>
-                  <button
-                    onClick={pickVault}
-                    style={baseStyles.changeBtn}
-                    title="Choose a different vault"
-                  >
-                    Change…
-                  </button>
-                </div>
-              </div>
-              <div style={baseStyles.sidebarPath} title={vaultPath}>
-                {vaultPath}
-              </div>
-            </header>
-            <div style={baseStyles.sidebarBody}>
-              <FileTree
-                vaultPath={vaultPath}
-                onSelectFile={(p, opts) =>
-                  handleTreeClick(p, !!opts?.ctrlClick)
-                }
-                selectedPath={treeHighlight}
-                refreshKey={refreshKey}
-              />
-            </div>
-            <footer style={baseStyles.sidebarFooter}>
+        <aside
+          style={{
+            ...baseStyles.sidebar,
+            width: sidebarCollapsed ? "32px" : "300px",
+            minWidth: sidebarCollapsed ? "32px" : "260px",
+            borderRight:
+              activeMode === "sidebar" &&
+              activeView !== "pdf-reader" &&
+              !sidebarCollapsed
+                ? "2px solid var(--accent)"
+                : "1px solid var(--border)",
+            boxShadow:
+              activeMode === "sidebar" &&
+              activeView !== "pdf-reader" &&
+              !sidebarCollapsed
+                ? "inset -1px 0 0 var(--accent)"
+                : "none",
+          }}
+        >
+          {sidebarCollapsed ? (
+            <div style={baseStyles.sidebarCollapsedStrip}>
               <button
-                onClick={() => setHelpOpen(true)}
-                style={baseStyles.iconBtn}
-                title="Keyboard shortcuts (Ctrl+/)"
-                aria-label="Keyboard shortcuts"
+                onClick={toggleSidebar}
+                style={baseStyles.sidebarToggleBtn}
+                title="Expand sidebar"
+                aria-label="Expand sidebar"
               >
-                ?
+                ▶
               </button>
-              <div style={{ flex: 1 }} />
-              <ThemeToggle theme={theme} setTheme={setTheme} />
-            </footer>
-          </>
-        )}
-      </aside>
+            </div>
+          ) : (
+            <>
+              <header style={baseStyles.sidebarHeader}>
+                <div style={baseStyles.sidebarTitleRow}>
+                  <button
+                    onClick={toggleSidebar}
+                    style={baseStyles.sidebarToggleBtn}
+                    title="Collapse sidebar"
+                    aria-label="Collapse sidebar"
+                  >
+                    ◀
+                  </button>
+                  <strong style={baseStyles.sidebarTitle}>Cortex</strong>
+                  <div style={baseStyles.sidebarActions}>
+                    <button
+                      onClick={openTodayDailyLog}
+                      style={baseStyles.changeBtn}
+                      title="Open today's daily log (Ctrl+D)"
+                    >
+                      Today
+                    </button>
+                    <button
+                      onClick={() => setPaletteOpen(true)}
+                      style={baseStyles.changeBtn}
+                      title="Search notes (Ctrl+K)"
+                    >
+                      Search
+                    </button>
+                    <button
+                      onClick={() => setHierarchyKind("note")}
+                      style={baseStyles.changeBtn}
+                      title="New note (Ctrl+N)"
+                    >
+                      + Note
+                    </button>
+                    <button
+                      onClick={() => setHierarchyKind("idea")}
+                      style={baseStyles.changeBtn}
+                      title="New idea (saved in 04-Ideas/)"
+                    >
+                      + Idea
+                    </button>
+                    <button
+                      onClick={() => {
+                        const handle = paneRefs.current[activeSlotIdx];
+                        if (handle) handle.setActiveView("idea-log");
+                      }}
+                      style={baseStyles.changeBtn}
+                      title="Open Idea Log (active slot)"
+                    >
+                      Ideas
+                    </button>
+                    <button
+                      onClick={() => setHierarchyKind("method")}
+                      style={baseStyles.changeBtn}
+                      title="New method (saved in 05-Methods/)"
+                    >
+                      + Method
+                    </button>
+                    <button
+                      onClick={() => {
+                        const handle = paneRefs.current[activeSlotIdx];
+                        if (handle) handle.setActiveView("methods-arsenal");
+                      }}
+                      style={baseStyles.changeBtn}
+                      title="Open Methods Arsenal (active slot)"
+                    >
+                      Methods
+                    </button>
+                    <button
+                      onClick={() => setHierarchyKind("protocol")}
+                      style={baseStyles.changeBtn}
+                      title="New protocol (saved in 06-Protocols/)"
+                    >
+                      + Protocol
+                    </button>
+                    <button
+                      onClick={() => {
+                        const handle = paneRefs.current[activeSlotIdx];
+                        if (handle) handle.setActiveView("protocols-log");
+                      }}
+                      style={baseStyles.changeBtn}
+                      title="Open Protocols Log (active slot)"
+                    >
+                      Protocols
+                    </button>
+                    <button
+                      onClick={() => setHierarchyKind("project")}
+                      style={baseStyles.changeBtn}
+                      title="New project (Ctrl+Shift+P)"
+                    >
+                      + Proj
+                    </button>
+                    <button
+                      onClick={() => setHierarchyKind("experiment")}
+                      style={baseStyles.changeBtn}
+                      title="New experiment (Ctrl+Shift+E)"
+                    >
+                      + Exp
+                    </button>
+                    <button
+                      onClick={() => setHierarchyKind("iteration")}
+                      style={baseStyles.changeBtn}
+                      title="New iteration (Ctrl+Shift+I)"
+                    >
+                      + Iter
+                    </button>
+                    <button
+                      onClick={() => setBlockModalOpen(true)}
+                      style={baseStyles.changeBtn}
+                      title="Insert experiment block (Ctrl+Shift+B)"
+                    >
+                      + Block
+                    </button>
+                    <ReviewsMenu onPick={pickDestination} />
+                    <button
+                      onClick={() => {
+                        const handle = paneRefs.current[activeSlotIdx];
+                        if (handle) handle.setActiveView("calendar");
+                      }}
+                      style={baseStyles.changeBtn}
+                      title="Open calendar"
+                    >
+                      Cal
+                    </button>
+                    <button
+                      onClick={() => {
+                        const handle = paneRefs.current[activeSlotIdx];
+                        if (handle) handle.setActiveView("time-tracking");
+                      }}
+                      style={baseStyles.changeBtn}
+                      title="Time tracking — planned vs actual"
+                    >
+                      ⏱ Time
+                    </button>
+                    <button
+                      onClick={() => setIntegrationsOpen(true)}
+                      style={baseStyles.changeBtn}
+                      title="Integrations settings (Ctrl+,)"
+                    >
+                      GH
+                    </button>
+                    <button
+                      onClick={() => setTemplatesModalOpen(true)}
+                      style={baseStyles.changeBtn}
+                      title="Document templates — edit per-type defaults"
+                    >
+                      Templates
+                    </button>
+                    <button
+                      onClick={() => setRefreshKey((k) => k + 1)}
+                      style={baseStyles.iconBtn}
+                      title="Refresh file tree"
+                      aria-label="Refresh file tree"
+                    >
+                      ↻
+                    </button>
+                    <button
+                      onClick={pickVault}
+                      style={baseStyles.changeBtn}
+                      title="Choose a different vault"
+                    >
+                      Change…
+                    </button>
+                  </div>
+                </div>
+                <div style={baseStyles.sidebarPath} title={vaultPath}>
+                  {vaultPath}
+                </div>
+              </header>
+              <div style={baseStyles.sidebarBody}>
+                <FileTree
+                  vaultPath={vaultPath}
+                  onSelectFile={(p, opts) =>
+                    handleTreeClick(p, !!opts?.ctrlClick)
+                  }
+                  selectedPath={treeHighlight}
+                  refreshKey={refreshKey}
+                />
+              </div>
+              <footer style={baseStyles.sidebarFooter}>
+                <button
+                  onClick={() => setHelpOpen(true)}
+                  style={baseStyles.iconBtn}
+                  title="Keyboard shortcuts (Ctrl+/)"
+                  aria-label="Keyboard shortcuts"
+                >
+                  ?
+                </button>
+                <div style={{ flex: 1 }} />
+                <ThemeToggle theme={theme} setTheme={setTheme} />
+              </footer>
+            </>
+          )}
+        </aside>
 
-      {/* Main pane area: top bar with layout picker, then layout grid. */}
-      <div style={baseStyles.mainCol}>
-        <div style={baseStyles.mainTopBar}>
-          <div style={{ flex: 1 }} />
-          <span style={baseStyles.activeSlotLabel}>
-            {slotCount > 1 ? `Active: slot ${activeSlotIdx + 1}` : ""}
-          </span>
-          <NotificationBell
-            vaultPath={vaultPath}
-            refreshTick={reminderRefreshTick}
-          />
-          <LayoutPicker mode={layoutMode} onChange={setLayoutMode} />
-        </div>
+        {/* Main pane area: top bar with layout picker, then layout grid. */}
+        <div style={baseStyles.mainCol}>
+          <div style={baseStyles.mainTopBar}>
+            <div style={{ flex: 1 }} />
+            <span style={baseStyles.activeSlotLabel}>
+              {slotCount > 1 ? `Active: slot ${activeSlotIdx + 1}` : ""}
+            </span>
+            <NotificationBell
+              vaultPath={vaultPath}
+              refreshTick={reminderRefreshTick}
+            />
+            <LayoutPicker mode={layoutMode} onChange={setLayoutMode} />
+          </div>
 
-        <div style={baseStyles.gridArea}>
-          <LayoutGrid
-            mode={layoutMode}
-            colFrac={colFrac}
-            rowFrac={rowFrac}
-            onColFracChange={setColFrac}
-            onRowFracChange={setRowFrac}
-          >
-            {panes.slice(0, slotCount)}
-          </LayoutGrid>
-          {/* Hidden mount-keeper: panes beyond the current layout's
+          <div style={baseStyles.gridArea}>
+            <LayoutGrid
+              mode={layoutMode}
+              colFrac={colFrac}
+              rowFrac={rowFrac}
+              onColFracChange={setColFrac}
+              onRowFracChange={setRowFrac}
+            >
+              {panes.slice(0, slotCount)}
+            </LayoutGrid>
+            {/* Hidden mount-keeper: panes beyond the current layout's
               slot count stay mounted here so their state survives a
               layout shrink (and the close handler still sees dirty
               work in any pane). */}
-          <div style={baseStyles.hiddenPaneStash} aria-hidden="true">
-            {panes.slice(slotCount)}
+            <div style={baseStyles.hiddenPaneStash} aria-hidden="true">
+              {panes.slice(slotCount)}
+            </div>
           </div>
+
+          {error && (
+            <div style={baseStyles.errorBanner}>
+              <p style={baseStyles.errorText}>
+                {error}
+                <button
+                  onClick={() => setError(null)}
+                  style={{ ...baseStyles.changeBtn, marginLeft: "0.75rem" }}
+                >
+                  dismiss
+                </button>
+              </p>
+            </div>
+          )}
         </div>
 
-        {error && (
-          <div style={baseStyles.errorBanner}>
-            <p style={baseStyles.errorText}>
-              {error}
-              <button
-                onClick={() => setError(null)}
-                style={{ ...baseStyles.changeBtn, marginLeft: "0.75rem" }}
-              >
-                dismiss
-              </button>
-            </p>
-          </div>
-        )}
-      </div>
-
-      <CommandPalette
-        vaultPath={vaultPath}
-        isOpen={paletteOpen}
-        onClose={() => {
-          setPaletteOpen(false);
-          // Always clear wikilink pick-mode when the palette closes,
-          // so a subsequent plain Ctrl+K isn't accidentally still in
-          // pick-mode.
-          setWikilinkPickMode(false);
-        }}
-        onOpenFile={(p) => {
-          setPaletteOpen(false);
-          // Multi-slot: ask the user which slot to open in. Single
-          // slot: just route directly.
-          if (slotCount > 1) {
-            setPendingSlotChoice({ path: p });
-          } else {
-            selectFileInSlot(p, 0);
-          }
-        }}
-        onPickResult={
-          wikilinkPickMode
-            ? (_path, title) => {
-                const handle = paneRefs.current[activeSlotIdx];
-                if (handle?.insertWikilinkAt) {
-                  handle.insertWikilinkAt(title);
-                }
-                setWikilinkPickMode(false);
-                setPaletteOpen(false);
-              }
-            : undefined
-        }
-      />
-      <SlotPicker
-        isOpen={!!pendingSlotChoice}
-        layout={layoutMode}
-        slotPaths={slotPaths.slice(0, slotCount)}
-        pendingPath={pendingSlotChoice?.path ?? null}
-        onPick={(slotIndex) => {
-          if (pendingSlotChoice) {
-            selectFileInSlot(pendingSlotChoice.path, slotIndex);
-          }
-          setPendingSlotChoice(null);
-        }}
-        onClose={() => setPendingSlotChoice(null)}
-      />
-      <ShortcutsHelp isOpen={helpOpen} onClose={() => setHelpOpen(false)} />
-      <ColorLegend
-        visible={legendVisible}
-        onDismiss={() => {
-          setLegendVisible(false);
-          try {
-            localStorage.setItem("cortex:legend-hidden", "true");
-          } catch {
-            // ignore
-          }
-        }}
-        onPickDestination={pickDestination}
-      />
-      <NewHierarchyModal
-        vaultPath={vaultPath}
-        kind={hierarchyKind}
-        onClose={() => setHierarchyKind(null)}
-        onCreated={(path) => {
-          setHierarchyKind(null);
-          // New file → open in active slot.
-          selectFileInSlot(path, activeSlotIdx);
-          setRefreshKey((k) => k + 1);
-        }}
-      />
-      <ExperimentBlockModal
-        vaultPath={vaultPath}
-        isOpen={blockModalOpen}
-        onClose={() => setBlockModalOpen(false)}
-        onConfirm={(type, name, iter) => {
-          setBlockModalOpen(false);
-          const handle = paneRefs.current[activeSlotIdx];
-          if (handle) handle.insertExperimentBlock(type, name, iter);
-        }}
-      />
-      <InsertTableModal
-        isOpen={tableModalOpen}
-        onClose={() => setTableModalOpen(false)}
-        onConfirm={(rows, cols, withHeaderRow) => {
-          setTableModalOpen(false);
-          const handle = paneRefs.current[activeSlotIdx];
-          if (handle) handle.insertTable(rows, cols, withHeaderRow);
-        }}
-      />
-      <IntegrationsSettings
-        vaultPath={vaultPath}
-        isOpen={integrationsOpen}
-        onClose={() => setIntegrationsOpen(false)}
-      />
-      <ReminderOverlay
-        vaultPath={vaultPath}
-        isOpen={reminderOverlayOpen}
-        onClose={() => setReminderOverlayOpen(false)}
-        onChanged={() => setReminderRefreshTick((t) => t + 1)}
-        onOpenInPane={(filePath) => selectFileInSlot(filePath, activeSlotIdx)}
-      />
-      <OrphanAttachmentsModal
-        vaultPath={vaultPath}
-        isOpen={orphanModalOpen}
-        onClose={() => setOrphanModalOpen(false)}
-      />
-      {templatesModalOpen && (
-        <TemplatesModal
+        <CommandPalette
           vaultPath={vaultPath}
-          onEdit={(templatePath) => {
-            // Templates are real .md files in the vault — opening one in
-            // the active slot reuses every TipTap effect and the
-            // EditorToolbar from Cluster 21 with no extra wiring.
-            setTemplatesModalOpen(false);
-            void selectFileInSlot(templatePath, activeSlotIdx);
+          isOpen={paletteOpen}
+          onClose={() => {
+            setPaletteOpen(false);
+            // Always clear wikilink pick-mode when the palette closes,
+            // so a subsequent plain Ctrl+K isn't accidentally still in
+            // pick-mode.
+            setWikilinkPickMode(false);
           }}
-          onClose={() => setTemplatesModalOpen(false)}
+          onOpenFile={(p) => {
+            setPaletteOpen(false);
+            // Multi-slot: ask the user which slot to open in. Single
+            // slot: just route directly.
+            if (slotCount > 1) {
+              setPendingSlotChoice({ path: p });
+            } else {
+              selectFileInSlot(p, 0);
+            }
+          }}
+          onPickResult={
+            wikilinkPickMode
+              ? (_path, title) => {
+                  const handle = paneRefs.current[activeSlotIdx];
+                  if (handle?.insertWikilinkAt) {
+                    handle.insertWikilinkAt(title);
+                  }
+                  setWikilinkPickMode(false);
+                  setPaletteOpen(false);
+                }
+              : undefined
+          }
         />
-      )}
+        <SlotPicker
+          isOpen={!!pendingSlotChoice}
+          layout={layoutMode}
+          slotPaths={slotPaths.slice(0, slotCount)}
+          pendingPath={pendingSlotChoice?.path ?? null}
+          onPick={(slotIndex) => {
+            if (pendingSlotChoice) {
+              selectFileInSlot(pendingSlotChoice.path, slotIndex);
+            }
+            setPendingSlotChoice(null);
+          }}
+          onClose={() => setPendingSlotChoice(null)}
+        />
+        <ShortcutsHelp isOpen={helpOpen} onClose={() => setHelpOpen(false)} />
+        <ColorLegend
+          visible={legendVisible}
+          onDismiss={() => {
+            setLegendVisible(false);
+            try {
+              localStorage.setItem("cortex:legend-hidden", "true");
+            } catch {
+              // ignore
+            }
+          }}
+          onPickDestination={pickDestination}
+        />
+        <NewHierarchyModal
+          vaultPath={vaultPath}
+          kind={hierarchyKind}
+          onClose={() => setHierarchyKind(null)}
+          onCreated={(path) => {
+            setHierarchyKind(null);
+            // New file → open in active slot.
+            selectFileInSlot(path, activeSlotIdx);
+            setRefreshKey((k) => k + 1);
+          }}
+        />
+        <ExperimentBlockModal
+          vaultPath={vaultPath}
+          isOpen={blockModalOpen}
+          onClose={() => setBlockModalOpen(false)}
+          onConfirm={(type, name, iter) => {
+            setBlockModalOpen(false);
+            const handle = paneRefs.current[activeSlotIdx];
+            if (handle) handle.insertExperimentBlock(type, name, iter);
+          }}
+        />
+        <InsertTableModal
+          isOpen={tableModalOpen}
+          onClose={() => setTableModalOpen(false)}
+          onConfirm={(rows, cols, withHeaderRow) => {
+            setTableModalOpen(false);
+            const handle = paneRefs.current[activeSlotIdx];
+            if (handle) handle.insertTable(rows, cols, withHeaderRow);
+          }}
+        />
+        <IntegrationsSettings
+          vaultPath={vaultPath}
+          isOpen={integrationsOpen}
+          onClose={() => setIntegrationsOpen(false)}
+        />
+        <ReminderOverlay
+          vaultPath={vaultPath}
+          isOpen={reminderOverlayOpen}
+          onClose={() => setReminderOverlayOpen(false)}
+          onChanged={() => setReminderRefreshTick((t) => t + 1)}
+          onOpenInPane={(filePath) => selectFileInSlot(filePath, activeSlotIdx)}
+        />
+        <OrphanAttachmentsModal
+          vaultPath={vaultPath}
+          isOpen={orphanModalOpen}
+          onClose={() => setOrphanModalOpen(false)}
+        />
+        {templatesModalOpen && (
+          <TemplatesModal
+            vaultPath={vaultPath}
+            onEdit={(templatePath) => {
+              // Templates are real .md files in the vault — opening one in
+              // the active slot reuses every TipTap effect and the
+              // EditorToolbar from Cluster 21 with no extra wiring.
+              setTemplatesModalOpen(false);
+              void selectFileInSlot(templatePath, activeSlotIdx);
+            }}
+            onClose={() => setTemplatesModalOpen(false)}
+          />
+        )}
       </div>
     </div>
   );

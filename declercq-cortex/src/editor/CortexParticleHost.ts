@@ -94,7 +94,10 @@ export const CortexParticleHost = Mark.create({
         (particle, color) =>
         ({ commands }) => {
           if (!particle) return commands.unsetMark(this.name);
-          return commands.setMark(this.name, { particle, color: color ?? null });
+          return commands.setMark(this.name, {
+            particle,
+            color: color ?? null,
+          });
         },
       clearParticle:
         () =>

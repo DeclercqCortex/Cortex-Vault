@@ -6584,3 +6584,155 @@ breaking routing by editing the iteration template.
 ### Tag
 
 `cluster-22-v1.0-complete`.
+
+## Phase 3 — Cluster 21 v1.1 — Code-block syntax highlighting + interactive Tabs / Collapsible
+
+Closes the two v1.0 backlog items: code blocks now highlight via
+lowlight + highlight.js for the curated language set the user
+actually pastes (Python, JavaScript, TypeScript, Rust, Go, JSON,
+Bash, Shell), and the Tabs / Collapsible structural blocks are
+now real interactive NodeViews — click a tab title to switch
+panels (with the active index persisting through markdown round-
+trip), click a collapsible's chevron to toggle, double-click the
+summary to rename inline.
+
+### What ships
+
+- **Code-block syntax highlighting.** New
+  `src/editor/CortexCodeBlock.ts` wires `@tiptap/extension-code-
+  block-lowlight` with a `lowlight` instance that registers the
+  curated language set. StarterKit's built-in `codeBlock: false`
+  in Editor.tsx so the lowlight version is the only registered
+  code-block node. `CORTEX_CODE_LANGUAGES` constant exports a
+  user-friendly label list the toolbar consumes.
+- **Toolbar language picker.** A `<select>` next to the {}
+  button in the Layout group, visible only when the cursor is
+  inside a `codeBlock` (`editor.isActive("codeBlock")`); writes
+  the `language` attr via
+  `editor.chain().updateAttributes("codeBlock", {language})`.
+  Switching language re-tokenizes immediately because lowlight's
+  ProseMirror plugin runs on every doc change.
+- **Tabs NodeView.** New `CortexTabsNodeView` in
+  `src/editor/CortexBlockNodeViews.tsx`. The TabsBlock node is
+  extended at registration time with
+  `addNodeView() { return ReactNodeViewRenderer(...) }`. Tab
+  strip is `contentEditable={false}` with click handlers that
+  call `updateAttributes({ activeTab })`. The active panel is
+  shown via a CSS custom property `--cortex-tab-active` set on
+  the wrapper, with a `:nth-child(var(--cortex-tab-active))`
+  rule selecting the visible block — ProseMirror still owns the
+  full child list, just non-active children are
+  `display: none`. Active-tab index round-trips via the new
+  `activeTab` node attr (renderHTML emits
+  `data-active-tab=<n>`; parseHTML reads it back). Empty-tabs
+  case (`data-tabs=""`) renders a muted "no tabs — set
+  data-tabs" placeholder so the user isn't confronted with a
+  blank header.
+- **Collapsible NodeView.** New `CortexCollapsibleNodeView` in
+  the same file. The Collapsible node is extended the same way.
+  Summary header is a `contentEditable={false}` flexbox row
+  with a chevron button and the summary text. Single-click on
+  either toggles `open`; double-click on the summary text
+  swaps in an `<input>` for inline rename (Enter commits, Esc
+  cancels, blur commits). Chevron rotates -90° (closed) → 0°
+  (open) via a CSS transform with a 120ms ease. Body uses
+  `display: none` when the wrapper class doesn't include
+  `open`. The `open` attr now round-trips via both the native
+  `open` HTML attribute and a `data-open="true|false"` attr so
+  the NodeView's div-rendered emit AND the legacy details-
+  rendered emit both parse back correctly. parseHTML accepts
+  both `details.cortex-toggle` and `div.cortex-toggle`.
+- **CSS theme.** New `.hljs-*` rules theming keyword / string /
+  number / comment / title / variable / type / regexp tokens
+  in both light mode (VS Code light defaults) and dark mode
+  (Dracula-adjacent). Both `prefers-color-scheme: dark` and
+  `body.cortex-theme-dark` selectors carry the dark palette so
+  manual theme switches and OS preference both work. Tabs
+  styling: hover background, focus-visible outline, hidden
+  inactive panels via `:nth-child(var(--cortex-tab-active))`.
+  Collapsible styling: chevron rotation, summary input,
+  `:not(.open) > .cortex-toggle-body { display: none }`.
+
+### Architectural decisions
+
+- **Lowlight, not Shiki / Prism.** Lowlight is the TipTap-blessed
+  highlighter, ships small, and the language registry is opt-in
+  per language so we don't pull in 50+ language definitions.
+  Shiki produces gorgeous output but ships a ~3 MB WASM blob
+  that Cortex doesn't need; Prism's API is older and doesn't
+  integrate as cleanly with the prosemirror plugin.
+- **Show all panels, hide non-active via CSS.** Two alternatives
+  considered: (1) only render the active child via
+  ReactNodeViewRenderer's children prop — but this fights
+  ProseMirror, which expects to own the full child list and
+  will resync if the rendered count diverges from the document.
+  (2) Move children into the active state on tab change — but
+  this destroys content the user typed into other tabs. The
+  CSS approach keeps every panel in the doc, lets the user
+  switch tabs without losing typed content, and renders only
+  the active one.
+- **`activeTab` and `open` as node attrs, not local state.**
+  Local state would be lost on file save / reload. Node attrs
+  round-trip through the markdown via the html: true path, so
+  a "save with tab 2 open" survives file close + reopen. Same
+  rule as the v1.0 toolbar prefs (those persist via
+  localStorage; node-state belongs in the doc).
+- **Single-click toggles, double-click renames.** Tested
+  click-then-rename via a separate edit button; that consumed
+  toolbar real estate and required two clicks even for users
+  who never wanted to rename. Double-click is the standard
+  "edit-in-place" gesture (matches file rename, table column
+  rename, etc.).
+
+### Files added
+
+- `src/editor/CortexCodeBlock.ts` — lowlight registry +
+  CodeBlockLowlight extension + CORTEX_CODE_LANGUAGES list.
+- `src/editor/CortexBlockNodeViews.tsx` — CortexTabsNodeView +
+  CortexCollapsibleNodeView React components.
+- `verify-cluster-21-v1.1.ps1`.
+
+### Files modified
+
+- `src/components/Editor.tsx` — disabled StarterKit's codeBlock,
+  registered CortexCodeBlock; extended CortexCollapsible and
+  CortexTabsBlock with `addNodeView()` calls returning
+  ReactNodeViewRenderer wrappers; imports for the NodeView
+  components.
+- `src/editor/CortexBlocks.ts` — CortexCollapsible: parseHTML
+  accepts `div.cortex-toggle` (the NodeView wrapper) in
+  addition to `details.cortex-toggle`; renderHTML emits
+  `data-open="true|false"` alongside the native `open` attr
+  for unambiguous round-trip. CortexTabsBlock: new `activeTab`
+  attr (default 0, parseHTML/renderHTML through
+  `data-active-tab=<n>`); renderHTML emits
+  `style="--cortex-tab-active: <n+1>"` so the read-mode HTML
+  also shows the right panel without JS.
+- `src/components/EditorToolbar.tsx` — language picker
+  `<select>` next to the code block toggle, visible only when
+  active; reads CORTEX_CODE_LANGUAGES.
+- `src/index.css` — new Cluster 21 v1.1 section: hljs token
+  theme (light + dark + manual), Tabs NodeView styling
+  (hover + focus + nth-child panel show/hide + empty-tabs
+  placeholder), Collapsible NodeView styling (chevron
+  rotation, summary input, body display), and a
+  `.cortex-tb-lang-select` rule for the new toolbar control.
+- `package.json` — added `@tiptap/extension-code-block-
+  lowlight`, `lowlight`, `highlight.js`.
+
+### v1.2+ deferred
+
+- Tabs: drag-to-reorder titles + add/remove tab inline
+  (currently rename via the data-tabs attr in raw markdown).
+- Collapsible: nested-collapsible state survives across
+  parent toggles (currently a closed parent hides children's
+  open/closed state visually but the attrs remain).
+- Code blocks: line numbers, copy button, "open in external
+  editor" affordance, more language registrations on demand.
+- KaTeX rendering for `cortexMathBlock` and `cortexMathInline`
+  (still stylized text in v1.1 — the marks exist and parse,
+  but no formula renderer).
+
+### Tag
+
+`cluster-21-v1.1-complete`.
