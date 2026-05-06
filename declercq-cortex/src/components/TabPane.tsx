@@ -38,6 +38,7 @@ import {
   ShapeTemplateModal,
   type ShapeTemplateMode,
 } from "./ShapeTemplateModal";
+import { ParticleOverlay } from "./ParticleOverlay";
 import { EMPTY_SHAPES_DOC, newShapeId, type ShapesDoc } from "../shapes/types";
 import { parseFrontmatter, serializeFrontmatter } from "../utils/frontmatter";
 
@@ -217,6 +218,19 @@ export type TabPaneProps = {
   onRequestInsertTable: () => void;
   /** Open a file in this pane (used by backlinks / related panel). */
   onOpenFileInPane: (path: string, slotIndex: number) => Promise<void>;
+  /**
+   * Cluster 21 v1.0.2 — universal-toolbar wiring. App tracks every
+   * pane's editor instance so the single top-level EditorToolbar can
+   * always operate on the currently-active pane. TabPane reports
+   * its editor here as soon as it's mounted (and again with `null`
+   * on unmount).
+   */
+  onEditorChange?: (editor: any | null) => void;
+  /**
+   * Cluster 21 v1.0.2 — `pause-animations` toolbar pref forwarded
+   * down so the per-pane ParticleOverlay can pause/resume in sync.
+   */
+  particlesPaused?: boolean;
 };
 
 function isInsideEl(el: Element | null, root: HTMLElement | null): boolean {
@@ -247,6 +261,8 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
       onFollowTypedBlock,
       onRequestInsertTable,
       onOpenFileInPane,
+      onEditorChange,
+      particlesPaused,
     } = props;
 
     // --- per-pane state --------------------------------------------------
@@ -286,6 +302,19 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
     }>({ width: 0, height: 0 });
     const [templateModal, setTemplateModal] =
       useState<ShapeTemplateMode | null>(null);
+    // Cluster 21 v1.0.2 — toolbar prefs and the universal toolbar
+    // mount have moved to App.tsx. Each pane only reports its
+    // editor instance up via `onEditorChange` and tracks its own
+    // particle-rescan key. The toolbar is mounted once at the top
+    // of the app and operates on whichever pane is active.
+    const [particleRescanKey, setParticleRescanKey] = useState(0);
+    // Cluster 21 v1.0.2 — clear the App-level editor reference for
+    // this slot when the pane unmounts (e.g., layout shrinks from
+    // tri to single).
+    useEffect(() => {
+      return () => onEditorChange?.(null);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // --- timers ----------------------------------------------------------
     const commitTimerRef = useRef<number | null>(null);
@@ -1190,14 +1219,27 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
               onChange={(md) => {
                 setEditedBody(md);
                 setDirty(md !== fileBody);
+                // Bump the particle rescan key so ParticleOverlay
+                // picks up new / removed particle hosts.
+                setParticleRescanKey((k) => k + 1);
               }}
               onFollowWikilink={onFollowWikilink}
               onFollowTypedBlock={onFollowTypedBlock}
               onEditorReady={(e) => {
                 editorInstanceRef.current = e;
+                // Cluster 21 v1.0.2 — report the editor up to App so
+                // the universal top-of-app toolbar binds to it when
+                // this pane is active.
+                onEditorChange?.(e);
+                setParticleRescanKey((k) => k + 1);
               }}
               onRequestInsertTable={onRequestInsertTable}
               onError={(msg) => setError(msg)}
+            />
+            <ParticleOverlay
+              rootRef={editorWrapperRef}
+              rescanKey={particleRescanKey}
+              paused={!!particlesPaused}
             />
             <RelatedHierarchyPanel
               vaultPath={vaultPath}

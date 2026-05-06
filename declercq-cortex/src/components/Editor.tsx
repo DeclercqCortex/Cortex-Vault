@@ -17,7 +17,7 @@ import { TextAlign } from "@tiptap/extension-text-align";
 import { Markdown } from "tiptap-markdown";
 import { DOMSerializer } from "@tiptap/pm/model";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { WikilinkDecoration } from "../editor/WikilinkDecoration";
 import { ColorMark } from "../editor/ColorMark";
 // Cluster 17 — replaces ExperimentBlockDecoration. The block is now a
@@ -65,6 +65,39 @@ import {
   buildImageMultiSelectPlugin,
   imageMultiSelectKey,
 } from "../editor/imageMultiSelect";
+// Cluster 21 v1.0 — Text Editor Toolbar Overhaul.
+import Subscript from "@tiptap/extension-subscript";
+import Superscript from "@tiptap/extension-superscript";
+import { TextStyle } from "@tiptap/extension-text-style";
+import { Color } from "@tiptap/extension-color";
+import Highlight from "@tiptap/extension-highlight";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
+import { CortexFontStyle } from "../editor/CortexFontStyle";
+import { CortexUnderlineStyled } from "../editor/CortexUnderlineStyled";
+import { CortexTextEffect } from "../editor/CortexTextEffect";
+import { CortexParticleHost } from "../editor/CortexParticleHost";
+import {
+  buildCortexMarkerPlugin,
+  cortexMarkerKey,
+} from "../editor/CortexMarkerMode";
+import {
+  CortexCallout,
+  CortexColumns,
+  CortexSideBySide,
+  CortexCollapsible,
+  CortexMarginNote,
+  CortexFrame,
+  CortexPullQuote,
+  CortexDecoSeparator,
+  CortexPageBreak,
+  CortexMathBlock,
+  CortexTabsBlock,
+  CortexFootnoteRef,
+  CortexCitationRef,
+  CortexMathInline,
+  CortexDropCap,
+} from "../editor/CortexBlocks";
 
 /**
  * Cluster 18 — table cells now carry verticalAlign (Cluster 16) AND
@@ -637,6 +670,60 @@ export function Editor({
       // ExperimentBlockDecoration. Node sources both the in-editor
       // widget treatment and the markdown serialize hook.
       SerializingTypedBlockNode,
+      // Cluster 21 v1.0 — Text Editor Toolbar Overhaul.
+      Subscript,
+      Superscript,
+      TextStyle,
+      Color,
+      Highlight.configure({ multicolor: true }),
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      CortexFontStyle,
+      CortexUnderlineStyled,
+      CortexTextEffect,
+      CortexParticleHost.extend({
+        addProseMirrorPlugins() {
+          return [
+            // Cluster 21 v1.0.4 — marker pen now applies the
+            // Cluster 2 ColorMark (named: yellow / green / pink /
+            // blue / orange / red / purple) so highlights produced
+            // via the marker route through the existing review
+            // pipeline (Cluster 3 destinations) just like Ctrl+1..7.
+            buildCortexMarkerPlugin((view, markName) => {
+              const { from, to } = view.state.selection;
+              if (from === to) return;
+              const colorMarkType = view.state.schema.marks.colorMark;
+              if (!colorMarkType) return;
+              try {
+                view.dispatch(
+                  view.state.tr.addMark(
+                    from,
+                    to,
+                    colorMarkType.create({ color: markName }),
+                  ),
+                );
+              } catch {
+                /* swallow — defensive against schema race */
+              }
+            }),
+          ];
+        },
+      }),
+      CortexCallout,
+      CortexColumns,
+      CortexSideBySide,
+      CortexCollapsible,
+      CortexMarginNote,
+      CortexFrame,
+      CortexPullQuote,
+      CortexDecoSeparator,
+      CortexPageBreak,
+      CortexMathBlock,
+      CortexTabsBlock,
+      CortexFootnoteRef,
+      CortexCitationRef,
+      CortexMathInline,
+      CortexDropCap,
     ],
     content,
     editable,
@@ -1068,8 +1155,16 @@ export function Editor({
 
   // Hand the editor instance back to the host once it's ready, so App
   // can call insertContent for the Cluster 4 experiment-block scaffold.
+  // Cluster 21 v1.0.3 — guard against re-firing on every render. The
+  // host's `onEditorReady` callback is often an inline function that
+  // changes identity every render; without the ref-based guard, this
+  // useEffect would re-fire on every render, calling onEditorReady
+  // repeatedly and looping the host's state updates → max update
+  // depth exceeded + OOM.
+  const onReadyFiredFor = useRef<any>(null);
   useEffect(() => {
-    if (editor && onEditorReady) {
+    if (editor && onEditorReady && onReadyFiredFor.current !== editor) {
+      onReadyFiredFor.current = editor;
       onEditorReady(editor);
     }
   }, [editor, onEditorReady]);

@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+// Cluster 22 v1.0 — pass the user's "Templates enabled" toggle through
+// every create_* invoke so the backend knows whether to honour the
+// template files on disk or fall back to its hardcoded body.
+import { readTemplatesEnabled } from "./TemplatesModal";
 
 export type HierarchyKind =
   | "project"
@@ -96,6 +100,10 @@ export function NewHierarchyModal({
   async function submit() {
     setError(null);
     if (busy) return;
+    // Read once per submit. Backend treats `undefined` / `true` as
+    // "use the on-disk template if present"; only an explicit `false`
+    // forces the hardcoded fallback path (Cluster 22 escape hatch).
+    const useTemplate = readTemplatesEnabled();
 
     if (kind === "note") {
       if (!name.trim()) {
@@ -108,6 +116,7 @@ export function NewHierarchyModal({
           vaultPath,
           name: name.trim(),
           dateIso: todayLocal(),
+          useTemplate,
         });
         onCreated(path);
       } catch (e) {
@@ -129,6 +138,7 @@ export function NewHierarchyModal({
           vaultPath,
           name: name.trim(),
           dateIso: todayLocal(),
+          useTemplate,
         });
         onCreated(path);
       } catch (e) {
@@ -152,6 +162,7 @@ export function NewHierarchyModal({
           domain: methodDomain,
           complexity: methodComplexity,
           dateIso: todayLocal(),
+          useTemplate,
         });
         onCreated(path);
       } catch (e) {
@@ -174,6 +185,7 @@ export function NewHierarchyModal({
           name: name.trim(),
           domain: protocolDomain,
           dateIso: todayLocal(),
+          useTemplate,
         });
         onCreated(path);
       } catch (e) {
@@ -195,6 +207,7 @@ export function NewHierarchyModal({
           vaultPath,
           name: name.trim(),
           dateIso: todayLocal(),
+          useTemplate,
         });
         onCreated(path);
       } catch (e) {
@@ -219,6 +232,7 @@ export function NewHierarchyModal({
           name: name.trim(),
           modeling,
           dateIso: todayLocal(),
+          useTemplate,
         });
         onCreated(path);
       } catch (e) {
@@ -238,6 +252,7 @@ export function NewHierarchyModal({
           vaultPath,
           experimentPath: parentPath,
           dateIso: todayLocal(),
+          useTemplate,
         });
         onCreated(path);
       } catch (e) {

@@ -1085,6 +1085,7 @@ fn ensure_daily_log(
     vault_path: String,
     date_iso: String,
     carry_over_md: Option<String>,
+    use_template: Option<bool>,
 ) -> Result<String, String> {
     let vault = PathBuf::from(&vault_path);
     let daily_dir = vault.join("02-Daily Log");
@@ -1096,7 +1097,29 @@ fn ensure_daily_log(
     let file_path = daily_dir.join(&filename);
 
     if !file_path.exists() {
-        let mut template = daily_log_template(&date_iso);
+        let mut template = match resolve_template_body(&vault_path, "daily-log", use_template) {
+            Some(body) => {
+                let prev_iso = iso_date_minus_one_day(&date_iso);
+                let prev_link = prev_iso
+                    .as_ref()
+                    .map(|p| format!("[[{}]]", p))
+                    .unwrap_or_default();
+                apply_placeholders(
+                    &body,
+                    &PlaceholderContext {
+                        date: Some(date_iso.clone()),
+                        title: Some(date_iso.clone()),
+                        slug: Some(date_iso.clone()),
+                        vault_name: Some(vault_basename(&vault_path)),
+                        prev_daily_link: Some(prev_link),
+                        week_number: Some(iso_week_number(&date_iso)),
+                        day_of_week: Some(day_of_week_from_iso(&date_iso).to_string()),
+                        ..Default::default()
+                    },
+                )
+            }
+            None => daily_log_template(&date_iso),
+        };
         // Cluster 3: pre-pend a carry-over section if the frontend
         // queried pink marks. We only inject when the file is being
         // newly created — never on subsequent opens of the same date.
@@ -2488,32 +2511,67 @@ fn find_or_create_iteration(
     let filename = format!("iter-{:02} - {}.md", iter_number, date_iso);
     let iter_path = exp_dir.join(&filename);
 
-    let template = format!(
-        "---\n\
-         type: iteration\n\
-         experiment: \"[[{exp_link}]]\"\n\
-         iter: {n}\n\
-         date: \"{date}\"\n\
-         ---\n\
-         \n\
-         # Iter {nn:02} — {date}\n\
-         \n\
-         ## What I did\n\
-         \n\
-         ## What I observed\n\
-         \n\
-         ## What I conclude\n\
-         \n\
-         <!-- AUTO-GENERATED BELOW; DO NOT EDIT MANUALLY -->\n\
-         \n\
-         ## From daily notes\n\
-         \n\
-         _(no daily-note experiment blocks routed here yet)_\n",
-        exp_link = exp_link_name,
-        n = iter_number,
-        nn = iter_number,
-        date = date_iso
-    );
+    let parent_project_name = exp_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let template_body = match resolve_template_body(vault_path, "iteration", None) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(date_iso.to_string()),
+                title: Some(format!("Iter {:02} — {}", iter_number, date_iso)),
+                slug: Some(format!("iter-{:02}", iter_number)),
+                iteration_number: Some(iter_number),
+                parent_experiment: Some(exp_link_name.clone()),
+                parent_project: Some(parent_project_name),
+                vault_name: Some(vault_basename(vault_path)),
+                week_number: Some(iso_week_number(date_iso)),
+                day_of_week: Some(day_of_week_from_iso(date_iso).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             type: iteration\n\
+             experiment: \"[[{exp_link}]]\"\n\
+             iter: {n}\n\
+             date: \"{date}\"\n\
+             ---\n\
+             \n\
+             # Iter {nn:02} — {date}\n\
+             \n\
+             ## What I did\n\
+             \n\
+             ## What I observed\n\
+             \n\
+             ## What I conclude\n\
+             \n",
+            exp_link = exp_link_name,
+            n = iter_number,
+            nn = iter_number,
+            date = date_iso
+        ),
+    };
+
+    // The auto-create path *always* terminates with the AUTO-GENERATED
+    // routing footer — it's the whole reason this code path exists.
+    // Append it after substitution if not already in the template body.
+    let template = if template_body.contains("AUTO-GENERATED BELOW") {
+        template_body
+    } else {
+        format!(
+            "{trimmed}\n\
+             <!-- AUTO-GENERATED BELOW; DO NOT EDIT MANUALLY -->\n\
+             \n\
+             ## From daily notes\n\
+             \n\
+             _(no daily-note experiment blocks routed here yet)_\n",
+            trimmed = template_body.trim_end_matches('\n'),
+        )
+    };
 
     fs::write(&iter_path, template).map_err(|e| e.to_string())?;
     let path_str = iter_path.to_string_lossy().to_string();
@@ -3613,7 +3671,12 @@ fn sanitize_name(name: &str) -> String {
 /// Create a plain note at `<vault>/<name>.md` with note frontmatter.
 /// Errors if a file already exists at that path.
 #[tauri::command]
-fn create_note(vault_path: String, name: String, date_iso: String) -> Result<String, String> {
+fn create_note(
+    vault_path: String,
+    name: String,
+    date_iso: String,
+    use_template: Option<bool>,
+) -> Result<String, String> {
     let safe = sanitize_name(&name);
     if safe.is_empty() {
         return Err("Note name is empty".to_string());
@@ -3625,28 +3688,34 @@ fn create_note(vault_path: String, name: String, date_iso: String) -> Result<Str
             safe
         ));
     }
-    let id_slug: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-    let template = format!(
-        "---\n\
-         id: note-{date}-{slug}\n\
-         type: note\n\
-         date: \"{date}\"\n\
-         ---\n\
-         \n\
-         # {name}\n\
-         \n",
-        date = date_iso,
-        slug = id_slug,
-        name = safe
-    );
+    let id_slug = slugify_basic(&name);
+    let template = match resolve_template_body(&vault_path, "note", use_template) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(date_iso.clone()),
+                title: Some(safe.clone()),
+                slug: Some(id_slug.clone()),
+                vault_name: Some(vault_basename(&vault_path)),
+                week_number: Some(iso_week_number(&date_iso)),
+                day_of_week: Some(day_of_week_from_iso(&date_iso).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             id: note-{date}-{slug}\n\
+             type: note\n\
+             date: \"{date}\"\n\
+             ---\n\
+             \n\
+             # {name}\n\
+             \n",
+            date = date_iso,
+            slug = id_slug,
+            name = safe
+        ),
+    };
     fs::write(&note_path, template).map_err(|e| e.to_string())?;
     let path_str = note_path.to_string_lossy().to_string();
     index_single_file(vault_path, path_str.clone())?;
@@ -3654,7 +3723,12 @@ fn create_note(vault_path: String, name: String, date_iso: String) -> Result<Str
 }
 
 #[tauri::command]
-fn create_project(vault_path: String, name: String, date_iso: String) -> Result<String, String> {
+fn create_project(
+    vault_path: String,
+    name: String,
+    date_iso: String,
+    use_template: Option<bool>,
+) -> Result<String, String> {
     let safe = sanitize_name(&name);
     if safe.is_empty() {
         return Err("Project name is empty".to_string());
@@ -3668,23 +3742,37 @@ fn create_project(vault_path: String, name: String, date_iso: String) -> Result<
 
     let index_path = project_dir.join("index.md");
     let today = date_iso;
-    let template = format!(
-        "---\n\
-         type: project\n\
-         created: \"{date}\"\n\
-         ---\n\
-         \n\
-         # {name}\n\
-         \n\
-         ## Overview\n\
-         \n\
-         ## Active experiments\n\
-         \n\
-         ## Notes\n\
-         \n",
-        date = today,
-        name = safe
-    );
+    let template = match resolve_template_body(&vault_path, "project", use_template) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(today.clone()),
+                title: Some(safe.clone()),
+                slug: Some(slugify_basic(&name)),
+                vault_name: Some(vault_basename(&vault_path)),
+                week_number: Some(iso_week_number(&today)),
+                day_of_week: Some(day_of_week_from_iso(&today).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             type: project\n\
+             created: \"{date}\"\n\
+             ---\n\
+             \n\
+             # {name}\n\
+             \n\
+             ## Overview\n\
+             \n\
+             ## Active experiments\n\
+             \n\
+             ## Notes\n\
+             \n",
+            date = today,
+            name = safe
+        ),
+    };
     fs::write(&index_path, template).map_err(|e| e.to_string())?;
 
     let path_str = index_path.to_string_lossy().to_string();
@@ -3700,6 +3788,7 @@ fn create_experiment(
     name: String,
     modeling: bool,
     date_iso: String,
+    use_template: Option<bool>,
 ) -> Result<String, String> {
     let safe = sanitize_name(&name);
     if safe.is_empty() {
@@ -3729,37 +3818,53 @@ fn create_experiment(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let template = format!(
-        "---\n\
-         type: experiment\n\
-         project: \"[[{project_link}]]\"\n\
-         modeling: {modeling}\n\
-         created: \"{date}\"\n\
-         ---\n\
-         \n\
-         # {name}\n\
-         \n\
-         ## Question\n\
-         What are we trying to learn?\n\
-         \n\
-         ## Hypotheses\n\
-         H1:\n\
-         H2:\n\
-         \n\
-         ## Predictions\n\
-         If H1 is true, we should see:\n\
-         If H2 is true, we should see:\n\
-         \n\
-         ## Methods\n\
-         \n\
-         ## Iterations\n\
-         (auto-populated by Cluster 4 routing, plus manual additions.)\n\
-         \n",
-        project_link = project_link_name,
-        modeling = modeling,
-        date = today,
-        name = safe
-    );
+    let template = match resolve_template_body(&vault_path, "experiment", use_template) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(today.clone()),
+                title: Some(safe.clone()),
+                slug: Some(slugify_basic(&name)),
+                parent_project: Some(project_link_name.clone()),
+                modeling: Some(modeling),
+                vault_name: Some(vault_basename(&vault_path)),
+                week_number: Some(iso_week_number(&today)),
+                day_of_week: Some(day_of_week_from_iso(&today).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             type: experiment\n\
+             project: \"[[{project_link}]]\"\n\
+             modeling: {modeling}\n\
+             created: \"{date}\"\n\
+             ---\n\
+             \n\
+             # {name}\n\
+             \n\
+             ## Question\n\
+             What are we trying to learn?\n\
+             \n\
+             ## Hypotheses\n\
+             H1:\n\
+             H2:\n\
+             \n\
+             ## Predictions\n\
+             If H1 is true, we should see:\n\
+             If H2 is true, we should see:\n\
+             \n\
+             ## Methods\n\
+             \n\
+             ## Iterations\n\
+             (auto-populated by Cluster 4 routing, plus manual additions.)\n\
+             \n",
+            project_link = project_link_name,
+            modeling = modeling,
+            date = today,
+            name = safe
+        ),
+    };
     fs::write(&index_path, template).map_err(|e| e.to_string())?;
 
     let path_str = index_path.to_string_lossy().to_string();
@@ -3772,6 +3877,7 @@ fn create_iteration(
     vault_path: String,
     experiment_path: String,
     date_iso: String,
+    use_template: Option<bool>,
 ) -> Result<String, String> {
     // experiment_path points at the experiment's index.md.
     let exp_index = PathBuf::from(&experiment_path);
@@ -3792,33 +3898,74 @@ fn create_iteration(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let template = format!(
-        "---\n\
-         type: iteration\n\
-         experiment: \"[[{exp_link}]]\"\n\
-         iter: {n}\n\
-         date: \"{date}\"\n\
-         ---\n\
-         \n\
-         # Iter {nn:02} — {date}\n\
-         \n\
-         ## What I did\n\
-         \n\
-         ## What I observed\n\
-         \n\
-         ## What I conclude\n\
-         \n\
-         <!-- AUTO-GENERATED BELOW; DO NOT EDIT MANUALLY -->\n\
-         \n\
-         ## From daily notes\n\
-         \n\
-         _(no daily-note experiment blocks routed here yet — type \
-         `::experiment <name> / iter-N\\n…\\n::end` in a daily note)_\n",
-        exp_link = exp_link_name,
-        n = n,
-        nn = n,
-        date = today
-    );
+    // Walk one level up to find the parent project's folder name (i.e.
+    // the wikilink target the experiment uses), so the iteration template
+    // can resolve `{{parent_project}}` if the user reaches for it.
+    let parent_project_name = exp_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Iteration filename uses `iter-NN` with `n` as i64 — the template
+    // string format below was using `n` directly so we need it both as
+    // the bare number and zero-padded.
+    let n_i64 = n as i64;
+    let template = match resolve_template_body(&vault_path, "iteration", use_template) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(today.clone()),
+                title: Some(format!("Iter {:02} — {}", n_i64, today)),
+                slug: Some(format!("iter-{:02}", n_i64)),
+                iteration_number: Some(n_i64),
+                parent_experiment: Some(exp_link_name.clone()),
+                parent_project: Some(parent_project_name),
+                vault_name: Some(vault_basename(&vault_path)),
+                week_number: Some(iso_week_number(&today)),
+                day_of_week: Some(day_of_week_from_iso(&today).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             type: iteration\n\
+             experiment: \"[[{exp_link}]]\"\n\
+             iter: {n}\n\
+             date: \"{date}\"\n\
+             ---\n\
+             \n\
+             # Iter {nn:02} — {date}\n\
+             \n\
+             ## What I did\n\
+             \n\
+             ## What I observed\n\
+             \n\
+             ## What I conclude\n\
+             \n",
+            exp_link = exp_link_name,
+            n = n,
+            nn = n,
+            date = today
+        ),
+    };
+    // Iteration files always carry the AUTO-GENERATED footer for Cluster 4
+    // routing, regardless of whether the user customised the template.
+    // Append it after placeholder substitution if not already present.
+    let template = if template.contains("AUTO-GENERATED BELOW") {
+        template
+    } else {
+        format!(
+            "{trimmed}\n\
+             <!-- AUTO-GENERATED BELOW; DO NOT EDIT MANUALLY -->\n\
+             \n\
+             ## From daily notes\n\
+             \n\
+             _(no daily-note experiment blocks routed here yet — type \
+             `::experiment <name> / iter-N\\n…\\n::end` in a daily note)_\n",
+            trimmed = template.trim_end_matches('\n'),
+        )
+    };
     fs::write(&iter_path, template).map_err(|e| e.to_string())?;
 
     let path_str = iter_path.to_string_lossy().to_string();
@@ -4301,7 +4448,12 @@ fn query_notes_by_type(
 }
 
 #[tauri::command]
-fn create_idea(vault_path: String, name: String, date_iso: String) -> Result<String, String> {
+fn create_idea(
+    vault_path: String,
+    name: String,
+    date_iso: String,
+    use_template: Option<bool>,
+) -> Result<String, String> {
     let safe = sanitize_name(&name);
     if safe.is_empty() {
         return Err("Idea name is empty".to_string());
@@ -4317,39 +4469,45 @@ fn create_idea(vault_path: String, name: String, date_iso: String) -> Result<Str
         ));
     }
 
-    let id_slug: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    let id_slug = slugify_basic(&name);
 
-    let template = format!(
-        "---\n\
-         id: idea-{date}-{slug}\n\
-         type: idea\n\
-         status: raw\n\
-         date_conceived: \"{date}\"\n\
-         related_concepts: []\n\
-         ---\n\
-         \n\
-         # {name}\n\
-         \n\
-         ## The idea\n\
-         \n\
-         \n\
-         ## Why it might matter\n\
-         \n\
-         \n\
-         ## What would test it\n\
-         \n",
-        date = date_iso,
-        slug = id_slug,
-        name = safe
-    );
+    let template = match resolve_template_body(&vault_path, "idea", use_template) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(date_iso.clone()),
+                title: Some(safe.clone()),
+                slug: Some(id_slug.clone()),
+                vault_name: Some(vault_basename(&vault_path)),
+                week_number: Some(iso_week_number(&date_iso)),
+                day_of_week: Some(day_of_week_from_iso(&date_iso).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             id: idea-{date}-{slug}\n\
+             type: idea\n\
+             status: raw\n\
+             date_conceived: \"{date}\"\n\
+             related_concepts: []\n\
+             ---\n\
+             \n\
+             # {name}\n\
+             \n\
+             ## The idea\n\
+             \n\
+             \n\
+             ## Why it might matter\n\
+             \n\
+             \n\
+             ## What would test it\n\
+             \n",
+            date = date_iso,
+            slug = id_slug,
+            name = safe
+        ),
+    };
 
     fs::write(&idea_path, template).map_err(|e| e.to_string())?;
     let path_str = idea_path.to_string_lossy().to_string();
@@ -4383,6 +4541,7 @@ fn create_method(
     domain: String,
     complexity: i64,
     date_iso: String,
+    use_template: Option<bool>,
 ) -> Result<String, String> {
     let safe = sanitize_name(&name);
     if safe.is_empty() {
@@ -4400,59 +4559,67 @@ fn create_method(
         ));
     }
 
-    let id_slug: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    let id_slug = slugify_basic(&name);
 
     // The Reagents/Parts List section starts empty between markers; the
     // first `regenerate_method_reagents` call will fill it in based on the
     // wikilinks the user adds under "## Protocols List".
-    let template = format!(
-        "---\n\
-         id: method-{date}-{slug}\n\
-         type: method\n\
-         domain: \"{domain}\"\n\
-         complexity: {complexity}\n\
-         related_experiments: []\n\
-         references: []\n\
-         ---\n\
-         \n\
-         # {name}\n\
-         \n\
-         ## Protocols List\n\
-         \n\
-         _List the protocols that compose this method as wikilinks, one per line:_\n\
-         \n\
-         - [[Protocol name here]]\n\
-         \n\
-         ## Objective\n\
-         \n\
-         \n\
-         ## Reagents/Parts List\n\
-         \n\
-         {start}\n\
-         _(empty — add protocols above and reopen this file to populate)_\n\
-         {end}\n\
-         \n\
-         ## Steps\n\
-         \n\
-         \n\
-         ## Outcome\n\
-         \n",
-        date = date_iso,
-        slug = id_slug,
-        name = safe,
-        domain = domain,
-        complexity = complexity,
-        start = REAGENTS_AUTO_START,
-        end = REAGENTS_AUTO_END,
-    );
+    let template = match resolve_template_body(&vault_path, "method", use_template) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(date_iso.clone()),
+                title: Some(safe.clone()),
+                slug: Some(id_slug.clone()),
+                domain: Some(domain.clone()),
+                complexity: Some(complexity),
+                vault_name: Some(vault_basename(&vault_path)),
+                week_number: Some(iso_week_number(&date_iso)),
+                day_of_week: Some(day_of_week_from_iso(&date_iso).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             id: method-{date}-{slug}\n\
+             type: method\n\
+             domain: \"{domain}\"\n\
+             complexity: {complexity}\n\
+             related_experiments: []\n\
+             references: []\n\
+             ---\n\
+             \n\
+             # {name}\n\
+             \n\
+             ## Protocols List\n\
+             \n\
+             _List the protocols that compose this method as wikilinks, one per line:_\n\
+             \n\
+             - [[Protocol name here]]\n\
+             \n\
+             ## Objective\n\
+             \n\
+             \n\
+             ## Reagents/Parts List\n\
+             \n\
+             {start}\n\
+             _(empty — add protocols above and reopen this file to populate)_\n\
+             {end}\n\
+             \n\
+             ## Steps\n\
+             \n\
+             \n\
+             ## Outcome\n\
+             \n",
+            date = date_iso,
+            slug = id_slug,
+            name = safe,
+            domain = domain,
+            complexity = complexity,
+            start = REAGENTS_AUTO_START,
+            end = REAGENTS_AUTO_END,
+        ),
+    };
 
     fs::write(&method_path, template).map_err(|e| e.to_string())?;
     let path_str = method_path.to_string_lossy().to_string();
@@ -4471,6 +4638,7 @@ fn create_protocol(
     name: String,
     domain: String,
     date_iso: String,
+    use_template: Option<bool>,
 ) -> Result<String, String> {
     let safe = sanitize_name(&name);
     if safe.is_empty() {
@@ -4487,7 +4655,315 @@ fn create_protocol(
         ));
     }
 
-    let id_slug: String = name
+    let id_slug = slugify_basic(&name);
+
+    // Reagents live in the body, not the frontmatter — the table format
+    // is identical to what Methods aggregate, so the protocol authoring
+    // surface and the consuming surface match. Each row of this table
+    // becomes a row in the Reagents/Parts table of every Method that
+    // wikilinks this protocol under "## Protocols List".
+    let template = match resolve_template_body(&vault_path, "protocol", use_template) {
+        Some(body) => apply_placeholders(
+            &body,
+            &PlaceholderContext {
+                date: Some(date_iso.clone()),
+                title: Some(safe.clone()),
+                slug: Some(id_slug.clone()),
+                domain: Some(domain.clone()),
+                vault_name: Some(vault_basename(&vault_path)),
+                week_number: Some(iso_week_number(&date_iso)),
+                day_of_week: Some(day_of_week_from_iso(&date_iso).to_string()),
+                ..Default::default()
+            },
+        ),
+        None => format!(
+            "---\n\
+             id: protocol-{date}-{slug}\n\
+             type: protocol\n\
+             domain: \"{domain}\"\n\
+             duration: \"\"\n\
+             ---\n\
+             \n\
+             # {name}\n\
+             \n\
+             ## Purpose\n\
+             \n\
+             _What specific thing does this protocol achieve?_\n\
+             \n\
+             ## Reagents/Parts List\n\
+             \n\
+             | Name | Description | Quantity/Amount | Price |\n\
+             |------|-------------|-----------------|-------|\n\
+             |      |             |                 |       |\n\
+             \n\
+             ## Steps\n\
+             \n\
+             \n\
+             ## Notes\n\
+             \n",
+            date = date_iso,
+            slug = id_slug,
+            name = safe,
+            domain = domain,
+        ),
+    };
+
+    fs::write(&proto_path, template).map_err(|e| e.to_string())?;
+    let path_str = proto_path.to_string_lossy().to_string();
+    index_single_file(vault_path, path_str.clone())?;
+    Ok(path_str)
+}
+
+// =============================================================================
+// Cluster 22 — Document Templates
+// =============================================================================
+//
+// Per-type template files at `<vault>/.cortex/document-templates/<type>.md`.
+// Each create_* command reads the template, substitutes placeholder tokens
+// ({{date}}, {{title}}, etc.), and writes the seeded body to the new file.
+// When a template is missing on disk we lazily write the bundled default so
+// the user can find and edit it. The frontend "templates enabled" toggle
+// flows through as the optional `use_template` arg on each create_* command;
+// when false we use the existing hardcoded body verbatim (escape hatch).
+//
+// Templates own ONLY the body of the new file. Filename, directory, and any
+// post-creation regen passes (Cluster 4 routing markers, Cluster 8 reagents
+// auto-section, etc.) stay owned by the create_* function so they can't be
+// dropped by an over-eager template edit.
+
+const DOCUMENT_TEMPLATES_DIR: &str = ".cortex/document-templates";
+
+/// All document types the templates system knows about. Add new variants
+/// here, in `valid_document_type`, in the bundled-default registry below,
+/// and in the matching frontend `DOC_TYPES` array. v1.0 ships eight.
+const DOC_TYPES: &[&str] = &[
+    "daily-log",
+    "project",
+    "experiment",
+    "iteration",
+    "protocol",
+    "idea",
+    "method",
+    "note",
+];
+
+fn valid_document_type(doc_type: &str) -> bool {
+    DOC_TYPES.iter().any(|&t| t == doc_type)
+}
+
+fn template_path_for(vault_path: &str, doc_type: &str) -> PathBuf {
+    PathBuf::from(vault_path)
+        .join(DOCUMENT_TEMPLATES_DIR)
+        .join(format!("{}.md", doc_type))
+}
+
+/// Bundled default template body for a given document type. Mirrors the
+/// hardcoded `format!()` blocks elsewhere in this file but with placeholder
+/// tokens in place of dynamic values. Kept inline (rather than reading from
+/// disk inside this binary) so first-run on a fresh vault doesn't depend on
+/// any sibling file.
+fn default_template_for(doc_type: &str) -> &'static str {
+    match doc_type {
+        "daily-log" => DEFAULT_TEMPLATE_DAILY_LOG,
+        "project" => DEFAULT_TEMPLATE_PROJECT,
+        "experiment" => DEFAULT_TEMPLATE_EXPERIMENT,
+        "iteration" => DEFAULT_TEMPLATE_ITERATION,
+        "protocol" => DEFAULT_TEMPLATE_PROTOCOL,
+        "idea" => DEFAULT_TEMPLATE_IDEA,
+        "method" => DEFAULT_TEMPLATE_METHOD,
+        "note" => DEFAULT_TEMPLATE_NOTE,
+        _ => "",
+    }
+}
+
+const DEFAULT_TEMPLATE_DAILY_LOG: &str = "---\n\
+id: daily-{{date}}\n\
+type: daily-log\n\
+date: \"{{date}}\"\n\
+week: {{week_number}}\n\
+---\n\
+\n\
+# {{date}} — {{day_of_week}}\n\
+\n\
+## Today's MIT\n\
+\n\
+\n\
+## Morning\n\
+\n\
+\n\
+## Afternoon\n\
+\n\
+\n\
+## End of day\n\
+\n";
+
+const DEFAULT_TEMPLATE_PROJECT: &str = "---\n\
+type: project\n\
+created: \"{{date}}\"\n\
+---\n\
+\n\
+# {{title}}\n\
+\n\
+## Overview\n\
+\n\
+## Active experiments\n\
+\n\
+## Notes\n\
+\n";
+
+const DEFAULT_TEMPLATE_EXPERIMENT: &str = "---\n\
+type: experiment\n\
+project: \"[[{{parent_project}}]]\"\n\
+modeling: {{modeling}}\n\
+created: \"{{date}}\"\n\
+---\n\
+\n\
+# {{title}}\n\
+\n\
+## Question\n\
+What are we trying to learn?\n\
+\n\
+## Hypotheses\n\
+H1:\n\
+H2:\n\
+\n\
+## Predictions\n\
+If H1 is true, we should see:\n\
+If H2 is true, we should see:\n\
+\n\
+## Methods\n\
+\n\
+## Iterations\n\
+(auto-populated by Cluster 4 routing, plus manual additions.)\n\
+\n";
+
+const DEFAULT_TEMPLATE_ITERATION: &str = "---\n\
+type: iteration\n\
+experiment: \"[[{{parent_experiment}}]]\"\n\
+iter: {{iteration_number}}\n\
+date: \"{{date}}\"\n\
+---\n\
+\n\
+# Iter {{iteration_number_padded}} — {{date}}\n\
+\n\
+## Hypothesis\n\
+\n\
+## Method\n\
+\n\
+## Results\n\
+\n\
+## What I conclude\n\
+\n";
+
+const DEFAULT_TEMPLATE_PROTOCOL: &str = "---\n\
+id: protocol-{{date}}-{{slug}}\n\
+type: protocol\n\
+domain: \"{{domain}}\"\n\
+duration: \"\"\n\
+---\n\
+\n\
+# {{title}}\n\
+\n\
+## Purpose\n\
+\n\
+_What specific thing does this protocol achieve?_\n\
+\n\
+## Reagents/Parts List\n\
+\n\
+| Name | Description | Quantity/Amount | Price |\n\
+|------|-------------|-----------------|-------|\n\
+|      |             |                 |       |\n\
+\n\
+## Steps\n\
+\n\
+\n\
+## Notes\n\
+\n";
+
+const DEFAULT_TEMPLATE_IDEA: &str = "---\n\
+id: idea-{{date}}-{{slug}}\n\
+type: idea\n\
+status: raw\n\
+date_conceived: \"{{date}}\"\n\
+related_concepts: []\n\
+---\n\
+\n\
+# {{title}}\n\
+\n\
+## The idea\n\
+\n\
+\n\
+## Why it might matter\n\
+\n\
+\n\
+## What would test it\n\
+\n";
+
+const DEFAULT_TEMPLATE_METHOD: &str = "---\n\
+id: method-{{date}}-{{slug}}\n\
+type: method\n\
+domain: \"{{domain}}\"\n\
+complexity: {{complexity}}\n\
+related_experiments: []\n\
+references: []\n\
+---\n\
+\n\
+# {{title}}\n\
+\n\
+## Protocols List\n\
+\n\
+_List the protocols that compose this method as wikilinks, one per line:_\n\
+\n\
+- [[Protocol name here]]\n\
+\n\
+## Objective\n\
+\n\
+\n\
+## Reagents/Parts List\n\
+\n\
+{{reagents_auto_start}}\n\
+_(empty — add protocols above and reopen this file to populate)_\n\
+{{reagents_auto_end}}\n\
+\n\
+## Steps\n\
+\n\
+\n\
+## Outcome\n\
+\n";
+
+const DEFAULT_TEMPLATE_NOTE: &str = "---\n\
+id: note-{{date}}-{{slug}}\n\
+type: note\n\
+date: \"{{date}}\"\n\
+---\n\
+\n\
+# {{title}}\n\
+\n";
+
+/// Context bag for placeholder substitution. Every field is optional; the
+/// substituter leaves unknown tokens in place untouched (so an experiment
+/// template that uses `{{parent_project}}` won't break when applied to a
+/// note creation, it just leaves the literal token visible — caller's
+/// responsibility to pass relevant context).
+#[derive(Default, Clone)]
+pub struct PlaceholderContext {
+    pub date: Option<String>,
+    pub title: Option<String>,
+    pub slug: Option<String>,
+    pub iteration_number: Option<i64>,
+    pub parent_project: Option<String>,
+    pub parent_experiment: Option<String>,
+    pub vault_name: Option<String>,
+    pub prev_daily_link: Option<String>,
+    pub week_number: Option<i64>,
+    pub day_of_week: Option<String>,
+    pub modeling: Option<bool>,
+    pub domain: Option<String>,
+    pub complexity: Option<i64>,
+}
+
+fn slugify_basic(input: &str) -> String {
+    input
         .to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -4495,48 +4971,370 @@ fn create_protocol(
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-");
+        .join("-")
+}
 
-    // Reagents live in the body, not the frontmatter — the table format
-    // is identical to what Methods aggregate, so the protocol authoring
-    // surface and the consuming surface match. Each row of this table
-    // becomes a row in the Reagents/Parts table of every Method that
-    // wikilinks this protocol under "## Protocols List".
-    let template = format!(
-        "---\n\
-         id: protocol-{date}-{slug}\n\
-         type: protocol\n\
-         domain: \"{domain}\"\n\
-         duration: \"\"\n\
-         ---\n\
-         \n\
-         # {name}\n\
-         \n\
-         ## Purpose\n\
-         \n\
-         _What specific thing does this protocol achieve?_\n\
-         \n\
-         ## Reagents/Parts List\n\
-         \n\
-         | Name | Description | Quantity/Amount | Price |\n\
-         |------|-------------|-----------------|-------|\n\
-         |      |             |                 |       |\n\
-         \n\
-         ## Steps\n\
-         \n\
-         \n\
-         ## Notes\n\
-         \n",
-        date = date_iso,
-        slug = id_slug,
-        name = safe,
-        domain = domain,
-    );
+fn vault_basename(vault_path: &str) -> String {
+    PathBuf::from(vault_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
 
-    fs::write(&proto_path, template).map_err(|e| e.to_string())?;
-    let path_str = proto_path.to_string_lossy().to_string();
-    index_single_file(vault_path, path_str.clone())?;
-    Ok(path_str)
+/// ISO-week number for a given ISO date (YYYY-MM-DD). Standard ISO 8601
+/// week-numbering: weeks start Monday, week containing the year's first
+/// Thursday is week 1. Falls back to 1 on parse failure.
+fn iso_week_number(iso: &str) -> i64 {
+    let parts: Vec<&str> = iso.split('-').collect();
+    if parts.len() != 3 {
+        return 1;
+    }
+    let y: i32 = parts[0].parse().unwrap_or(2000);
+    let m: u32 = parts[1].parse().unwrap_or(1);
+    let d: u32 = parts[2].parse().unwrap_or(1);
+
+    // Days-from-civil-epoch (Howard Hinnant's algorithm), used to compute
+    // both the day-of-year and the day-of-week without a chrono dep.
+    fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = (if y >= 0 { y } else { y - 399 }) / 400;
+        let yoe = (y - era * 400) as i64; // 0..399
+        let m_as = m as i64;
+        let d_as = d as i64;
+        let doy = (153 * (if m_as > 2 { m_as - 3 } else { m_as + 9 }) + 2) / 5 + d_as - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era as i64 * 146097 + doe - 719468
+    }
+
+    let days = days_from_civil(y, m, d);
+    // Day-of-week, Mon=1 ... Sun=7 (ISO).
+    let dow = (((days % 7) + 7) % 7) as i64; // 0=Thu (epoch was Thursday)
+    let iso_dow = ((dow + 3) % 7) + 1; // 1=Mon..7=Sun
+
+    // Find the Thursday of this week: shift to Thursday (iso_dow=4).
+    let thursday_days = days + (4 - iso_dow);
+    // Year of that Thursday.
+    let thursday_year = year_from_days(thursday_days);
+    // First Thursday of that year (week 1's Thursday).
+    let jan4_days = days_from_civil(thursday_year, 1, 4);
+    let jan4_dow = ((((jan4_days % 7) + 7) % 7) + 3) % 7 + 1; // ISO dow of Jan 4
+    let week1_thursday = jan4_days + (4 - jan4_dow);
+    ((thursday_days - week1_thursday) / 7) + 1
+}
+
+fn year_from_days(days: i64) -> i32 {
+    // Inverse of days_from_civil — narrow binary search around the value.
+    // Range covers a few centuries which is more than enough for any
+    // realistic ISO date the user types in.
+    let mut lo = 1900_i32;
+    let mut hi = 2200_i32;
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let mid_days = {
+            // Jan 1 of `mid`.
+            let y = mid;
+            let era = (if y >= 0 { y } else { y - 399 }) / 400;
+            let yoe = (y - era * 400) as i64;
+            let m_as: i64 = 1;
+            let d_as: i64 = 1;
+            let doy = (153 * (if m_as > 2 { m_as - 3 } else { m_as + 9 }) + 2) / 5 + d_as - 1;
+            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            era as i64 * 146097 + doe - 719468
+        };
+        if mid_days <= days {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+/// Subtract one day from an ISO date, returning the previous day's ISO
+/// string. Used by the daily-log placeholder `{{prev_daily_link}}`.
+fn iso_date_minus_one_day(iso: &str) -> Option<String> {
+    let parts: Vec<&str> = iso.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let y: i32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
+    let d: u32 = parts[2].parse().ok()?;
+    if d > 1 {
+        return Some(format!("{:04}-{:02}-{:02}", y, m, d - 1));
+    }
+    if m > 1 {
+        let prev_m = m - 1;
+        let last = days_in_month(y, prev_m);
+        return Some(format!("{:04}-{:02}-{:02}", y, prev_m, last));
+    }
+    Some(format!("{:04}-12-31", y - 1))
+}
+
+fn days_in_month(y: i32, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
+/// Replace every `{{token}}` occurrence with its corresponding context
+/// value. Unknown tokens are left literal — that way a template that uses
+/// `{{author}}` (deferred to v1.1) still reads sanely on disk and the user
+/// can choose to remove the token themselves.
+///
+/// Also rewrites the special `{{reagents_auto_start}}` / `{{reagents_auto_end}}`
+/// markers to the real Cluster 8 sentinels — keeping them as
+/// placeholders in the on-disk template means the user can edit the
+/// surrounding text without accidentally breaking the marker syntax.
+fn sub_in_place(out: &mut String, key: &str, value: &str) {
+    let needle = format!("{{{{{}}}}}", key);
+    if out.contains(&needle) {
+        *out = out.replace(&needle, value);
+    }
+}
+
+pub fn apply_placeholders(template: &str, ctx: &PlaceholderContext) -> String {
+    let mut out = template.to_string();
+
+    if let Some(v) = &ctx.date {
+        sub_in_place(&mut out, "date", v);
+    }
+    if let Some(v) = &ctx.title {
+        sub_in_place(&mut out, "title", v);
+    }
+    if let Some(v) = &ctx.slug {
+        sub_in_place(&mut out, "slug", v);
+    }
+    if let Some(v) = ctx.iteration_number {
+        sub_in_place(&mut out, "iteration_number", &v.to_string());
+        sub_in_place(&mut out, "iteration_number_padded", &format!("{:02}", v));
+    }
+    if let Some(v) = &ctx.parent_project {
+        sub_in_place(&mut out, "parent_project", v);
+    }
+    if let Some(v) = &ctx.parent_experiment {
+        sub_in_place(&mut out, "parent_experiment", v);
+    }
+    if let Some(v) = &ctx.vault_name {
+        sub_in_place(&mut out, "vault_name", v);
+    }
+    if let Some(v) = &ctx.prev_daily_link {
+        sub_in_place(&mut out, "prev_daily_link", v);
+    }
+    if let Some(v) = ctx.week_number {
+        sub_in_place(&mut out, "week_number", &v.to_string());
+    }
+    if let Some(v) = &ctx.day_of_week {
+        sub_in_place(&mut out, "day_of_week", v);
+    }
+    if let Some(v) = ctx.modeling {
+        sub_in_place(&mut out, "modeling", if v { "true" } else { "false" });
+    }
+    if let Some(v) = &ctx.domain {
+        sub_in_place(&mut out, "domain", v);
+    }
+    if let Some(v) = ctx.complexity {
+        sub_in_place(&mut out, "complexity", &v.to_string());
+    }
+
+    // {{datetime}} = local-ish date + 24h time. We don't have a
+    // timezone-aware clock here, so we use the system's seconds-since-epoch
+    // formatted via the existing helpers — for a v1.0 template the date
+    // resolution is sufficient. (Cluster 22 v1.1 may swap this for a
+    // tz-offset-aware path mirroring Cluster 14.)
+    if out.contains("{{datetime}}") {
+        let dt = format!(
+            "{} {:02}:{:02}",
+            ctx.date.clone().unwrap_or_else(today_iso_date),
+            local_hour_minute().0,
+            local_hour_minute().1,
+        );
+        out = out.replace("{{datetime}}", &dt);
+    }
+
+    // Reagents auto-section sentinels — see the doc comment above.
+    out = out.replace("{{reagents_auto_start}}", REAGENTS_AUTO_START);
+    out = out.replace("{{reagents_auto_end}}", REAGENTS_AUTO_END);
+
+    out
+}
+
+/// Coarse local hour/minute for the {{datetime}} placeholder. Uses
+/// SystemTime::now() with a UTC interpretation; good enough for v1.0
+/// since `date` is the primary time signal in templates.
+fn local_hour_minute() -> (u32, u32) {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let total_minutes = (secs / 60).rem_euclid(60 * 24);
+    let hours = (total_minutes / 60) as u32;
+    let minutes = (total_minutes % 60) as u32;
+    (hours, minutes)
+}
+
+/// Read the template body for `doc_type`. If the file doesn't exist on
+/// disk yet, write the bundled default and return that — first-run
+/// initialization is lazy and idempotent. Errors only on truly broken
+/// filesystem state (permission denied, unreadable bytes, etc.).
+fn read_or_init_template(vault_path: &str, doc_type: &str) -> Result<String, String> {
+    if !valid_document_type(doc_type) {
+        return Err(format!("Unknown document type: {}", doc_type));
+    }
+    let path = template_path_for(vault_path, doc_type);
+    if path.exists() {
+        return fs::read_to_string(&path).map_err(|e| e.to_string());
+    }
+
+    // Lazy first-run: write the default so the user can find / edit the
+    // file from the Templates modal. Errors writing the default are not
+    // fatal — caller falls back to the in-memory default.
+    let default_body = default_template_for(doc_type).to_string();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, &default_body);
+    Ok(default_body)
+}
+
+/// Resolve a template body for use during file creation. When
+/// `use_template` is true (the v1.0 default), returns the user's template
+/// (lazily initialised from the bundled default if absent). When false,
+/// returns None — caller should take its existing hardcoded path.
+fn resolve_template_body(
+    vault_path: &str,
+    doc_type: &str,
+    use_template: Option<bool>,
+) -> Option<String> {
+    if matches!(use_template, Some(false)) {
+        return None;
+    }
+    match read_or_init_template(vault_path, doc_type) {
+        Ok(body) => Some(body),
+        Err(e) => {
+            eprintln!("[templates] read_or_init_template({}) failed: {}", doc_type, e);
+            None
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DocumentTemplateInfo {
+    pub doc_type: String,
+    pub path: String,
+    pub exists: bool,
+    pub modified_unix: i64,
+}
+
+#[tauri::command]
+fn list_document_templates(vault_path: String) -> Result<Vec<DocumentTemplateInfo>, String> {
+    let mut out = Vec::with_capacity(DOC_TYPES.len());
+    for &t in DOC_TYPES {
+        let p = template_path_for(&vault_path, t);
+        let exists = p.exists();
+        let modified_unix = if exists {
+            fs::metadata(&p)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        out.push(DocumentTemplateInfo {
+            doc_type: t.to_string(),
+            path: p.to_string_lossy().to_string(),
+            exists,
+            modified_unix,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn read_document_template(vault_path: String, doc_type: String) -> Result<String, String> {
+    read_or_init_template(&vault_path, &doc_type)
+}
+
+#[tauri::command]
+fn write_document_template(
+    vault_path: String,
+    doc_type: String,
+    body: String,
+) -> Result<(), String> {
+    if !valid_document_type(&doc_type) {
+        return Err(format!("Unknown document type: {}", doc_type));
+    }
+    let path = template_path_for(&vault_path, &doc_type);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, body).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reset_document_template(vault_path: String, doc_type: String) -> Result<String, String> {
+    if !valid_document_type(&doc_type) {
+        return Err(format!("Unknown document type: {}", doc_type));
+    }
+    let path = template_path_for(&vault_path, &doc_type);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = default_template_for(&doc_type).to_string();
+    fs::write(&path, &body).map_err(|e| e.to_string())?;
+    Ok(body)
+}
+
+/// Render a template against the supplied placeholder context — used by
+/// the frontend Templates modal to render the live preview pane. Accepts
+/// every PlaceholderContext field as an optional camelCase arg; missing
+/// fields stay as literal `{{token}}` strings in the output (so the user
+/// can see which tokens haven't been wired up yet).
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn preview_document_template(
+    template_body: String,
+    date: Option<String>,
+    title: Option<String>,
+    slug: Option<String>,
+    iteration_number: Option<i64>,
+    parent_project: Option<String>,
+    parent_experiment: Option<String>,
+    vault_name: Option<String>,
+    prev_daily_link: Option<String>,
+    week_number: Option<i64>,
+    day_of_week: Option<String>,
+    modeling: Option<bool>,
+    domain: Option<String>,
+    complexity: Option<i64>,
+) -> Result<String, String> {
+    let ctx = PlaceholderContext {
+        date,
+        title,
+        slug,
+        iteration_number,
+        parent_project,
+        parent_experiment,
+        vault_name,
+        prev_daily_link,
+        week_number,
+        day_of_week,
+        modeling,
+        domain,
+        complexity,
+    };
+    Ok(apply_placeholders(&template_body, &ctx))
 }
 
 // =============================================================================
@@ -9298,6 +10096,12 @@ pub fn run() {
             read_shape_template,
             save_shape_template,
             delete_shape_template,
+            // Cluster 22 v1.0 — Document Templates
+            list_document_templates,
+            read_document_template,
+            write_document_template,
+            reset_document_template,
+            preview_document_template,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

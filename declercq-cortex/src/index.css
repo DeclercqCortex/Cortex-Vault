@@ -1302,6 +1302,797 @@ body.cortex-mod-pressed .cortex-image:hover {
   user-select: none;
 }
 
+/* ---------------------------------------------------------------------------
+ * Cluster 21 v1.0 — Text Editor Toolbar Overhaul
+ *
+ * Visual text effects (glow / shadow / gradient / animation) and the
+ * CSS for the sticky toolbar live in this section. Each effect is a
+ * single CSS class — the CortexTextEffect mark applies them via
+ * `data-effect` → `tx-<name>` mapping.
+ * --------------------------------------------------------------------------- */
+
+/* v1.0.2 — universal toolbar flushed to the very top of the app,
+ * spanning the full viewport width above sidebar + main content.
+ * No more sticky-inside-pane behavior. The host (App.tsx) mounts it
+ * once at the top of a flex-column wrapper that takes 100vh. */
+.cortex-editor-toolbar {
+  flex-shrink: 0;
+  z-index: 60;
+  background: var(--bg-card);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  margin: 0;
+  padding: 4px 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  align-items: center;
+  font-size: 0.78rem;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.06);
+  backdrop-filter: saturate(140%);
+  width: 100%;
+}
+.cortex-editor-toolbar.density-compact {
+  padding: 2px;
+  gap: 0.1rem;
+  font-size: 0.72rem;
+}
+.cortex-editor-toolbar.density-spacious {
+  padding: 6px;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+.cortex-editor-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0 0.3rem;
+  border-right: 1px solid var(--border);
+}
+.cortex-editor-toolbar-group:last-child {
+  border-right: none;
+}
+.cortex-editor-toolbar-group.collapsed > *:not(.cortex-tb-group-title) {
+  display: none;
+}
+.cortex-tb-btn {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: inherit;
+  cursor: pointer;
+  min-width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.cortex-tb-btn:hover {
+  background: var(--bg-elev);
+}
+.cortex-tb-btn.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.cortex-tb-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.cortex-tb-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 0.1rem;
+}
+
+/* Cluster 21 v1.0.4 — native <select> dropdowns inside the toolbar
+ * inherit OS-default styling for the dropdown PANEL (not the
+ * trigger button), which renders white/grey in dark mode. The
+ * options below the trigger can't be fully styled cross-browser,
+ * but we can at least set the option-level colors so the panel
+ * matches the dark theme. The trigger itself is styled by the
+ * `cortex-tb-btn` class above. */
+.cortex-editor-toolbar select.cortex-tb-btn,
+.cortex-editor-toolbar select.cortex-tb-btn option {
+  background: var(--bg-card);
+  color: var(--text);
+}
+.cortex-editor-toolbar select.cortex-tb-btn:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.cortex-tb-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  display: inline-block;
+}
+.cortex-tb-popover {
+  position: absolute;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  z-index: 200;
+  min-width: 220px;
+}
+.cortex-tb-grid-6 {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+}
+.cortex-tb-grid-7 {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+/* Reading-mode hides chrome OTHER than the toolbar. The toolbar
+ * itself stays visible so the user can always toggle reading mode
+ * back off. v1.0.2 fix — the previous rule hid the toolbar and
+ * stranded the user without a way to recover. */
+.cortex-reading-mode .RelatedHierarchyPanel,
+.cortex-reading-mode .BacklinksPanel,
+.cortex-reading-mode .FrontmatterPanel {
+  display: none !important;
+}
+
+/* Minimize-toolbar-to-bar — when the user toggles minimize from the
+ * polish group, every group hides except a tiny "expand" handle, so
+ * the toolbar shrinks to a thin strip without losing access. */
+.cortex-editor-toolbar.minimized > .cortex-editor-toolbar-group:not(.cortex-tb-keep-minimized) {
+  display: none !important;
+}
+.cortex-editor-toolbar.minimized {
+  padding: 1px 4px;
+  min-height: 18px;
+  font-size: 0.65rem;
+}
+
+/* Find/replace bar — appears under the toolbar when active. */
+.cortex-find-replace-bar {
+  position: sticky;
+  top: 38px;
+  z-index: 55;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.78rem;
+}
+.cortex-find-replace-bar input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+.cortex-find-replace-match {
+  background: rgba(255, 220, 80, 0.45);
+  border-radius: 2px;
+}
+.cortex-find-replace-current {
+  background: rgba(255, 160, 30, 0.7);
+  outline: 1px solid var(--accent);
+}
+
+/* Outline panel — sidebar showing headings. */
+.cortex-outline-panel {
+  position: absolute;
+  right: -260px;
+  top: 0;
+  width: 240px;
+  max-height: 70vh;
+  overflow: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 0.78rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+.cortex-outline-item {
+  padding: 3px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cortex-outline-item:hover {
+  background: var(--bg-elev);
+}
+.cortex-outline-item.h1 {
+  font-weight: 700;
+}
+.cortex-outline-item.h2 {
+  padding-left: 14px;
+}
+.cortex-outline-item.h3 {
+  padding-left: 24px;
+  color: var(--text-muted);
+}
+
+/* Focus / typewriter mode — non-current paragraphs dim. */
+.cortex-focus-mode-dim {
+  opacity: 0.35;
+  transition: opacity 0.18s ease;
+}
+
+/* Show invisibles widgets. */
+.cortex-invisibles-pilcrow::after {
+  content: "¶";
+  color: var(--text-muted);
+  opacity: 0.45;
+  margin-left: 1px;
+  font-size: 0.85em;
+}
+.cortex-invisibles-space {
+  /* injected via Decoration: a span containing a middle dot */
+  color: var(--text-muted);
+  opacity: 0.4;
+}
+
+/* Marker-pen mode — body-level cursor + toolbar indicator. */
+body.cortex-marker-active,
+body.cortex-marker-active * {
+  cursor:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><text y='22' font-size='22'>✏️</text></svg>")
+      4 24,
+    text;
+}
+
+/* ---------- TEXT EFFECTS ---------- */
+
+.cortex-text-effect {
+  /* Inherit color etc. by default; effect classes override. */
+}
+
+/* Glow + shadow */
+.tx-glow-soft {
+  text-shadow: 0 0 6px var(--tx-effect-color, currentColor);
+}
+.tx-glow-neon {
+  text-shadow:
+    0 0 4px #fff,
+    0 0 10px var(--tx-effect-color, #ff0080),
+    0 0 16px var(--tx-effect-color, #ff0080),
+    0 0 28px var(--tx-effect-color, #ff0080);
+}
+.tx-halo {
+  text-shadow:
+    0 0 14px var(--tx-effect-color, currentColor),
+    0 0 28px var(--tx-effect-color, currentColor);
+}
+.tx-shadow-drop {
+  text-shadow: 1px 2px 3px rgba(0, 0, 0, 0.45);
+}
+.tx-shadow-inset {
+  /* Faux inset via doubled inverse shadows */
+  color: rgba(0, 0, 0, 0.4);
+  text-shadow:
+    1px 1px 1px rgba(255, 255, 255, 0.6),
+    -1px -1px 1px rgba(0, 0, 0, 0.5);
+}
+.tx-embossed {
+  color: #c5c5c5;
+  text-shadow:
+    -1px -1px 0 rgba(255, 255, 255, 0.6),
+    1px 1px 1px rgba(0, 0, 0, 0.45);
+}
+.tx-engraved {
+  color: #6a6a6a;
+  text-shadow:
+    1px 1px 0 rgba(255, 255, 255, 0.55),
+    -1px -1px 1px rgba(0, 0, 0, 0.5);
+}
+.tx-extrude-3d {
+  text-shadow:
+    1px 1px 0 #b8b8b8,
+    2px 2px 0 #aaa,
+    3px 3px 0 #999,
+    4px 4px 0 #888,
+    5px 5px 4px rgba(0, 0, 0, 0.35);
+}
+.tx-outline {
+  -webkit-text-stroke: 1.2px var(--tx-effect-color, currentColor);
+  color: transparent;
+}
+
+/* Cluster 21 v1.0.3 — keep the text caret (cursor) visible across
+ * effects that set `color: transparent` (the gradient family) or
+ * `color` to a near-bg shade (embossed/engraved). Without this the
+ * inline-block / transparent-color trick that powers gradients
+ * inherits caret-color from `color`, hiding the cursor. */
+.tx-gradient-golden,
+.tx-gradient-silver,
+.tx-gradient-rainbow,
+.tx-gradient-sunset,
+.tx-gradient-ocean,
+.tx-gradient-custom,
+.tx-outline,
+.tx-embossed,
+.tx-engraved,
+.tx-extrude-3d {
+  caret-color: var(--text);
+}
+
+/* Cluster 21 v1.0.6 — gradient text uses `color: transparent` plus
+ * `background-clip: text`; when the user selects gradient text, the
+ * native selection highlight covers the gradient and the
+ * transparent text becomes invisible (text "disappears"). Override
+ * ::selection to show readable text + a normal selection bg while
+ * a range is highlighted. */
+.tx-gradient-golden::selection,
+.tx-gradient-silver::selection,
+.tx-gradient-rainbow::selection,
+.tx-gradient-sunset::selection,
+.tx-gradient-ocean::selection,
+.tx-gradient-custom::selection,
+.tx-outline::selection {
+  background: var(--accent);
+  color: white;
+  -webkit-text-fill-color: white;
+}
+
+/* Gradient text (background-clip: text) */
+.tx-gradient-golden {
+  background: linear-gradient(120deg, #fff5b1 0%, #f7d35a 30%, #d49a17 60%, #7a5310 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tx-gradient-silver {
+  background: linear-gradient(120deg, #e8e8e8 0%, #ffffff 30%, #b8b8b8 70%, #909090 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tx-gradient-rainbow {
+  background: linear-gradient(
+    100deg,
+    #ff0080 0%,
+    #ff8c00 18%,
+    #ffd200 36%,
+    #06d6a0 54%,
+    #3a86ff 72%,
+    #9d4edd 90%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tx-gradient-sunset {
+  background: linear-gradient(110deg, #f9d423 0%, #ff4e50 60%, #c81d77 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tx-gradient-ocean {
+  background: linear-gradient(110deg, #00c6ff 0%, #0077b6 50%, #023e8a 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tx-gradient-custom {
+  /* `background` is set inline via the mark's renderHTML when the
+     custom-gradient picker emits a CSS gradient string. */
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Animations (CSS keyframes; respect prefers-reduced-motion +
+   the body.cortex-anim-paused class). */
+@keyframes cortex-anim-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+@keyframes cortex-anim-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+@keyframes cortex-anim-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(2px); }
+}
+@keyframes cortex-anim-wave {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes cortex-anim-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+@keyframes cortex-anim-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes cortex-anim-colorcycle {
+  0% { color: #ff4e50; }
+  17% { color: #f9d423; }
+  33% { color: #06d6a0; }
+  50% { color: #3a86ff; }
+  67% { color: #9d4edd; }
+  83% { color: #ff8c00; }
+  100% { color: #ff4e50; }
+}
+@keyframes cortex-anim-gradient {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+@keyframes cortex-anim-glitch {
+  0%, 100% { text-shadow: 0 0 0 transparent; transform: translate(0); }
+  20% { text-shadow: -2px 0 #ff0080, 2px 0 #00fff7; transform: translate(-1px, 1px); }
+  40% { text-shadow: 2px 0 #ff0080, -2px 0 #00fff7; transform: translate(1px, -1px); }
+  60% { text-shadow: -1px 0 #ff0080, 1px 0 #00fff7; transform: translate(0, 1px); }
+}
+@keyframes cortex-anim-flicker {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+@keyframes cortex-anim-heartbeat {
+  0%, 100% { transform: scale(1); }
+  10%, 30% { transform: scale(1.18); }
+  20%, 40% { transform: scale(1); }
+}
+@keyframes cortex-anim-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes cortex-anim-marching-ants {
+  to { background-position: 18px 0; }
+}
+
+.tx-anim-pulse { animation: cortex-anim-pulse 1.6s ease-in-out infinite; display: inline-block; }
+.tx-anim-bounce { animation: cortex-anim-bounce 1s ease-in-out infinite; display: inline-block; }
+.tx-anim-shake { animation: cortex-anim-shake 0.5s linear infinite; display: inline-block; }
+.tx-anim-wave { animation: cortex-anim-wave 2s ease-in-out infinite; display: inline-block; }
+.tx-anim-typewriter {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  border-right: 0.1em solid currentColor;
+  animation: cortex-anim-typing 2s steps(30, end) forwards, cortex-anim-blink 0.75s step-end infinite;
+}
+@keyframes cortex-anim-typing { from { width: 0; } to { width: 100%; } }
+@keyframes cortex-anim-blink { from, to { border-color: transparent; } 50% { border-color: currentColor; } }
+.tx-anim-marquee {
+  display: inline-block;
+  white-space: nowrap;
+  animation: cortex-anim-marquee 12s linear infinite;
+}
+.tx-anim-fade { animation: cortex-anim-fade 1.6s ease-out 1 forwards; }
+.tx-anim-colorcycle { animation: cortex-anim-colorcycle 6s linear infinite; }
+.tx-anim-animgradient {
+  background-size: 200% 200% !important;
+  animation: cortex-anim-gradient 5s ease infinite;
+}
+.tx-anim-glitch {
+  display: inline-block;
+  animation: cortex-anim-glitch 1.6s steps(4) infinite;
+}
+.tx-anim-flicker { animation: cortex-anim-flicker 1.2s steps(2) infinite; }
+.tx-anim-heartbeat { animation: cortex-anim-heartbeat 1.2s ease-in-out infinite; display: inline-block; }
+.tx-anim-float { animation: cortex-anim-float 4s ease-in-out infinite; display: inline-block; }
+
+/* Pause-all rule. */
+body.cortex-anim-paused .tx-anim-pulse,
+body.cortex-anim-paused .tx-anim-bounce,
+body.cortex-anim-paused .tx-anim-shake,
+body.cortex-anim-paused .tx-anim-wave,
+body.cortex-anim-paused .tx-anim-marquee,
+body.cortex-anim-paused .tx-anim-colorcycle,
+body.cortex-anim-paused .tx-anim-animgradient,
+body.cortex-anim-paused .tx-anim-glitch,
+body.cortex-anim-paused .tx-anim-flicker,
+body.cortex-anim-paused .tx-anim-heartbeat,
+body.cortex-anim-paused .tx-anim-float,
+body.cortex-anim-paused .cortex-underline-marching {
+  animation-play-state: paused !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tx-anim-pulse,
+  .tx-anim-bounce,
+  .tx-anim-shake,
+  .tx-anim-wave,
+  .tx-anim-marquee,
+  .tx-anim-colorcycle,
+  .tx-anim-animgradient,
+  .tx-anim-glitch,
+  .tx-anim-flicker,
+  .tx-anim-heartbeat,
+  .tx-anim-float,
+  .cortex-underline-marching {
+    animation: none !important;
+  }
+}
+
+/* Marching-ants underline (when CortexUnderlineStyled has marching=true) */
+.cortex-underline-marching {
+  text-decoration: none !important;
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--accent) 0,
+    var(--accent) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+  background-repeat: repeat-x;
+  background-position: 0 100%;
+  background-size: 18px 2px;
+  padding-bottom: 2px;
+  animation: cortex-anim-marching-ants 0.6s linear infinite;
+}
+
+/* Drop cap */
+.cortex-drop-cap {
+  font-size: 3.2em;
+  float: left;
+  line-height: 0.9;
+  margin: 0.1em 0.08em 0 0;
+  font-weight: 700;
+  font-family: ui-serif, Georgia, "Iowan Old Style", Palatino, serif;
+}
+
+/* Pull quote */
+.cortex-pull-quote {
+  display: block;
+  font-size: 1.4em;
+  font-style: italic;
+  line-height: 1.4;
+  border-left: 4px solid var(--accent);
+  padding: 0.4em 1em;
+  margin: 0.6em 0;
+  color: var(--text);
+}
+
+/* Page break */
+hr.cortex-page-break {
+  border: none;
+  border-top: 2px dashed var(--border);
+  margin: 2em 0;
+  page-break-after: always;
+}
+hr.cortex-page-break::after {
+  content: "page break";
+  display: block;
+  text-align: center;
+  font-size: 0.7em;
+  color: var(--text-muted);
+  margin-top: 0.4em;
+}
+
+/* Decorative separator */
+.cortex-deco-separator {
+  display: flex;
+  align-items: center;
+  gap: 0.8em;
+  margin: 1em 0;
+  color: var(--text-muted);
+}
+.cortex-deco-separator::before,
+.cortex-deco-separator::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Callout container */
+.cortex-callout {
+  border-left: 4px solid var(--cortex-callout-accent, var(--accent));
+  background: var(--cortex-callout-bg, rgba(58, 134, 255, 0.07));
+  border-radius: 4px;
+  padding: 0.6em 0.9em;
+  margin: 0.6em 0;
+}
+.cortex-callout-info { --cortex-callout-accent: #3a86ff; --cortex-callout-bg: rgba(58, 134, 255, 0.07); }
+.cortex-callout-tip { --cortex-callout-accent: #06d6a0; --cortex-callout-bg: rgba(6, 214, 160, 0.07); }
+.cortex-callout-warning { --cortex-callout-accent: #ffd166; --cortex-callout-bg: rgba(255, 209, 102, 0.1); }
+.cortex-callout-danger { --cortex-callout-accent: #ef476f; --cortex-callout-bg: rgba(239, 71, 111, 0.07); }
+.cortex-callout-note { --cortex-callout-accent: #9d4edd; --cortex-callout-bg: rgba(157, 78, 221, 0.07); }
+
+/* Columns */
+.cortex-columns {
+  display: grid;
+  gap: 1rem;
+  margin: 0.6em 0;
+}
+.cortex-columns-2 { grid-template-columns: 1fr 1fr; }
+.cortex-columns-3 { grid-template-columns: 1fr 1fr 1fr; }
+.cortex-side-by-side {
+  display: grid;
+  grid-template-columns: 1fr 1px 1fr;
+  gap: 0;
+  margin: 0.6em 0;
+}
+.cortex-side-by-side > .cortex-side-divider {
+  background: var(--border);
+}
+
+/* Tabs (simple, no JS — uses :checked + radios; kept basic for v1.0) */
+.cortex-tabs { margin: 0.6em 0; }
+.cortex-tabs-titles { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.cortex-tab-title {
+  padding: 4px 10px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: var(--bg-elev);
+  font-size: 0.85rem;
+}
+.cortex-tab-title.active {
+  background: var(--bg-card);
+  font-weight: 600;
+}
+.cortex-tab-body {
+  border: 1px solid var(--border);
+  border-top: none;
+  padding: 0.6em 0.9em;
+}
+
+/* Margin note (floats right of the main column) */
+.cortex-margin-note {
+  float: right;
+  width: 180px;
+  margin: 0 0 0.5em 1em;
+  padding: 0.5em 0.7em;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  font-size: 0.85em;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+/* Frame (decorative box around section) */
+.cortex-frame {
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  padding: 1em 1.2em;
+  margin: 0.8em 0;
+}
+.cortex-frame-corner-deco {
+  border-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 60 60'><path d='M0 0 L20 0 M0 0 L0 20 M40 0 L60 0 M60 0 L60 20 M0 60 L0 40 M0 60 L20 60 M60 60 L40 60 M60 60 L60 40' stroke='%23999' stroke-width='2' fill='none'/></svg>")
+    20 stretch;
+}
+
+/* Footnote inline ref */
+sup.cortex-fn {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.78em;
+  padding: 0 1px;
+}
+sup.cortex-fn:hover {
+  text-decoration: underline;
+}
+
+/* Citation inline */
+.cortex-citation {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+/* Math — inline + block */
+.cortex-math-inline,
+.cortex-math-block {
+  font-family: ui-serif, Georgia, "STIX Two Math", "Cambria Math", serif;
+  background: var(--bg-elev);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-style: italic;
+}
+.cortex-math-block {
+  display: block;
+  text-align: center;
+  padding: 0.4em 0.6em;
+  margin: 0.5em 0;
+  font-size: 1.1em;
+}
+
+/* Particle host — gives the canvas overlay a place to anchor. */
+.cortex-particle-host {
+  position: relative;
+  display: inline-block;
+}
+
+/* Toggle/details */
+details.cortex-toggle {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4em 0.7em;
+  margin: 0.5em 0;
+}
+details.cortex-toggle > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+details.cortex-toggle[open] > summary {
+  margin-bottom: 0.4em;
+}
+
+/* Multi-color text helper — applied as a class plus per-character
+ * spans that the toolbar's command builds. CSS just makes inline-block
+ * spans behave. */
+.cortex-multi-color > span {
+  display: inline;
+}
+
+/* Cluster 21 v1.0.3 — list-style cycling for nested bullet lists.
+ * Top level: solid disc. Level 2: open circle (white-filled circle
+ * with an outline). Level 3: square. Cycles back at level 4. */
+.ProseMirror ul {
+  list-style-type: disc;
+}
+.ProseMirror ul ul {
+  list-style-type: circle;
+}
+.ProseMirror ul ul ul {
+  list-style-type: square;
+}
+.ProseMirror ul ul ul ul {
+  list-style-type: disc;
+}
+
+/* Numbered lists: numbers → lower-alpha → lower-roman → cycle. */
+.ProseMirror ol {
+  list-style-type: decimal;
+}
+.ProseMirror ol ol {
+  list-style-type: lower-alpha;
+}
+.ProseMirror ol ol ol {
+  list-style-type: lower-roman;
+}
+.ProseMirror ol ol ol ol {
+  list-style-type: decimal;
+}
+
+/* Task lists — the checkbox REPLACES the bullet rather than being
+ * stacked on top of one. v1.0.3 fix: list-style none on the
+ * task-list container, and the task-item label flexes the checkbox
+ * inline with its content. */
+.ProseMirror ul[data-type="taskList"],
+.ProseMirror ul.cortex-task-list {
+  list-style: none;
+  padding-left: 1.2em;
+}
+.ProseMirror ul[data-type="taskList"] li,
+.ProseMirror ul.cortex-task-list li {
+  list-style: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4em;
+}
+.ProseMirror ul[data-type="taskList"] li > label,
+.ProseMirror ul.cortex-task-list li > label {
+  margin-top: 0.15em;
+}
+.ProseMirror ul[data-type="taskList"] li > div,
+.ProseMirror ul.cortex-task-list li > div {
+  flex: 1;
+}
+
 /* Selected-shape marquee + handle styling lives mostly in the
  * inline SVG attributes for portability, but the surrounding "we're
  * in shape editor mode" cue is the dimmed-doc rule above. */

@@ -32,6 +32,18 @@ import {
 } from "./components/LayoutPicker";
 import { LayoutGrid } from "./components/LayoutGrid";
 import { SlotPicker } from "./components/SlotPicker";
+import {
+  EditorToolbar,
+  loadToolbarPrefs,
+  saveToolbarPrefs,
+  type ToolbarPrefs,
+} from "./components/EditorToolbar";
+// Cluster 22 v1.0 — Document Templates modal + helper that reads the
+// current "templates enabled" flag so creation flows can pass it through.
+import {
+  TemplatesModal,
+  readTemplatesEnabled,
+} from "./components/TemplatesModal";
 
 /** Local YYYY-MM-DD — uses the user's timezone, never UTC. */
 function todayLocal(): string {
@@ -103,6 +115,47 @@ function App() {
   const [slotDirty, setSlotDirty] = useState<boolean[]>(
     Array.from({ length: MAX_SLOTS }, () => false),
   );
+  // Cluster 21 v1.0.2 — track each pane's editor instance so the
+  // single universal toolbar at the top of the app can bind to
+  // whichever pane is currently active.
+  const [paneEditors, setPaneEditors] = useState<(any | null)[]>(
+    Array.from({ length: MAX_SLOTS }, () => null),
+  );
+  const setPaneEditorAt = (idx: number, editor: any | null) => {
+    setPaneEditors((prev) => {
+      // Cluster 21 v1.0.3 — bail out early when the editor reference
+      // for this slot hasn't changed. Without this, even a no-op
+      // call to setPaneEditorAt would create a fresh array, trigger
+      // an App re-render, re-create TabPane's inline onEditorReady,
+      // re-fire onEditorReady, recurse → "Maximum update depth
+      // exceeded" + OOM.
+      if (prev[idx] === editor) return prev;
+      const next = prev.slice();
+      next[idx] = editor;
+      return next;
+    });
+  };
+  // Cluster 21 v1.0.2 — universal toolbar prefs (persisted in
+  // localStorage). Moved from per-pane TabPane state.
+  const [toolbarPrefs, setToolbarPrefs] = useState<ToolbarPrefs>(() =>
+    loadToolbarPrefs(),
+  );
+  const handleToolbarPrefsChange = (next: ToolbarPrefs) => {
+    setToolbarPrefs(next);
+    saveToolbarPrefs(next);
+  };
+  // Reading-mode body class is applied at the App level so the user
+  // can toggle it on/off without losing toolbar access. The toolbar
+  // itself stays visible in reading mode.
+  useEffect(() => {
+    document.body.classList.toggle(
+      "cortex-reading-mode",
+      toolbarPrefs.readingMode,
+    );
+    return () => {
+      document.body.classList.remove("cortex-reading-mode");
+    };
+  }, [toolbarPrefs.readingMode]);
   const [activeSlotIdx, setActiveSlotIdx] = useState(0);
   // Ref mirror of activeSlotIdx for handlers that need the latest
   // value synchronously (e.g., FileTree click immediately after a
@@ -210,6 +263,8 @@ function App() {
   // pick-mode: clicking a result inserts `[[Title]]` at the cursor
   // instead of opening the file. The palette UI is unchanged.
   const [wikilinkPickMode, setWikilinkPickMode] = useState(false);
+  // Cluster 22 — Document Templates modal.
+  const [templatesModalOpen, setTemplatesModalOpen] = useState(false);
 
   // Cluster 12 — auto-sync Google Calendar on startup + every 5 min.
   // Re-fetches event rows from Google → upserts into the events
@@ -573,6 +628,7 @@ function App() {
         vaultPath,
         dateIso: today,
         carryOverMd,
+        useTemplate: readTemplatesEnabled(),
       });
       await selectFileInSlot(path, activeSlotIdx);
       setRefreshKey((k) => k + 1);
@@ -1021,12 +1077,30 @@ function App() {
   }, []);
 
   // Track which keymap is live (sidebar vs editor) for the visual banner.
+  // Cluster 21 v1.0.5 — clicks inside the universal EditorToolbar
+  // count as "editor" context, not "sidebar". Without this exemption,
+  // every toolbar click flips activeMode → "sidebar" because the
+  // toolbar buttons aren't inside .ProseMirror, breaking the user's
+  // mental model (they're still editing the doc, just via the
+  // toolbar). Same exemption for any popover the toolbar opens
+  // (.cortex-tb-popover) and the find/replace bar.
   useEffect(() => {
     const updateFromEvent = (e: Event) => {
       const t = e.target as Element | null;
-      const isEditor =
-        !!t && typeof t.closest === "function" && !!t.closest(".ProseMirror");
-      setActiveMode(isEditor ? "editor" : "sidebar");
+      if (!t || typeof t.closest !== "function") {
+        setActiveMode(isAnyEditorFocused() ? "editor" : "sidebar");
+        return;
+      }
+      const inEditor = !!t.closest(".ProseMirror");
+      const inToolbar =
+        !!t.closest(".cortex-editor-toolbar") ||
+        !!t.closest(".cortex-tb-popover") ||
+        !!t.closest(".cortex-find-replace-bar");
+      if (inEditor || inToolbar) {
+        setActiveMode("editor");
+      } else {
+        setActiveMode(isAnyEditorFocused() ? "editor" : "sidebar");
+      }
     };
     document.addEventListener("focusin", updateFromEvent);
     document.addEventListener("mousedown", updateFromEvent);
@@ -1208,6 +1282,10 @@ function App() {
           onOpenFileInPane={async (path, slotIndex) => {
             await selectFileInSlot(path, slotIndex);
           }}
+          onEditorChange={(editor) => setPaneEditorAt(i, editor)}
+          particlesPaused={
+            toolbarPrefs.pauseAnimations || toolbarPrefs.reduceMotion
+          }
         />
       </PaneWrapper>,
     );
@@ -1218,7 +1296,45 @@ function App() {
   const treeHighlight = slotPaths[activeSlotIdx] ?? null;
 
   return (
-    <div style={baseStyles.appShell}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        width: "100%",
+      }}
+    >
+      {/* Cluster 21 v1.0.2 — single universal Editor Toolbar pinned
+          flush to the very top of the app, above the document area
+          and the sidebar. Operates on the currently-active pane's
+          editor. Stays visible in reading mode (so the user can
+          always toggle it back off) and can be collapsed to a thin
+          bar via its own polish-group toggle. */}
+      <EditorToolbar
+        editor={paneEditors[activeSlotIdx] ?? null}
+        notePath={slotPaths[activeSlotIdx] ?? null}
+        prefs={toolbarPrefs}
+        onPrefsChange={handleToolbarPrefsChange}
+        rescanKey={0}
+        onOpenBlockModal={() => {
+          // Cluster 21 v1.0.4 — open the existing ExperimentBlockModal
+          // (the same one Ctrl+Shift+B opens). The modal handles
+          // type / name / iteration entry and inserts the typed
+          // block at the cursor via paneRefs.insertExperimentBlock.
+          // The preselectType arg is currently ignored by the
+          // modal; v1.1 may wire it through.
+          setBlockModalOpen(true);
+        }}
+        onInsertWikilink={() => {
+          const handle = paneRefs.current[activeSlotIdx];
+          const wrapped = handle?.wrapSelectionInWikilink?.() ?? false;
+          if (!wrapped) {
+            setWikilinkPickMode(true);
+            setPaletteOpen(true);
+          }
+        }}
+      />
+      <div style={baseStyles.appShell}>
       <aside
         style={{
           ...baseStyles.sidebar,
@@ -1390,6 +1506,13 @@ function App() {
                     title="Integrations settings (Ctrl+,)"
                   >
                     GH
+                  </button>
+                  <button
+                    onClick={() => setTemplatesModalOpen(true)}
+                    style={baseStyles.changeBtn}
+                    title="Document templates — edit per-type defaults"
+                  >
+                    Templates
                   </button>
                   <button
                     onClick={() => setRefreshKey((k) => k + 1)}
@@ -1592,6 +1715,20 @@ function App() {
         isOpen={orphanModalOpen}
         onClose={() => setOrphanModalOpen(false)}
       />
+      {templatesModalOpen && (
+        <TemplatesModal
+          vaultPath={vaultPath}
+          onEdit={(templatePath) => {
+            // Templates are real .md files in the vault — opening one in
+            // the active slot reuses every TipTap effect and the
+            // EditorToolbar from Cluster 21 with no extra wiring.
+            setTemplatesModalOpen(false);
+            void selectFileInSlot(templatePath, activeSlotIdx);
+          }}
+          onClose={() => setTemplatesModalOpen(false)}
+        />
+      )}
+      </div>
     </div>
   );
 }
@@ -1698,7 +1835,12 @@ const baseStyles: Record<string, React.CSSProperties> = {
   },
   appShell: {
     display: "flex",
-    height: "100vh",
+    // Cluster 21 v1.0.2 — appShell is now nested inside a flex-
+    // column wrapper that hosts the universal toolbar above it.
+    // Use `flex: 1` so it takes the remaining vertical space, and
+    // `minHeight: 0` so children can scroll inside it.
+    flex: 1,
+    minHeight: 0,
     width: "100vw",
     overflow: "hidden",
   },

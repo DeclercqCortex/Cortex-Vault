@@ -6222,3 +6222,365 @@ clean ship that bundles them into a single tag.
 ### Tag
 
 `cluster-20-v1.1-complete`.
+
+## Phase 3 — Cluster 21 v1.0 — Text Editor Toolbar Overhaul
+
+A persistent universal toolbar pinned flush with the very top of
+the app (above every pane), driving the active editor in any
+slot. Comprehensive formatting: basic marks, headings / paragraph
+styles, alignment / spacing / indent, lists, font size + family +
+weight + italic, text color + highlight + underline-styled
+pickers (with marker-pen mode), strike-resolve variants, visual
+text effects (glow / shadow / gradient / animation), particle
+effects, insertion menus (link, footnote, citation, special
+character, emoji, symbol, math, date), structural blocks
+(callout, columns, side-by-side, tabs, decorative divider,
+toggle / collapsible, margin note, frame, pull quote, page
+break, math block, drop cap), Cortex-specific quick actions
+(experiment / protocol / idea / method blocks), utility tools
+(find & replace, live counts, outline, zoom, focus / typewriter
+mode, reading mode, show invisibles, print, DOCX export), and
+toolbar-level polish (density preset, group reorder, favorites,
+pause-animations toggle, persistence in localStorage).
+
+### What ships
+
+- **Universal toolbar at App level.** EditorToolbar is mounted
+  ONCE at the top of the App's flex column wrapper, not per-pane.
+  `paneEditors[activeSlotIdx]` drives which editor instance the
+  toolbar talks to; switching slot updates the bound editor.
+  Toolbar is `flex-shrink: 0` so it never collapses; reading
+  mode no longer hides it (early v1.0.4 attempt did, was
+  reversed after the user lost recovery affordance). Sits above
+  the document window itself.
+- **TipTap extension layer** (under `src/editor/`): one
+  `CortexFontStyle` mark covers size + family + weight via
+  data-* attrs; one `CortexUnderlineStyled` mark covers color +
+  thickness + style + offset; one `CortexTextEffect` mark covers
+  all glow / shadow / gradient / animation effects via a
+  data-effect attr → CSS class; one `CortexParticleHost` mark
+  wires data-particle to the canvas overlay; `CortexBlocks.ts`
+  provides 14 structural nodes (Callout, Columns, SideBySide,
+  Collapsible, MarginNote, Frame, PullQuote, DecoSeparator,
+  PageBreak, MathBlock, TabsBlock, FootnoteRef, CitationRef,
+  MathInline, DropCap); `CortexMarkerMode.ts` is a ProseMirror
+  plugin that listens for selection-end while marker-active
+  and applies the active ColorMark.
+- **Marker pen wired to ColorMark, not free hex.** The marker
+  picker is a `<select>` of the seven Cluster 2 ColorMark names
+  (yellow / green / pink / blue / orange / red / purple) and the
+  plugin calls `colorMarkType.create({ color: name })`. So
+  marker-applied highlights flow into the Reviews tab pipeline
+  alongside Ctrl+1-7 manual marks. The MARK_PALETTE order in
+  the toolbar matches that pipeline exactly so the visual order
+  in the highlight group lines up with the Reviews tab.
+- **Direct ProseMirror dispatch for effects + particles.**
+  Earlier rounds (v1.0.0-v1.0.5) tried `editor.chain().setMark`
+  with `setTextSelection` and custom command bodies; each had a
+  composition ambiguity that occasionally dropped the selection
+  range and routed the mark into `storedMarks` (where it'd
+  apply to the next-typed character only). v1.0.6 switched to
+  raw `editor.view.dispatch(tr.addMark(from, to, mark))` with
+  ranges resolved by a `resolveRange()` helper that prefers
+  current selection and falls back to a `lastSelectionRef`
+  captured by selectionUpdate. Same dispatch shape for the
+  unset path. Effects categories (gradient / shadow / animation)
+  same-category-replace; cross-category compose. Gradient text
+  gets explicit `::selection` CSS so it stays visible when the
+  user re-selects an already-gradient span.
+- **Particle host overlay.** `ParticleOverlay.tsx` mounts a
+  per-`[data-particle]` canvas via IntersectionObserver, runs
+  14 renderers (sparkle, star, confetti, snow, heart, ember,
+  smoke, bubble, lightning, pixie, petal, comet, bokeh,
+  coderain) on a single rAF loop, defaults `visible: true` in
+  ensureHost so particles render before IO fires the first
+  intersection event. Pauses when offscreen, when the global
+  pause-animations toggle is on, and respects
+  `prefers-reduced-motion`.
+- **Cortex buttons activate the Ctrl+Shift+B pipeline.** The
+  Experiment / Protocol / Idea / Method buttons in the Cortex
+  group call `onOpenBlockModal()` → `setBlockModalOpen(true)`,
+  reusing the existing ExperimentBlockModal flow; window.prompt
+  free-text capture was removed. Decorative divider glyph picker
+  (TbPopover instead of window.prompt) so cancel doesn't insert.
+- **activeMode listener exempts toolbar.** App.tsx's
+  active-pane click router treats clicks on
+  `.cortex-editor-toolbar`, `.cortex-tb-popover`, and
+  `.cortex-find-replace-bar` as non-pane-changing so opening
+  a popover in the toolbar doesn't switch the active slot or
+  steal focus from the editor.
+- **Selection preservation across popovers.** A
+  `lastSelectionRef` captured by `selectionUpdate` survives
+  popover-open focus loss; toolbar actions that need a range
+  fall back to it. Combined with direct PM dispatch, every
+  toolbar button works regardless of where focus actually went
+  during the popover interaction.
+- **Toolbar prefs in localStorage.** Density (compact / normal /
+  spacious), collapsed groups, favorites, pauseAnimations,
+  reduceMotion, readingMode, spellcheck, zoom — keyed
+  `cortex:editor-toolbar-prefs`.
+
+### v1.0.x dot-fix history (all rolled into the v1.0 ship)
+
+- **v1.0.1** — initial integration; missing TipTap packages
+  added (`extension-subscript`, `-superscript`, `-text-style`,
+  `-color`, `-highlight`, `-task-list`, `-task-item`).
+- **v1.0.2** — `editor.view.dom.setAttribute` and
+  `setMarkerMode(editor.view, ...)` wrapped in `try/catch` so a
+  pre-mount race doesn't crash the editor. `useRef` import
+  added in Editor.tsx.
+- **v1.0.3** — universal toolbar refactor: moved from per-pane
+  to App-level mount. `paneEditors` state + `setPaneEditorAt`
+  early-return when reference is unchanged (fixed an OOM via
+  inline `onEditorReady` identity churn). `onReadyFiredFor` ref
+  in Editor.tsx prevents infinite onEditorReady firing.
+- **v1.0.4** — reading mode no longer hides the toolbar (CSS
+  rule reversed after the user lost recovery affordance). Marker
+  picker switched from free hex to ColorMark `<select>`. Cortex
+  buttons routed to `onOpenBlockModal`. MARK_PALETTE reordered
+  to match Cluster 2 review pipeline. Decorative divider switched
+  from `window.prompt` to a glyph TbPopover.
+- **v1.0.5** — reset highlight unwedged: `unsetMark("highlight")`
+  was wrong type after the ColorMark switch; now calls both
+  `unsetColorMark` and `unsetMark("highlight")`. activeMode
+  listener exempts the toolbar's class names.
+- **v1.0.6** — direct PM dispatch replaces chain composition for
+  applyTextEffect / applyParticle; explicit (from, to) range from
+  `resolveRange()`. `::selection` CSS for gradient classes so
+  selected gradient text stays visible.
+- **v1.0.7** — `resolveRange` useCallback hoisted above the
+  `if (!editor) return null` early-return. Earlier the hook
+  sat AFTER the guard, so on the first render (editor null) only
+  23 hooks ran and on subsequent renders all 24 ran, producing
+  React's "Rendered more hooks than during the previous render"
+  error. Hoisting fixes the order.
+
+### Architectural decisions
+
+- **One toolbar, not per-pane.** Multiple toolbars sharing
+  state across panes was tried briefly, but coordinating
+  density / collapsed-groups / marker-active across N
+  toolbars was a mess. A single toolbar bound to
+  `paneEditors[activeSlotIdx]` is simpler and matches the way
+  IDE-style editors handle multi-pane chrome (one ribbon, the
+  active editor drives it).
+- **Direct ProseMirror dispatch over TipTap chain.** TipTap's
+  `chain().setMark()` reads `editor.state.selection` at command-
+  execution time; popover-open selection loss meant the chain
+  saw an empty selection and fell back to `storedMarks`, which
+  applies to the NEXT typed char only and the user never saw
+  it. Direct `tr.addMark(from, to, mark)` with explicit range
+  is unambiguous.
+- **ColorMark for marker, not free hex.** Marker-pen highlights
+  feed the Reviews tab. A free hex picker would route them
+  outside the pipeline (just a Highlight mark), so the picker
+  is constrained to the seven review-pipeline names.
+- **Cortex buttons share the Ctrl+Shift+B modal.** Two parallel
+  paths (window.prompt vs ExperimentBlockModal) drift over time
+  and confuse the user about which one validates / saves /
+  styles output. One pipeline, one UX.
+- **Hooks above the early return.** Rules of Hooks compliance
+  is a hard architectural constraint — every hook must be
+  declared on every render in the same order, before any
+  conditional return.
+
+### Files added
+
+- `src/components/EditorToolbar.tsx` — the universal toolbar
+  (groups, popovers, find/replace bar, outline panel, marker
+  controls, dispatch helpers).
+- `src/components/ParticleOverlay.tsx` — canvas-based particle
+  renderer for `[data-particle]` host marks.
+- `src/editor/CortexFontStyle.ts` — size + family + weight mark.
+- `src/editor/CortexUnderlineStyled.ts` — color + thickness +
+  style + offset mark.
+- `src/editor/CortexTextEffect.ts` — glow / shadow / gradient /
+  animation mark.
+- `src/editor/CortexParticleHost.ts` — particle host mark +
+  marker plugin.
+- `src/editor/CortexMarkerMode.ts` — ProseMirror plugin for
+  marker-pen mode.
+- `src/editor/CortexBlocks.ts` — 14 structural nodes (Callout,
+  Columns, SideBySide, Collapsible, MarginNote, Frame, PullQuote,
+  DecoSeparator, PageBreak, MathBlock, TabsBlock, FootnoteRef,
+  CitationRef, MathInline, DropCap).
+- `verify-cluster-21-v1.0.ps1`.
+- `cluster_21_text_editor_toolbar.md` (planning doc at the
+  workspace root).
+
+### Files modified
+
+- `src/components/App.tsx` — mounts EditorToolbar at the top of
+  the flex-column wrapper; `paneEditors` state with
+  `setPaneEditorAt` reference-dedup; activeMode listener exempts
+  toolbar classes; `onOpenBlockModal` callback wired to
+  `setBlockModalOpen(true)`.
+- `src/components/Editor.tsx` — registers Subscript, Superscript,
+  TextStyle, Color, Highlight, TaskList, TaskItem,
+  CortexFontStyle, CortexUnderlineStyled, CortexTextEffect,
+  CortexParticleHost (with marker plugin), and CortexBlocks
+  nodes. `onReadyFiredFor` ref prevents infinite onEditorReady
+  firing. Marker plugin uses
+  `colorMarkType.create({ color: markName })`.
+- `src/components/TabPane.tsx` — removed per-pane toolbar; new
+  `onEditorChange?: (editor) => void` prop; cleanup effect
+  fires `onEditorChange?.(null)` on unmount; `particlesPaused?`
+  prop threads the global toggle.
+- `src/index.css` — Cluster 21 section: text-effect classes
+  (glow, gradient, animation), particle host marker, sticky
+  toolbar layout (`flex-shrink: 0` at top of app), list-style
+  cycling, task-list checkbox replaces bullet, `::selection`
+  rules for gradient text, caret-color visibility inside
+  gradients, reading mode no longer hides toolbar.
+- `package.json` — added 7 TipTap packages.
+- `src/components/ShortcutsHelp.tsx` — toolbar's new shortcut
+  rows (Ctrl+< / Ctrl+> / Ctrl+F / Ctrl+H / Ctrl+\ / Ctrl+0 /
+  Ctrl++ / Ctrl+- / Ctrl+Alt+F / Ctrl+Alt+R / Ctrl+Alt+I / F7).
+
+### Tag
+
+`cluster-21-v1.0-complete`.
+
+---
+
+## Phase 3 — Cluster 22 v1.0 — Document Templates
+
+### Why
+
+Eight document types (daily-log / project / experiment / iteration /
+protocol / idea / method / plain note) each had a hardcoded body
+in `lib.rs`. Customising any of them required editing Rust and
+recompiling. Cluster 22 hoists those bodies into editable `.md`
+files in the vault (`<vault>/.cortex/document-templates/<type>.md`)
+that the user owns and that flow through the standard TipTap
+pipeline — meaning every Cluster 21 effect (gradient titles,
+particles, animations, fonts) round-trips into freshly-created
+documents for free.
+
+### Architecture
+
+Per-type templates live at `<vault>/.cortex/document-templates/<type>.md`.
+First read of a missing template lazily writes the bundled default
+(stored as a Rust string constant per type), so first-run UX is
+"open Templates modal → see entries → click Edit → file is already
+populated".
+
+Placeholder tokens get substituted at creation time. v1.0 supports:
+`{{date}}`, `{{datetime}}`, `{{title}}`, `{{slug}}`,
+`{{iteration_number}}`, `{{iteration_number_padded}}`,
+`{{parent_project}}`, `{{parent_experiment}}`, `{{vault_name}}`,
+`{{prev_daily_link}}`, `{{week_number}}`, `{{day_of_week}}`,
+`{{modeling}}`, `{{domain}}`, `{{complexity}}`, plus the special
+`{{reagents_auto_start}}` / `{{reagents_auto_end}}` tokens that
+substitute in the real Cluster 8 sentinels at creation time (so
+the user can edit the surrounding markdown in the Method template
+without breaking the regen scanner). Unknown tokens stay literal —
+a template that uses `{{author}}` (deferred) renders the literal
+text in the output, which is gentler than failing to empty.
+
+### Backend
+
+`src-tauri/src/lib.rs`:
+
+- `const DOCUMENT_TEMPLATES_DIR = ".cortex/document-templates"`.
+- `const DOC_TYPES: &[&str] = &[8 strings]`.
+- `default_template_for(doc_type) -> &'static str` — picks among
+  `DEFAULT_TEMPLATE_DAILY_LOG` / `_PROJECT` / `_EXPERIMENT` /
+  `_ITERATION` / `_PROTOCOL` / `_IDEA` / `_METHOD` / `_NOTE`.
+- `struct PlaceholderContext { Option<String> per token, ... }` +
+  `apply_placeholders(template, ctx) -> String`.
+- `iso_week_number(iso) -> i64` (ISO-8601 week numbering via
+  Howard Hinnant's days-from-civil algorithm — no chrono dep).
+- `iso_date_minus_one_day(iso) -> Option<String>` (for
+  `{{prev_daily_link}}`).
+- `vault_basename(vault) -> String` + `slugify_basic(s) -> String`.
+- `read_or_init_template(vault, doc_type) -> Result<String>` —
+  reads from disk; lazily writes the bundled default if missing.
+- `resolve_template_body(vault, doc_type, use_template) -> Option<String>`
+  — returns None when `use_template` is `Some(false)`, so the
+  `create_*` function's `match` arm falls through to its
+  hardcoded format!() body verbatim. Pure escape hatch.
+
+Five new Tauri commands:
+
+- `list_document_templates(vault) -> Vec<DocumentTemplateInfo>`
+- `read_document_template(vault, doc_type) -> String` (lazy init)
+- `write_document_template(vault, doc_type, body) -> ()`
+- `reset_document_template(vault, doc_type) -> String` (re-writes default)
+- `preview_document_template(template_body, ...ctx_fields) -> String`
+  — renders against frontend-supplied sample values for the modal
+  preview pane.
+
+All seven `create_*` Tauri commands plus `ensure_daily_log` grew an
+optional `use_template: Option<bool>` arg. `find_or_create_iteration`
+(the Cluster 4 auto-create path) always honours the template if
+present so iteration files have one shape regardless of how they're
+created. The Cluster 4 `<!-- AUTO-GENERATED BELOW; DO NOT EDIT
+MANUALLY -->` footer is appended post-substitution if not already
+in the template body — non-negotiable, prevents user accidentally
+breaking routing by editing the iteration template.
+
+### Frontend
+
+`src/components/TemplatesModal.tsx`:
+
+- Modal rendering eight rows (sorted by `DOC_TYPE_ORDER` — daily-
+  log first since Ctrl+D is the most-used flow), each with last-
+  modified timestamp + Edit / Reset buttons. Header has the
+  "Templates enabled" toggle.
+- Live preview pane on the right shows the selected type's template
+  rendered against `sampleContext(docType)` — recognisable example
+  values per type so the preview reads as a worked example.
+- `readTemplatesEnabled()` / exported helper used by every
+  creation flow. localStorage key `cortex:templates-enabled`,
+  default `true`.
+- Edit closes the modal and routes the template path through
+  `selectFileInSlot(templatePath, activeSlotIdx)`. Templates are
+  real `.md` files so TipTap, EditorToolbar, every effect work
+  natively. Reset confirms via window.confirm.
+
+`src/App.tsx`:
+
+- `templatesModalOpen` state; "Templates" sidebar button next to
+  GH; modal mount with `onEdit` callback.
+- `ensure_daily_log` invoke now passes `useTemplate: readTemplatesEnabled()`.
+
+`src/components/NewHierarchyModal.tsx`:
+
+- Imports `readTemplatesEnabled` from TemplatesModal.
+- `submit()` reads the toggle once at the top and threads it as
+  `useTemplate` into every `create_*` invoke (note / idea / method /
+  protocol / project / experiment / iteration).
+
+### Files touched
+
+- `src-tauri/src/lib.rs` — new templates block (~600 lines), every
+  `create_*` body matches via `resolve_template_body`,
+  `find_or_create_iteration` similarly threaded, five new Tauri
+  commands registered in `invoke_handler`.
+- `src/components/TemplatesModal.tsx` — new file (~470 lines).
+- `src/App.tsx` — import, state, sidebar button, ensure_daily_log
+  invoke arg, modal mount.
+- `src/components/NewHierarchyModal.tsx` — import + every invoke
+  call threaded.
+- `verify-cluster-22-v1.0.ps1` — new file with 11-pass smoke walk.
+- Outer-repo docs: `phase_2_overview.md` (status row + index row),
+  `COWORK_HANDOFF.md` (status block + tag-history row),
+  `cluster_22_document_templates.md` (new).
+
+### v1.1+ deferred
+
+- Per-folder default template (cluster-spec items #5/#10) — needs
+  folder→template-path mapping picker, sized as its own session.
+- Reading-log entry template — section splice, not file creation.
+- Template export / import zip.
+- `{{author}}` placeholder — needs an author config schema.
+- Per-document-type sub-templates ("Phase 1 experiment" vs "Phase 2").
+- Template inheritance (child extends parent).
+- Conditional sections (`{{#if iteration_number > 1}}…{{/if}}`).
+- Template-driven file-tree icons / colors.
+- Marketplace / community-shared templates.
+
+### Tag
+
+`cluster-22-v1.0-complete`.
