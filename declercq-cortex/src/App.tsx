@@ -881,6 +881,24 @@ function App() {
             }
           });
         }
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (e.key === "D" || e.key === "d")
+      ) {
+        // Cluster 20 v1.0 — toggle Shape Editor mode on the active
+        // slot. The pane's `toggleShapeEditor` no-ops when the open
+        // file isn't a markdown note (PDFs / images / structured
+        // views) — `Ctrl+Shift+D` is a global shortcut, but it only
+        // does anything when the active pane is on a markdown note
+        // in the editor view.
+        e.preventDefault();
+        const handle = paneRefs.current[activeSlotIdx];
+        if (handle?.toggleShapeEditor) {
+          handle.toggleShapeEditor().catch((err) => {
+            console.warn("[cortex] toggleShapeEditor failed:", err);
+          });
+        }
       } else if (e.key === "Escape") {
         setPaletteOpen(false);
         setHelpOpen(false);

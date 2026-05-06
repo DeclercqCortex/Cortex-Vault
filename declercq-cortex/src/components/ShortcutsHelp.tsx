@@ -27,6 +27,10 @@ const ALWAYS: Row[] = [
     keys: "Ctrl+Shift+O",
     action: "Find orphan attachments (vault GC)",
   },
+  {
+    keys: "Ctrl+Shift+D",
+    action: "Toggle Shape Editor (active markdown note)",
+  },
   { keys: "Ctrl+,", action: "Open Integrations settings (GitHub)" },
   { keys: "Click", action: "(Tree) Open file in slot 1 (single/dual layout)" },
   { keys: "Ctrl+Click", action: "(Tree) Open file in slot 2 (dual layout)" },
@@ -78,6 +82,91 @@ const EDITOR_MODE: Row[] = [
     action:
       "Wikilink: wrap selected text in [[…]], or open palette pick-mode if nothing selected",
   },
+];
+
+// Cluster 20 v1.0 — keys active inside Shape Editor mode only.
+const SHAPE_EDITOR_MODE: Row[] = [
+  { keys: "R", action: "Tool: Rectangle" },
+  { keys: "E", action: "Tool: Ellipse" },
+  { keys: "L", action: "Tool: Line" },
+  { keys: "F", action: "Tool: Freehand" },
+  { keys: "T", action: "Tool: Transform (select / resize / rotate)" },
+  { keys: "H", action: "Tool: Highlight (fill clicked shape)" },
+  { keys: "D / Delete / Backspace", action: "Delete every selected shape" },
+  // Cluster 20 v1.0.4 — multi-select lives in transform mode.
+  {
+    keys: "Ctrl+Click (transform)",
+    action: "Toggle a shape in / out of the multi-selection",
+  },
+  // Cluster 20 v1.0.5 — lasso multi-select.
+  {
+    keys: "Drag empty canvas (transform)",
+    action:
+      "Lasso multi-select — every shape fully inside the rect is selected. Ctrl+drag to add to existing selection.",
+  },
+  {
+    keys: "Click in transform mode",
+    action:
+      "Targets the smallest shape under the cursor (so you can reach a shape nested inside a bigger one)",
+  },
+  {
+    keys: "Drag any selected shape",
+    action: "Move the whole selection (single or group)",
+  },
+  {
+    keys: "Drag group handles / knob",
+    action: "Resize / rotate every shape in the group together",
+  },
+  { keys: "Ctrl+C", action: "Copy the selected shapes" },
+  {
+    keys: "Ctrl+V",
+    action:
+      "Paste the clipboard (offset 16px, fresh ids; the new copies are auto-selected)",
+  },
+  // Cluster 20 v1.0.6 — undo / redo for shape edits.
+  {
+    keys: "Ctrl+Z",
+    action:
+      "Undo the last shape edit (draw / move / resize / rotate / fill / paste / align / distribute / delete / template load)",
+  },
+  {
+    keys: "Ctrl+Y or Ctrl+Shift+Z",
+    action: "Redo",
+  },
+  // Cluster 20 v1.0.5 — toolbar drag.
+  {
+    keys: "Drag toolbar title",
+    action:
+      "Move the Shape editor toolbar anywhere on screen (position persists across sessions; double-click the title to reset)",
+  },
+  { keys: "1 – 9", action: "Set active color (mark colors + black + white)" },
+  // Cluster 20 v1.0.2 — draw-time modifiers for rect / ellipse / line.
+  // Freehand follows the cursor exactly and ignores both modifiers.
+  {
+    keys: "Shift (while drawing)",
+    action: "Rect → square, ellipse → circle, line → snap to 45°",
+  },
+  {
+    keys: "Alt (while drawing)",
+    action: "Center the shape on the click origin instead of one corner",
+  },
+  { keys: "Drag corners / edges", action: "Resize (Shift = preserve aspect)" },
+  {
+    keys: "Drag rotation knob",
+    action: "Rotate around center (Shift = 15° snap)",
+  },
+  // Cluster 20 v1.0.2 — highlight click resolves to the smallest
+  // shape whose bounding box contains the click point, so a small
+  // shape nested inside a bigger one is reachable even when the
+  // bigger one is rendered on top in z-order.
+  {
+    keys: "Click in highlight mode",
+    action: "Fills the smallest shape under the cursor (nested-shape friendly)",
+  },
+  { keys: "Ctrl+T", action: "Save current shapes as a vault-level template" },
+  { keys: "Ctrl+Shift+L", action: "Load a saved template (additive)" },
+  { keys: "Ctrl+S", action: "Save shape sidecar now" },
+  { keys: "Esc", action: "Exit Shape Editor (saves first)" },
 ];
 
 const PLANNED: Row[] = [
@@ -139,6 +228,25 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
         <table style={styles.table}>
           <tbody>
             {EDITOR_MODE.map((s) => (
+              <tr key={s.keys}>
+                <td style={styles.keyCell}>
+                  <kbd style={styles.kbd}>{s.keys}</kbd>
+                </td>
+                <td style={styles.actionCell}>{s.action}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div style={styles.subhead}>
+          Shape editor mode{" "}
+          <span style={styles.subheadHint}>
+            (after Ctrl+Shift+D on a markdown note)
+          </span>
+        </div>
+        <table style={styles.table}>
+          <tbody>
+            {SHAPE_EDITOR_MODE.map((s) => (
               <tr key={s.keys}>
                 <td style={styles.keyCell}>
                   <kbd style={styles.kbd}>{s.keys}</kbd>

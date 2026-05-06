@@ -1277,3 +1277,31 @@ body.cortex-mod-pressed .cortex-image:hover {
   outline: 2px dashed var(--accent);
   outline-offset: -3px;
 }
+
+/* ---------------------------------------------------------------------------
+ * Cluster 20 v1.0 — Shape Editor
+ * --------------------------------------------------------------------------- */
+
+/* The shape SVG layer sits over the editor body. When inactive, it
+ * passes pointer events through; when active (handled by the inline
+ * style on `.cortex-shape-editor-layer-active`), it captures them. */
+.cortex-shape-editor-layer {
+  /* Most positioning is inline (width/height tracked via JS); this
+     class is a stable hook for tooling / styling overrides. */
+}
+
+/* Frozen + slight dim of the editor body while shape editor is on.
+ * Targets the ProseMirror typing surface so clicks fall through to
+ * the SVG overlay above and the user sees a visibly-frozen page.
+ * Other chrome (panels, modals) stays interactive — the modal lives
+ * inside the wrapper but a fixed-position high-z-index overlay; we
+ * don't want to accidentally disable it. */
+.cortex-shape-editor-active .ProseMirror {
+  opacity: 0.78;
+  pointer-events: none !important;
+  user-select: none;
+}
+
+/* Selected-shape marquee + handle styling lives mostly in the
+ * inline SVG attributes for portability, but the surrounding "we're
+ * in shape editor mode" cue is the dimmed-doc rule above. */

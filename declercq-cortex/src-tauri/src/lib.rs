@@ -8931,6 +8931,271 @@ Raw response: {}",
     })
 }
 
+// ===========================================================================
+// Cluster 20 v1.0 — Shape Editor
+// ===========================================================================
+//
+// Per-note shape sidecars (`<note-stem>.shapes.json`) and vault-level
+// shape templates (`<vault>/.cortex/shape-templates/<name>.json`),
+// both in the same JSON shape. Shapes are stored in document
+// coordinates and round-trip a fixed envelope (x, y, w, h, rotation,
+// stroke, strokeWidth, fill) plus kind-specific extras for line
+// (x1/y1/x2/y2 in box-relative coords) and freehand (points array
+// in box-relative coords). Every field is `#[serde(default)]` so a
+// future schema bump can add new fields without breaking forward
+// reads.
+//
+// Idempotent writes: write_shapes_sidecar / save_shape_template only
+// touch disk when the serialised content actually differs from
+// what's already there.
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct Shape {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String, // "rect" | "ellipse" | "line" | "freehand"
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub w: f64,
+    #[serde(default)]
+    pub h: f64,
+    #[serde(default)]
+    pub rotation: f64,
+    #[serde(default)]
+    pub stroke: String,
+    #[serde(default)]
+    pub fill: Option<String>,
+    #[serde(default = "default_stroke_width")]
+    pub stroke_width: f64,
+    // line-specific (box-relative coords)
+    #[serde(default)]
+    pub x1: Option<f64>,
+    #[serde(default)]
+    pub y1: Option<f64>,
+    #[serde(default)]
+    pub x2: Option<f64>,
+    #[serde(default)]
+    pub y2: Option<f64>,
+    // freehand-specific (each point is [x_rel, y_rel] within the box)
+    #[serde(default)]
+    pub points: Option<Vec<[f64; 2]>>,
+}
+
+fn default_stroke_width() -> f64 {
+    2.0
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ShapesDoc {
+    #[serde(default = "default_shapes_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub shapes: Vec<Shape>,
+}
+
+fn default_shapes_version() -> u32 {
+    1
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ShapeTemplateInfo {
+    pub name: String,
+    pub shape_count: usize,
+    pub modified_at_unix: i64,
+}
+
+/// Compute the sidecar path for a given .md note path:
+/// `<note-stem>.shapes.json` next to the note. Returns None if the
+/// path doesn't have a stem (e.g. a directory).
+fn shapes_sidecar_path_for(note_path: &Path) -> Option<PathBuf> {
+    let stem = note_path.file_stem()?.to_str()?;
+    let parent = note_path.parent()?;
+    Some(parent.join(format!("{}.shapes.json", stem)))
+}
+
+#[tauri::command]
+fn read_shapes_sidecar(note_path: String) -> Result<Option<ShapesDoc>, String> {
+    let np = PathBuf::from(&note_path);
+    let sp = match shapes_sidecar_path_for(&np) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    if !sp.is_file() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&sp)
+        .map_err(|e| format!("read sidecar `{}` failed: {}", sp.display(), e))?;
+    let doc: ShapesDoc = serde_json::from_str(&content)
+        .map_err(|e| format!("parse sidecar `{}` failed: {}", sp.display(), e))?;
+    Ok(Some(doc))
+}
+
+#[tauri::command]
+fn write_shapes_sidecar(note_path: String, doc: ShapesDoc) -> Result<(), String> {
+    let np = PathBuf::from(&note_path);
+    let sp =
+        shapes_sidecar_path_for(&np).ok_or_else(|| format!("invalid note path `{}`", note_path))?;
+    let serialised = serde_json::to_string_pretty(&doc)
+        .map_err(|e| format!("serialise shapes failed: {}", e))?;
+
+    // Idempotent: only write if content differs (or the file doesn't
+    // yet exist). Empty docs (zero shapes) write `{ "version":1,
+    // "shapes":[] }` rather than deleting the file — keeps a clear
+    // audit trail and avoids a race with the watcher.
+    if let Ok(existing) = std::fs::read_to_string(&sp) {
+        if existing == serialised {
+            return Ok(());
+        }
+    }
+    std::fs::write(&sp, &serialised)
+        .map_err(|e| format!("write sidecar `{}` failed: {}", sp.display(), e))?;
+    Ok(())
+}
+
+/// Templates root: `<vault>/.cortex/shape-templates/`. Created lazily.
+fn shape_templates_dir(vault_path: &str) -> PathBuf {
+    PathBuf::from(vault_path)
+        .join(".cortex")
+        .join("shape-templates")
+}
+
+fn ensure_shape_templates_dir(vault_path: &str) -> Result<PathBuf, String> {
+    let dir = shape_templates_dir(vault_path);
+    if !dir.is_dir() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("create templates dir `{}` failed: {}", dir.display(), e))?;
+    }
+    Ok(dir)
+}
+
+/// Sanitize a template name to a safe filename component. Replaces
+/// any character that isn't ASCII alphanumeric / `-` / `_` / `.` /
+/// space with `_`. Trims leading/trailing whitespace and dots so a
+/// name like ` ../escape ` can't write outside the templates dir.
+fn sanitize_template_name(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('.');
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' || ch == ' ' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "untitled".to_string()
+    } else {
+        out
+    }
+}
+
+#[tauri::command]
+fn list_shape_templates(vault_path: String) -> Result<Vec<ShapeTemplateInfo>, String> {
+    let dir = shape_templates_dir(&vault_path);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<ShapeTemplateInfo> = Vec::new();
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| format!("read templates dir `{}` failed: {}", dir.display(), e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let name = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let modified_at_unix = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // Cheap shape_count via parse — templates are small (<100 KB
+        // typical) and the list is shown in a modal, not on every
+        // pane open. If this becomes hot we'd switch to a header/index.
+        let shape_count = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<ShapesDoc>(&s).ok())
+            .map(|d| d.shapes.len())
+            .unwrap_or(0);
+        out.push(ShapeTemplateInfo {
+            name,
+            shape_count,
+            modified_at_unix,
+        });
+    }
+    out.sort_by(|a, b| b.modified_at_unix.cmp(&a.modified_at_unix));
+    Ok(out)
+}
+
+#[tauri::command]
+fn read_shape_template(vault_path: String, name: String) -> Result<ShapesDoc, String> {
+    let dir = shape_templates_dir(&vault_path);
+    let safe = sanitize_template_name(&name);
+    let path = dir.join(format!("{}.json", safe));
+    if !path.is_file() {
+        return Err(format!("template `{}` not found", name));
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read template `{}` failed: {}", path.display(), e))?;
+    let doc: ShapesDoc = serde_json::from_str(&content)
+        .map_err(|e| format!("parse template `{}` failed: {}", path.display(), e))?;
+    Ok(doc)
+}
+
+#[tauri::command]
+fn save_shape_template(vault_path: String, name: String, doc: ShapesDoc) -> Result<(), String> {
+    let dir = ensure_shape_templates_dir(&vault_path)?;
+    let safe = sanitize_template_name(&name);
+    let path = dir.join(format!("{}.json", safe));
+    let serialised = serde_json::to_string_pretty(&doc)
+        .map_err(|e| format!("serialise template failed: {}", e))?;
+    // Idempotent write — same rule as the per-note sidecar.
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if existing == serialised {
+            return Ok(());
+        }
+    }
+    std::fs::write(&path, &serialised)
+        .map_err(|e| format!("write template `{}` failed: {}", path.display(), e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_shape_template(vault_path: String, name: String) -> Result<(), String> {
+    let dir = shape_templates_dir(&vault_path);
+    let safe = sanitize_template_name(&name);
+    let path = dir.join(format!("{}.json", safe));
+    if !path.is_file() {
+        return Err(format!("template `{}` not found", name));
+    }
+    // Vault-prefix safety: the path was constructed from the
+    // sanitized name + the templates dir under the vault, so this
+    // can't escape, but verify defensively.
+    let vault = PathBuf::from(&vault_path);
+    if !path.starts_with(&vault) {
+        return Err(format!(
+            "template path `{}` is not under vault `{}`",
+            path.display(),
+            vault.display()
+        ));
+    }
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("delete template `{}` failed: {}", path.display(), e))?;
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // App entry
 // -----------------------------------------------------------------------------
@@ -9026,6 +9291,13 @@ pub fn run() {
             set_google_calendar_id,
             list_google_calendars,
             sync_google_calendar,
+            // Cluster 20 v1.0 — Shape Editor
+            read_shapes_sidecar,
+            write_shapes_sidecar,
+            list_shape_templates,
+            read_shape_template,
+            save_shape_template,
+            delete_shape_template,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

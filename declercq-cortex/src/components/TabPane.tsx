@@ -33,6 +33,12 @@ import { Calendar } from "./Calendar";
 import { TimeTracking } from "./TimeTracking";
 import { ImageViewer } from "./ImageViewer";
 import { PDFReader } from "./PDFReader";
+import { ShapeEditor } from "./ShapeEditor";
+import {
+  ShapeTemplateModal,
+  type ShapeTemplateMode,
+} from "./ShapeTemplateModal";
+import { EMPTY_SHAPES_DOC, newShapeId, type ShapesDoc } from "../shapes/types";
 import { parseFrontmatter, serializeFrontmatter } from "../utils/frontmatter";
 
 // 5 minutes after last keystroke → autosave (per pane).
@@ -146,6 +152,23 @@ export type TabPaneHandle = {
   };
   /** True if focus is inside this pane's TipTap editor. */
   isEditorFocused(): boolean;
+  /**
+   * Cluster 20 v1.0 — toggle shape editor mode. When the active view
+   * is `editor` and a markdown note is open, flips
+   * `shapeEditorActive`. When leaving the mode, saves any dirty
+   * shapes to the sidecar before disabling. No-op if the open file
+   * isn't a markdown note (PDFs / images skip).
+   */
+  toggleShapeEditor(): Promise<void>;
+  /** Cluster 20 v1.0 — true when this pane is currently in shape
+   *  editor mode. Used by App for global key gating. */
+  getShapeEditorActive(): boolean;
+  /** Cluster 20 v1.0 — write the shapes sidecar if dirty. Returns
+   *  true on success or no-op (already saved); false if the call
+   *  errored. Triggered by Ctrl+S, by save-on-blur, by
+   *  toggleShapeEditor when leaving the mode, and by the parent's
+   *  save-before-close fan-out. */
+  saveShapesIfDirty(): Promise<boolean>;
 };
 
 export type TabPaneProps = {
@@ -235,6 +258,35 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
     const [dirty, setDirty] = useState(false);
     const [loadingFile, setLoadingFile] = useState(false);
 
+    // --- Cluster 20 v1.0 — shape editor state ----------------------------
+    const [shapeEditorActive, setShapeEditorActive] = useState(false);
+    const [shapesDoc, setShapesDoc] = useState<ShapesDoc>(EMPTY_SHAPES_DOC);
+    const [shapesDirty, setShapesDirty] = useState(false);
+    // Cluster 20 v1.0.6 — snapshot-based undo / redo for shape edits.
+    // Each entry is a deep-cloned ShapesDoc snapshot. pushShapesUndo
+    // captures the CURRENT shapesDoc; the operation that follows
+    // mutates shapesDoc freely (no further pushes for intermediate
+    // pointermove updates), and Ctrl+Z reverts in one step. Capped
+    // at SHAPES_HISTORY_LIMIT entries (oldest dropped beyond that).
+    const [shapesUndoStack, setShapesUndoStack] = useState<ShapesDoc[]>([]);
+    const [shapesRedoStack, setShapesRedoStack] = useState<ShapesDoc[]>([]);
+    /** Most-recently-written shapes JSON, used to compare for the
+     *  idempotent save (skip the Tauri write when in-memory matches
+     *  what's on disk). */
+    const lastWrittenShapesRef = useRef<string>(
+      JSON.stringify(EMPTY_SHAPES_DOC),
+    );
+    /** Tracks the pane's scroll-area dimensions so the SVG overlay
+     *  can size itself to cover the document content (including the
+     *  parts below the fold). Updated by a ResizeObserver on the
+     *  pane root. */
+    const [shapeOverlayDims, setShapeOverlayDims] = useState<{
+      width: number;
+      height: number;
+    }>({ width: 0, height: 0 });
+    const [templateModal, setTemplateModal] =
+      useState<ShapeTemplateMode | null>(null);
+
     // --- timers ----------------------------------------------------------
     const commitTimerRef = useRef<number | null>(null);
 
@@ -244,6 +296,10 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
 
     // --- pane container ref (for "is editor focused inside this pane?") --
     const paneRootRef = useRef<HTMLDivElement | null>(null);
+    // --- Cluster 20 v1.0 — editor-content wrapper ref (the SVG shape
+    //     overlay positions itself absolutely inside this wrapper so it
+    //     covers exactly the editor area and scrolls naturally with it).
+    const editorWrapperRef = useRef<HTMLDivElement | null>(null);
 
     // Notify App on state changes.
     useEffect(() => {
@@ -314,6 +370,132 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
         });
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedPath, reloadTick]);
+
+    // --- Cluster 20 v1.0 — load shapes sidecar after file load -----------
+    // Only fetches when the open file is a markdown note. PDFs / images
+    // skip; the sidecar isn't relevant to those views in v1.0.
+    // v1.0.6 — also resets the shape-edit undo / redo stacks so the
+    // history is per-file (otherwise undoing after a file switch would
+    // try to apply the previous file's snapshots to the new file).
+    useEffect(() => {
+      setShapesUndoStack([]);
+      setShapesRedoStack([]);
+      if (!selectedPath) {
+        setShapesDoc(EMPTY_SHAPES_DOC);
+        setShapesDirty(false);
+        setShapeEditorActive(false);
+        lastWrittenShapesRef.current = JSON.stringify(EMPTY_SHAPES_DOC);
+        return;
+      }
+      if (/\.pdf$/i.test(selectedPath) || isImagePath(selectedPath)) {
+        setShapesDoc(EMPTY_SHAPES_DOC);
+        setShapesDirty(false);
+        setShapeEditorActive(false);
+        return;
+      }
+      invoke<ShapesDoc | null>("read_shapes_sidecar", {
+        notePath: selectedPath,
+      })
+        .then((doc) => {
+          const next = doc ?? EMPTY_SHAPES_DOC;
+          setShapesDoc(next);
+          setShapesDirty(false);
+          lastWrittenShapesRef.current = JSON.stringify(next);
+        })
+        .catch((e) => {
+          console.warn(`[pane ${slotIndex}] read_shapes_sidecar failed:`, e);
+          setShapesDoc(EMPTY_SHAPES_DOC);
+          setShapesDirty(false);
+          lastWrittenShapesRef.current = JSON.stringify(EMPTY_SHAPES_DOC);
+        });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedPath, reloadTick]);
+
+    /** Cluster 20 v1.0 — write the shapes sidecar if dirty. Idempotent
+     *  via JSON-string comparison against the last-written snapshot;
+     *  the backend ALSO has its own idempotence check (file-content
+     *  diff) so a redundant call here doesn't bump mtime. */
+    async function saveShapesNow(): Promise<boolean> {
+      if (!selectedPath) return false;
+      if (!shapesDirty) return true;
+      if (/\.pdf$/i.test(selectedPath) || isImagePath(selectedPath)) {
+        return false;
+      }
+      const next = JSON.stringify(shapesDoc);
+      if (next === lastWrittenShapesRef.current) {
+        setShapesDirty(false);
+        return true;
+      }
+      try {
+        await invoke("write_shapes_sidecar", {
+          notePath: selectedPath,
+          doc: shapesDoc,
+        });
+        lastWrittenShapesRef.current = next;
+        setShapesDirty(false);
+        return true;
+      } catch (e) {
+        console.error(`[pane ${slotIndex}] write_shapes_sidecar failed:`, e);
+        setError(`Could not save shapes: ${e}`);
+        return false;
+      }
+    }
+
+    // ---- Cluster 20 v1.0.6 — shape-edit undo / redo --------------------
+    const SHAPES_HISTORY_LIMIT = 100;
+    /** Capture the current shapesDoc onto the undo stack and clear
+     *  the redo stack. Called by ShapeEditor at the start of every
+     *  atomic operation, plus directly here for the template-load
+     *  flow that lives in this component. Idempotent against the
+     *  most recent stack entry — back-to-back identical pushes
+     *  collapse into one to keep the stack tidy. */
+    function pushShapesUndo() {
+      const snapshot = JSON.stringify(shapesDoc);
+      setShapesUndoStack((prev) => {
+        const top = prev[prev.length - 1];
+        if (top && JSON.stringify(top) === snapshot) return prev;
+        const cloned = JSON.parse(snapshot) as ShapesDoc;
+        const next = [...prev, cloned];
+        if (next.length > SHAPES_HISTORY_LIMIT) next.shift();
+        return next;
+      });
+      setShapesRedoStack([]);
+    }
+    /** Pop the latest undo snapshot, push the current state to redo,
+     *  apply the popped snapshot. Recomputes shapesDirty against the
+     *  last-saved snapshot so the unsaved indicator reflects the
+     *  reverted state. No-op when the stack is empty. */
+    function undoShapes() {
+      if (shapesUndoStack.length === 0) return;
+      const last = shapesUndoStack[shapesUndoStack.length - 1];
+      const currentSnapshot = JSON.parse(
+        JSON.stringify(shapesDoc),
+      ) as ShapesDoc;
+      setShapesUndoStack((u) => u.slice(0, -1));
+      setShapesRedoStack((r) => {
+        const next = [...r, currentSnapshot];
+        if (next.length > SHAPES_HISTORY_LIMIT) next.shift();
+        return next;
+      });
+      setShapesDoc(last);
+      setShapesDirty(JSON.stringify(last) !== lastWrittenShapesRef.current);
+    }
+    /** Symmetric to undoShapes. */
+    function redoShapes() {
+      if (shapesRedoStack.length === 0) return;
+      const last = shapesRedoStack[shapesRedoStack.length - 1];
+      const currentSnapshot = JSON.parse(
+        JSON.stringify(shapesDoc),
+      ) as ShapesDoc;
+      setShapesRedoStack((r) => r.slice(0, -1));
+      setShapesUndoStack((u) => {
+        const next = [...u, currentSnapshot];
+        if (next.length > SHAPES_HISTORY_LIMIT) next.shift();
+        return next;
+      });
+      setShapesDoc(last);
+      setShapesDirty(JSON.stringify(last) !== lastWrittenShapesRef.current);
+    }
 
     // --- save ------------------------------------------------------------
     async function saveCurrentFile(): Promise<boolean> {
@@ -439,12 +621,50 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dirty, editedBody]);
 
+    // --- Cluster 20 v1.0 — track the editor-wrapper's pixel size so the
+    //     shape overlay sizes its SVG to cover exactly the editor area.
+    //     Uses a ResizeObserver so content-driven height changes (typing,
+    //     loading a longer note, expanding panels) update live.
+    useEffect(() => {
+      const el = editorWrapperRef.current;
+      if (!el) return;
+      const update = () => {
+        // offsetWidth / offsetHeight reflect the rendered box, which is
+        // what we want for the SVG's coordinate space (1 SVG unit = 1
+        // CSS pixel). scrollWidth/scrollHeight would over-shoot when
+        // children have negative margins.
+        setShapeOverlayDims({
+          width: el.offsetWidth,
+          height: el.offsetHeight,
+        });
+      };
+      update();
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
+      // Also catch content mutations that change height without
+      // changing the wrapper's clientWidth (e.g. inserting many lines
+      // of text). MutationObserver is cheap when subtree is small.
+      const mo = new MutationObserver(update);
+      mo.observe(el, { childList: true, subtree: true, characterData: true });
+      return () => {
+        ro.disconnect();
+        mo.disconnect();
+      };
+      // Re-bind when the file changes so a freshly-mounted wrapper is
+      // observed.
+    }, [selectedPath, activeView]);
+
     // --- imperative API --------------------------------------------------
     useImperativeHandle(
       ref,
       (): TabPaneHandle => ({
         async saveIfDirty() {
-          return saveCurrentFile();
+          // Cluster 20 v1.0 — fan out to shape sidecar too. Both are
+          // independent dirty flags; a clean .md + dirty shapes still
+          // writes the sidecar.
+          const fileOk = await saveCurrentFile();
+          const shapesOk = await saveShapesNow();
+          return fileOk && shapesOk;
         },
         async reload() {
           // Re-read from disk via a state tick. Saves any dirty buffer
@@ -726,9 +946,43 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           // different pane's.
           return isInsideEl(ae, paneRootRef.current);
         },
+        // Cluster 20 v1.0 — Shape Editor mode
+        async toggleShapeEditor() {
+          // No-op when no markdown file is open in this pane.
+          if (!selectedPath) return;
+          if (
+            /\.pdf$/i.test(selectedPath) ||
+            isImagePath(selectedPath) ||
+            activeView !== "editor"
+          ) {
+            return;
+          }
+          if (shapeEditorActive) {
+            // Leaving the mode → save dirty shapes first.
+            await saveShapesNow();
+            setShapeEditorActive(false);
+          } else {
+            setShapeEditorActive(true);
+          }
+        },
+        getShapeEditorActive() {
+          return shapeEditorActive;
+        },
+        async saveShapesIfDirty() {
+          return saveShapesNow();
+        },
       }),
       // eslint-disable-next-line react-hooks/exhaustive-deps
-      [selectedPath, activeView, dirty, editedBody, frontmatter],
+      [
+        selectedPath,
+        activeView,
+        dirty,
+        editedBody,
+        frontmatter,
+        shapeEditorActive,
+        shapesDoc,
+        shapesDirty,
+      ],
     );
 
     // --- derive identifiers for backlinks --------------------------------
@@ -883,7 +1137,20 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
             Loading file…
           </div>
         ) : (
-          <div style={{ maxWidth: "780px", margin: "0 auto" }}>
+          // Cluster 20 v1.0 — `position: relative` wrapper so the SVG
+          // shape overlay (rendered last) can pin absolutely to this
+          // box and scroll naturally with the editor content.
+          <div
+            ref={editorWrapperRef}
+            className={
+              shapeEditorActive ? "cortex-shape-editor-active" : undefined
+            }
+            style={{
+              maxWidth: "780px",
+              margin: "0 auto",
+              position: "relative",
+            }}
+          >
             <div
               style={{
                 display: "flex",
@@ -919,6 +1186,7 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
               vaultPath={vaultPath}
               notePath={selectedPath}
               content={fileBody}
+              editable={!shapeEditorActive}
               onChange={(md) => {
                 setEditedBody(md);
                 setDirty(md !== fileBody);
@@ -944,6 +1212,85 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
               refreshKey={indexVersion}
               onOpenFile={openInThisPane}
             />
+            {/* Cluster 20 v1.0 — Shape Editor SVG overlay. Always
+                mounted for markdown notes so existing shapes are
+                visible while reading; pointer-events flips on/off
+                based on shapeEditorActive (handled inside the
+                component). The overlay covers the whole editor
+                wrapper, so freehand drag near the bottom of a long
+                note still has canvas to land on. */}
+            {selectedPath && /\.md$/i.test(selectedPath) && (
+              <ShapeEditor
+                active={shapeEditorActive}
+                doc={shapesDoc}
+                onDocChange={(next) => {
+                  setShapesDoc(next);
+                  // Mark dirty when the in-memory JSON differs from
+                  // what's last on disk. The save path's idempotence
+                  // check handles the no-op case too, but flagging
+                  // dirty here lets the unsaved-indicator UI react.
+                  const nextJson = JSON.stringify(next);
+                  setShapesDirty(nextJson !== lastWrittenShapesRef.current);
+                }}
+                width={shapeOverlayDims.width}
+                height={shapeOverlayDims.height}
+                onPushUndo={pushShapesUndo}
+                onUndo={undoShapes}
+                onRedo={redoShapes}
+                canUndo={shapesUndoStack.length > 0}
+                canRedo={shapesRedoStack.length > 0}
+                onExit={async () => {
+                  await saveShapesNow();
+                  setShapeEditorActive(false);
+                }}
+                onSaveTemplate={() => {
+                  setTemplateModal({ kind: "save", doc: shapesDoc });
+                }}
+                onLoadTemplate={() => {
+                  setTemplateModal({ kind: "load" });
+                }}
+              />
+            )}
+            {templateModal && (
+              <ShapeTemplateModal
+                vaultPath={vaultPath}
+                mode={templateModal}
+                onSave={async (name) => {
+                  await invoke("save_shape_template", {
+                    vaultPath,
+                    name,
+                    doc: shapesDoc,
+                  });
+                  setTemplateModal(null);
+                }}
+                onLoad={async (name) => {
+                  // Read the template, then ADDITIVELY merge its
+                  // shapes into the current doc with fresh ids so
+                  // re-loads don't collide.
+                  const tpl = await invoke<ShapesDoc>("read_shape_template", {
+                    vaultPath,
+                    name,
+                  });
+                  const reidShapes = tpl.shapes.map((s) => ({
+                    ...s,
+                    id: newShapeId(),
+                  }));
+                  const merged: ShapesDoc = {
+                    version: shapesDoc.version || 1,
+                    shapes: [...shapesDoc.shapes, ...reidShapes],
+                  };
+                  // Cluster 20 v1.0.6 — capture the pre-load state so
+                  // the user can Ctrl+Z to revert a template merge.
+                  pushShapesUndo();
+                  setShapesDoc(merged);
+                  setShapesDirty(
+                    JSON.stringify(merged) !== lastWrittenShapesRef.current,
+                  );
+                  setTemplateModal(null);
+                }}
+                onClose={() => setTemplateModal(null)}
+              />
+            )}
           </div>
         )}
       </div>

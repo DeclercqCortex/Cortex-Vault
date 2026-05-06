@@ -5811,3 +5811,414 @@ the 160 × 120 default so layout stays stable.
 ### Tag
 
 `cluster-19-v1.3-complete`.
+
+## Phase 3 — Cluster 20 v1.0 — Shape Editor
+
+A "Microsoft Paint inside the document" mode. Press `Ctrl+Shift+D`
+while a markdown note is the active slot; the document body dims
+to 78% opacity with `pointer-events: none` and an SVG overlay
+becomes interactive. Draw shapes (rect / ellipse / line /
+freehand) by dragging, switch tools via single-letter keys, click
+to select a shape in transform mode and resize via 8 handles or
+rotate via a knob, fill a clicked shape with the active color in
+highlight mode, save sets of shapes as named vault-level
+templates and load them into any other note. Esc exits — shapes
+persist as a sidecar JSON next to the .md file and continue to
+render as a non-interactable SVG overlay so the user sees them
+while reading. Re-entering shape editor unlocks the layer.
+
+### What ships
+
+- **Storage** — sidecar JSON at `<note-stem>.shapes.json`
+  following the Cluster 6 PDF-annotation precedent. Schema-
+  versioned (`{ version: 1, shapes: [...] }`), every field
+  `#[serde(default)]` for forward-compat. Idempotent writes
+  (only touches disk when content differs from what's there).
+- **Templates** at `<vault>/.cortex/shape-templates/<name>.json`
+  in the same shape format. Sanitized filenames (ASCII alnum +
+  `-` / `_` / `.` / space). Loaded ADDITIVELY with fresh shape
+  ids so re-loads don't collide.
+- **Six new Tauri commands** — `read_shapes_sidecar`,
+  `write_shapes_sidecar`, `list_shape_templates` (sorted by
+  modified_at_unix DESC), `read_shape_template`,
+  `save_shape_template`, `delete_shape_template`.
+- **Per-pane mode flag** — `TabPane.shapeEditorActive`,
+  orthogonal to `activeView`. Three new `TabPaneHandle` methods:
+  `toggleShapeEditor()` (saves first when leaving),
+  `getShapeEditorActive()`, `saveShapesIfDirty()`. Existing
+  `saveIfDirty` fans out to shapes too — Ctrl+S writes both the
+  .md file and the shapes sidecar in independent dirty flags.
+- **App.tsx Ctrl+Shift+D handler** routes to the active pane's
+  `toggleShapeEditor`. The pane no-ops when the open file isn't
+  a markdown note (PDFs / images / structured views).
+- **SVG overlay positioned in document coordinates.** `position:
+  absolute; top: 0; left: 0` inside a `position: relative`
+  editor-content wrapper. Width / height tracked via
+  `ResizeObserver` + `MutationObserver` on the wrapper so a
+  long note's height is followed. Because the overlay lives
+  inside the pane's scroll container, it scrolls naturally with
+  the document content — shapes stay in their original document
+  positions.
+- **Tools** — discriminated union: `rect / ellipse / line /
+  freehand` (DRAW kinds) and `transform / highlight` (MODE
+  kinds). One active at a time; swap via single-letter keys
+  R / E / L / F / T / H or via toolbar buttons.
+- **Draw pointer pipeline** — pointerdown on empty canvas
+  creates a draft shape, pointermove extends it (axis-aligned
+  bounding box for rect / ellipse, endpoints for line, decimated
+  polyline for freehand), pointerup commits the draft to the
+  doc.
+- **Transform mode** — pointerdown on a shape selects it and
+  renders a `<g>` overlay containing a dashed bounding-box
+  rect, eight handles (`nw / n / ne / w / e / sw / s / se`),
+  and a rotation knob 24 px above the top center. Drag a
+  corner / edge handle to resize anchored on the opposite
+  corner / edge. Shift on a corner locks aspect ratio. Drag the
+  knob to rotate around the shape's center. Shift on rotate
+  snaps to 15° increments.
+- **Highlight mode** — click a shape to set its fill to
+  `<activeColor><HIGHLIGHT_FILL_ALPHA>` (a 33 hex pair = ~20%
+  alpha so the document text underneath stays readable). Click
+  again with the same color to toggle the fill back to null.
+- **Delete** — `D` key in transform mode (or the toolbar's
+  Delete button) removes the selected shape.
+- **Color palette** — 9 slots mapped to keys 1–9 reusing the 7
+  mark colors (Cluster 2) + black + white. Visible language
+  consistency: marking text yellow and drawing a yellow circle
+  use the same hex.
+- **Templates UX** — `Ctrl+T` opens a save modal (name input);
+  `Ctrl+Shift+L` opens a load picker (list with shape count and
+  modified date, Load and Delete per row). Loaded shapes get
+  fresh ids so a "load template twice" gives two copies in the
+  same doc rather than collapsing.
+- **Box-relative inner geometry for line / freehand.** Lines
+  store `x1 / y1 / x2 / y2` relative to their bounding box;
+  freehand stores `points: [[x_rel, y_rel], ...]` likewise. When
+  the user resizes the bounding box, the inner geometry scales
+  proportionally — a freehand curve drawn at 200×100 px stays
+  the same shape when scaled to 400×200 px.
+- **Frozen + dim backdrop CSS.** A `cortex-shape-editor-active`
+  class on the editor-content wrapper applies
+  `opacity: 0.78; pointer-events: none; user-select: none` to
+  `.ProseMirror` so the typing surface is visibly frozen and
+  click-through to the SVG above. Other panels (related /
+  backlinks / template modal) stay interactive.
+
+### Architectural decisions
+
+- **SVG, not Canvas, not ProseMirror decorations.** SVG gives
+  per-shape hit-testing for free (essential for transform-click
+  and highlight-click) and stays crisp at any zoom. Canvas
+  would force a hand-rolled hit-test layer. Decorations would
+  entangle shapes with editor state in a way that fights the
+  "uneditable when not in shape editor" rule. The overlay is a
+  separate layer with its own pointer-events policy.
+- **Document coordinates, not viewport coordinates.** Shapes
+  must scroll with the doc; therefore they live inside the
+  pane's scroll container at absolute positions and the user
+  scrolls the container, the SVG scrolls along with the rest of
+  the content. Tracking width / height via ResizeObserver +
+  MutationObserver handles content-driven height changes
+  (typing, expanding panels, switching files).
+- **Sidecar JSON, not embedded SVG in markdown.** Cluster 6's
+  PDF annotations established the precedent. .md content stays
+  clean — no inline `<svg>` blob bloating the markdown source
+  with potentially hundreds of shape elements. Shapes are
+  decoupled from text content (a paragraph delete doesn't nuke
+  shapes; a shape moved doesn't touch text). Schema-versioned
+  for future extension.
+- **Per-pane flag, not a separate ActiveView.** Shape editor
+  mode is an OVERLAY on top of the regular editor view, not a
+  replacement. The document still renders underneath as a
+  visual reference. So a boolean orthogonal to `activeView` is
+  the right shape, not adding `"shape-editor"` to the union.
+- **Box-relative inner geometry over absolute.** Line endpoints
+  and freehand points stored relative to the bounding box mean
+  resize works naturally — scale the box, scale the inner
+  geometry. If they were absolute, resize would have to do an
+  explicit per-point math pass and rotation around the bounding-
+  box center would be more complex.
+- **Idempotent save — content-diff, not mtime.** The sidecar
+  write checks the existing file content vs the new
+  serialization and skips the disk write when they match.
+  Saving an already-saved doc is a no-op. Same rule as the
+  v1.4 daily-note splice and v1.3 image annotation save.
+- **Templates LOAD additively, not replace.** The user might
+  want to compose multiple templates into one note — load
+  template A, then load template B, and have both appear. New
+  ids per load avoid id collisions across multiple instances of
+  the same template.
+- **Drop-the-multi-select-on-stranger-click.** No multi-select
+  in v1.0; if/when v1.1 adds it, the same drop-on-click-not-in-set
+  rule that v1.3 of the image multi-select uses is the
+  precedent to mirror.
+- **`pointer-events: none` on the .ProseMirror only.** Tried a
+  blanket `> div:not(.cortex-shape-editor-layer)` rule, but
+  that disabled the template modal too (which lives inside the
+  same wrapper). Targeting just `.ProseMirror` is the minimal
+  safe rule — text editing is what we want frozen; the rest of
+  the chrome stays interactive.
+
+### Files added
+
+- `src/shapes/types.ts` — `Shape`, `ShapesDoc`,
+  `ShapeTemplateInfo`, `ShapeTool` types; `SHAPE_COLORS`
+  palette; `HIGHLIGHT_FILL_ALPHA`; `newShapeId()` helper.
+- `src/components/ShapeEditor.tsx` — the SVG overlay component.
+  Tool / mode / color / selection / draft / drag state, pointer
+  pipeline, key handlers, render with per-kind shape views and
+  selection overlay.
+- `src/components/ShapeEditorToolbar.tsx` — floating toolbar
+  with tool buttons, color swatches, template + delete + done
+  buttons.
+- `src/components/ShapeTemplateModal.tsx` — save / load /
+  delete UX.
+- `verify-cluster-20-v1.0.ps1`.
+- `cluster_20_shape_editor.md` (planning doc at the workspace
+  root).
+
+### Files modified
+
+- `src-tauri/src/lib.rs` — `Shape`, `ShapesDoc`,
+  `ShapeTemplateInfo` structs + the six commands listed above.
+  `invoke_handler!` registrations for all six.
+- `src/components/TabPane.tsx` — new state
+  (`shapeEditorActive`, `shapesDoc`, `shapesDirty`,
+  `shapeOverlayDims`, `templateModal`,
+  `lastWrittenShapesRef`); new `editorWrapperRef`; sidecar load
+  effect; `saveShapesNow` helper; ResizeObserver +
+  MutationObserver for overlay dimensions; three new handle
+  methods; extended `saveIfDirty`; render branch wraps editor
+  body in a `position: relative` div with the
+  `cortex-shape-editor-active` class when active, mounts
+  `ShapeEditor` for any open .md file, and mounts
+  `ShapeTemplateModal` when the template modal mode is set.
+  Editor receives `editable={!shapeEditorActive}`.
+- `src/App.tsx` — Ctrl+Shift+D handler routing to the active
+  pane's `toggleShapeEditor`.
+- `src/components/ShortcutsHelp.tsx` — Ctrl+Shift+D row in the
+  ALWAYS list; new "Shape editor mode" section with all
+  in-mode keys.
+- `src/index.css` — `.cortex-shape-editor-layer` placeholder
+  + `.cortex-shape-editor-active .ProseMirror` dim/freeze rule.
+
+### Tag
+
+`cluster-20-v1.0-complete`.
+
+## Phase 3 — Cluster 20 v1.1 — Shape Editor polish + multi-select + undo
+
+Consolidated post-v1.0 work for the shape editor. Each item below
+was iterated under the v1.0 tag during dogfooding; v1.1 is the
+clean ship that bundles them into a single tag.
+
+### What ships (eleven things)
+
+1. **Pointer-events policy.** Shapes carry `pointer-events: 'all'`
+   only in transform / highlight modes; draw modes and inactive
+   mode set `'none'` so clicks fall through to the SVG canvas. The
+   "draw inside another shape" case works naturally — a new draft
+   starts on top of any existing shape's footprint. The redundant
+   draw branch in `onShapePointerDown` was dropped because clicks
+   in draw mode never reach the per-shape handler.
+
+2. **Smallest-shape pick in highlight + transform.** New helpers
+   `shapeContainsPoint(shape, pt)` (un-rotates the test point into
+   the shape's local frame, then AABB-tests) and
+   `findSmallestShapeContainingPoint(shapes, pt)` (smallest by
+   `w * h`). In highlight mode, picks regardless of selection. In
+   transform mode, plain-click PREFERS a multi-set member first;
+   Ctrl+click uses the global pick. The member preference fixes
+   the "sometimes dragging multi-selected shapes doesn't work"
+   bug — without it, a non-member smaller shape sitting under the
+   cursor (often via a rotated-shape overhang outside the group's
+   logical bbox) would steal the click and collapse the multi-set.
+
+3. **Alt + Shift draw modifiers for rect / ellipse / line.** Live
+   reads from the pointer event so they take effect mid-drag
+   without lifting the pointer:
+   - `Shift` → rect/ellipse: square / circle (`max(|dx|, |dy|)`).
+     line: snap end-angle to nearest 45°.
+   - `Alt` → center the shape on the click origin instead of
+     using origin as one corner / endpoint.
+   - Combo → centered + constrained.
+   Freehand opts out — its geometry IS the cursor path.
+
+4. **Multi-select in transform mode.** `selectedIds: Set<string>`
+   replaces the v1.0 singleton. Selection rules:
+   - `Ctrl/Cmd+Click` toggles a shape in/out of the set; does NOT
+     start a drag (the user can keep building up a selection
+     without accidentally moving things).
+   - Plain click on a shape that's already in a multi-set
+     preserves the set and starts a `group-move` drag.
+   - Plain click on a shape NOT in the current selection
+     collapses to a single-shape selection and starts a single
+     `move` drag.
+   Lasso multi-select on top of this — empty-canvas drag in
+   transform mode starts a `lasso` DragKind. Live dashed rect.
+   On pointerup, every shape whose entire bbox is fully contained
+   in the lasso rect gets selected (Adobe / Figma convention).
+   Ctrl+drag is additive; plain drag replaces. <4 px movement
+   falls back to the legacy "click empty → clear" path.
+   Ctrl+click on the group bbox area toggles the smallest-
+   containing shape instead of dragging — without this branch the
+   bbox rect (which renders on top of the shapes) would intercept
+   every Ctrl+click within its area and ignore the modifier.
+
+5. **Group transform.** Three new DragKind variants:
+   - `group-move` — every shape's `(x, y)` translates by the same
+     `(dx, dy)` from snapshots taken at drag start.
+   - `group-resize` — group bbox resizes from the opposite-corner
+     anchor; per-shape `(x, y, w, h)` scale by `(sx, sy)`. Per-
+     shape rotation preserved (non-uniform group scaling of a
+     rotated shape produces a slight visual approximation; v1.2+
+     may add aspect-preserve when the set contains rotated shapes).
+   - `group-rotate` — each shape's center rotates around the
+     pivot (group centroid at drag start, invariant during the
+     rotation); each shape's individual `rotation` increments by
+     the same delta. Shift snaps to 15°.
+
+6. **Stable group-rotate frame.** `group-rotate` drag state grows
+   `bboxStart` (the snapshot bbox) and `currentDelta` (live).
+   Pointermove updates currentDelta in addition to writing
+   shapes. `GroupSelectionOverlay` accepts a `rotationFrame`
+   prop; when set, the outer frame (bbox + 8 handles + rotation
+   knob) renders the snapshot bbox inside a `rotate(delta px py)`
+   transform — rigid frame around the pivot, knob stays at a
+   stable position. Per-shape thin rings still track live shape
+   positions so the user sees each member's transformed location
+   during the rotation.
+
+7. **Copy / Paste.** In-memory `clipboard: Shape[]` state in
+   ShapeEditor. `Ctrl+C` deep-clones the current selection (JSON
+   round-trip so subsequent edits don't mutate the clipboard).
+   `Ctrl+V` appends fresh-id duplicates with a 16-px offset and
+   selects them so the user can immediately drag / align the
+   copies. Toolbar Copy / Paste(N) buttons mirror.
+
+8. **Align + Distribute.** Toolbar buttons visible only when 2+
+   shapes are selected. Six alignments (top / middle / bottom /
+   left / center / right) align each shape's edge or center to
+   the union bbox. Distribute H / V sorts by leading edge along
+   the axis, anchors the extremes, and places the middles at
+   equal gaps — disabled at <3 shapes (trivially distributed).
+
+9. **Movable toolbar.** Header row "Shape editor ⠿" is the drag
+   handle. `position: fixed` (so the toolbar stays in viewport
+   space regardless of document scroll). pointerdown captures
+   the offset; window-level pointermove updates the live drag
+   position; pointerup commits via `onPositionChange`. Position
+   persisted in localStorage at `cortex:shape-toolbar-position`.
+   `clampToViewport` keeps at least a 20-px sliver on screen so
+   the user can always grab it back. Double-click the header
+   resets to the default top-right pinning (clears localStorage).
+
+10. **Undo / Redo.** TabPane owns `shapesUndoStack` and
+    `shapesRedoStack` — both `ShapesDoc[]`, deep-cloned snapshots,
+    capped at 100 entries each. `pushShapesUndo()` dedupes
+    back-to-back identical pushes against the top of the stack.
+    `undoShapes()` / `redoShapes()` move a snapshot between the
+    stacks while applying the popped one as the new shapesDoc
+    (and recomputing shapesDirty against `lastWrittenShapesRef`).
+    Stacks reset on file change so history is per-file. ShapeEditor
+    calls `onPushUndo()` at every atomic operation start: draw
+    commit (pre-`appendShape`), single-shape move/resize/rotate
+    drag start, group-move/resize/rotate drag start, highlight
+    click (pre-`replaceShape`), keyboard delete, keyboard paste,
+    toolbar delete/paste, align, distribute. Template-load also
+    pushes undo (TabPane calls it directly before merging shapes).
+    Keyboard handlers: `Ctrl+Z` undo, `Ctrl+Y` or `Ctrl+Shift+Z`
+    redo. Mid-drag Ctrl+Z cancels the in-flight drag (sets
+    `drag` to `none`) before undoing — without this, the next
+    pointermove would re-apply the snapshot deltas and overwrite
+    the just-undone state.
+
+11. **Progressive Esc.** Esc clears the multi-selection if
+    non-empty; a second Esc exits shape editor. Mirrors
+    Adobe / Figma.
+
+### Architectural decisions worth recording
+
+- **Shapes-as-pass-through in draw mode, opt-in for transform /
+  highlight.** Earlier attempts had `pointer-events: 'all'`
+  unconditionally and a re-implementation of the draw-start logic
+  inside `onShapePointerDown` to forward draw clicks. The
+  conditional pointer-events approach is cleaner: one entry
+  point per click (the SVG canvas in draw mode, the shape in
+  transform / highlight) and no duplicate code paths.
+- **Snapshot-based per-shape transforms for group operations.**
+  Snapshots captured at drag start; deltas applied to snapshots,
+  not the live shapes. Ensures a long drag doesn't accumulate
+  rounding error and undo always reverts to the pre-drag state
+  cleanly.
+- **`writeShapes(replacements: Map<string, Shape>)` instead of
+  N replaceShape calls.** One `onDocChange` per pointermove for
+  group transforms, not N. Smoother rendering, fewer stack
+  frames per frame.
+- **Multi-set member preference for transform plain-click.**
+  Without it, the smallest-shape pick collapses the multi-set
+  whenever a non-member smaller shape sits under the cursor.
+  With it, the user's group-drag intent is preserved unless they
+  explicitly Ctrl+click on a non-member to add it.
+- **Ctrl+click on the bbox rect toggles the smallest-containing
+  shape.** Bbox rect is on top in z-order so it always intercepts
+  clicks within the multi-set's union region — ignoring the Ctrl
+  modifier there would mean the user can't refine the selection
+  inside their own group's bbox. The toggle path mirrors
+  `onShapePointerDown`'s Ctrl branch.
+- **Stable rotation frame via the rigid-rotation transform.**
+  The naive approach (recompute live AABB every frame) makes the
+  bbox + handles + knob jump as the underlying shapes' rendered
+  AABB grows / shifts during rotation. Rendering the snapshot
+  bbox inside a `rotate()` transform keeps the frame visually
+  rigid; per-shape rings still track live positions so the user
+  sees each member's actual transformed location.
+- **Clipboard outside the document, undo inside.** The clipboard
+  is session state in ShapeEditor (not persisted, not in undo
+  history). Copy doesn't push undo; Paste does (the paste is a
+  doc-mutating operation). Matches text-editor convention.
+- **Per-file undo history.** Stacks reset on `selectedPath`
+  change. Avoids the bug where Ctrl+Z after a file switch would
+  apply the previous file's snapshot to the new file.
+- **Mid-drag undo cancels the drag.** Otherwise the in-flight
+  pointermove would overwrite the just-undone state by
+  re-applying its `drag.snapshots + delta` math. Setting `drag`
+  to `none` halts the pointer pipeline.
+- **Toolbar position: fixed, not absolute.** Absolute inside the
+  pane scroll container would scroll the toolbar away as the
+  user reads through the document; fixed keeps it visible. The
+  trade-off is that the toolbar leaves document-coordinate
+  space — clicks on it don't interact with the SVG layer
+  underneath, which is what we want anyway.
+
+### Files modified
+
+- `src/components/ShapeEditor.tsx` — significant. State changes
+  (selectedIds: Set, clipboard, toolbarPos), new helpers
+  (`shapeContainsPoint`, `findSmallestShapeContainingPoint`,
+  `computeGroupBbox`, `rotateAround`, `applyGroupResize`),
+  new DragKind variants (group-move/resize/rotate, lasso),
+  new GroupSelectionOverlay, group drag-start handlers, lasso
+  pointer pipeline, Alt+Shift draw modifier branches, Ctrl+C/V
+  + Ctrl+Z/Y key handlers, member-preference smallest pick,
+  Ctrl+click bbox toggle, rotationFrame plumbing, alignSelected
+  / distributeSelected helpers.
+- `src/components/ShapeEditorToolbar.tsx` — new props
+  (selectedShapes, clipboardSize, position, onPositionChange,
+  align/distribute callbacks), dragable header (clampToViewport),
+  Copy / Paste / Delete row, Align grid (6 buttons),
+  Distribute H/V row.
+- `src/components/TabPane.tsx` — shapesUndoStack /
+  shapesRedoStack state + pushShapesUndo / undoShapes /
+  redoShapes helpers; reset on file change; pushShapesUndo
+  called inline in template-load callback; new props passed
+  through to ShapeEditor.
+- `src/components/ShortcutsHelp.tsx` — rows for Ctrl+Click,
+  lasso drag, Drag selected shape, Drag group handles/knob,
+  Ctrl+C, Ctrl+V, Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z, Drag toolbar
+  title, smallest-pick semantics.
+- `verify-cluster-20-v1.1.ps1` — smoke walk passes A–S.
+
+### Tag
+
+`cluster-20-v1.1-complete`.
