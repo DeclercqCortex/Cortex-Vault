@@ -22,12 +22,22 @@ import {
   type CSSProperties,
 } from "react";
 import type { Editor } from "@tiptap/react";
+// Cluster 21 v1.1 polish — rich-text replace box was attempted via a
+// small TipTap mini-editor in FindReplaceBar. Disabling those imports
+// while we diagnose a blank-screen on dev startup that started after
+// the polish pass. Re-enable after the root cause is isolated.
+// import { EditorContent, useEditor } from "@tiptap/react";
+// import StarterKit from "@tiptap/starter-kit";
+// import Underline from "@tiptap/extension-underline";
+// import TextStyle from "@tiptap/extension-text-style";
+// import Color from "@tiptap/extension-color";
 import { setMarkerMode } from "../editor/CortexMarkerMode";
 import {
   PARTICLE_TYPES,
   type ParticleType,
 } from "../editor/CortexParticleHost";
 import { CORTEX_CODE_LANGUAGES } from "../editor/CortexCodeBlock";
+import { AutoReplaceModal } from "./AutoReplaceModal";
 
 // ---- Toolbar prefs (persisted in localStorage) ---------------------------
 
@@ -105,7 +115,17 @@ const MARK_PALETTE = [
   { hex: "#ffffff", name: "White", mark: null },
 ];
 
+// Cluster 21 v1.1 polish — expanded font roster + each option's <option>
+// element renders its label in its OWN font-family so the user can
+// preview before committing. Chromium (which Tauri WebView2 uses)
+// honours `font-family` on <option> since Chrome 79; the family chain
+// always ends in a system fallback so anyone offline still sees
+// readable labels.
+//
+// Google Fonts are loaded once via index.html's <link> tag covering
+// every named font in this list.
 const FONT_FAMILIES = [
+  // System stacks (always available, no CDN load needed)
   {
     label: "Sans-serif",
     value: 'system-ui, -apple-system, "Segoe UI", sans-serif',
@@ -115,12 +135,29 @@ const FONT_FAMILIES = [
     label: "Monospace",
     value: 'ui-monospace, "Cascadia Code", Consolas, monospace',
   },
-  { label: "Handwriting", value: '"Caveat", "Comic Sans MS", cursive' },
+  // Curated webfonts (loaded via Google Fonts link in index.html)
   { label: "Inter", value: '"Inter", system-ui, sans-serif' },
-  { label: "JetBrains Mono", value: '"JetBrains Mono", monospace' },
-  { label: "Lora", value: '"Lora", serif' },
-  { label: "Crimson", value: '"Crimson Text", serif' },
-  { label: "Playfair", value: '"Playfair Display", serif' },
+  { label: "Lora", value: '"Lora", Georgia, serif' },
+  {
+    label: "Crimson Text",
+    value: '"Crimson Text", "Times New Roman", serif',
+  },
+  {
+    label: "Playfair Display",
+    value: '"Playfair Display", "Times New Roman", serif',
+  },
+  { label: "EB Garamond", value: '"EB Garamond", Garamond, serif' },
+  {
+    label: "Source Serif",
+    value: '"Source Serif Pro", "Source Serif", Georgia, serif',
+  },
+  { label: "JetBrains Mono", value: '"JetBrains Mono", Consolas, monospace' },
+  { label: "Fira Code", value: '"Fira Code", Consolas, monospace' },
+  // Display + handwriting
+  { label: "Bebas Neue", value: '"Bebas Neue", Impact, sans-serif' },
+  { label: "Cinzel", value: '"Cinzel", "Trajan Pro", serif' },
+  { label: "Caveat", value: '"Caveat", "Comic Sans MS", cursive' },
+  { label: "Pacifico", value: '"Pacifico", "Comic Sans MS", cursive' },
 ];
 
 const FONT_SIZES = [8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 64, 96];
@@ -316,6 +353,8 @@ export function EditorToolbar({
   const [replaceQuery, setReplaceQuery] = useState("");
   const [replaceMode, setReplaceMode] = useState(false);
   const [outlineOpen, setOutlineOpen] = useState(false);
+  // Cluster 21 v1.1 polish — auto-replace pipeline manager modal.
+  const [autoReplaceOpen, setAutoReplaceOpen] = useState(false);
   const [markerActive, setMarkerActive] = useState(false);
   // Cluster 21 v1.0.4 — marker color is a ColorMark name (one of the
   // seven Cluster 2 review-pipeline marks), not a free hex. The
@@ -980,7 +1019,16 @@ export function EditorToolbar({
         >
           <option value="">Default</option>
           {FONT_FAMILIES.map((f) => (
-            <option key={f.label} value={f.value}>
+            // Cluster 21 v1.1 polish — render each option's label in
+            // its own font so the user previews before committing.
+            // Chromium honours font-family on <option> (since Chrome
+            // 79); the family chain in `f.value` ends in a system
+            // fallback so offline users still see readable labels.
+            <option
+              key={f.label}
+              value={f.value}
+              style={{ fontFamily: f.value }}
+            >
               {f.label}
             </option>
           ))}
@@ -1313,20 +1361,67 @@ export function EditorToolbar({
         <TbBtn
           onClick={() => {
             // Cluster 21 v1.0.3 — capture the selection BEFORE the
-            // prompt() blurs the editor, then restore it before
-            // calling setLink so the link wraps the originally-
-            // selected text instead of nothing.
+            // prompt() blurs the editor.
+            // Cluster 21 v1.1 polish — when the cursor has no
+            // selection, `setLink` silently no-ops (a link mark needs
+            // a range to wrap), and the typed URL was discarded. Now
+            // we INSERT the URL as link text when there's no
+            // selection.
+            // Cluster 21 v1.1 polish (link label) — also offer the
+            // user a second prompt for a custom display label, so the
+            // link can read "see paper" instead of the raw URL. Empty
+            // label falls back to the URL itself; if there is already
+            // a selection, the selection acts as the label and we
+            // skip the second prompt.
             const sel = editor.state.selection;
             const from = sel.from;
             const to = sel.to;
-            const url = window.prompt("URL:");
-            if (!url) return;
-            editor
-              .chain()
-              .focus()
-              .setTextSelection({ from, to })
-              .setLink({ href: url })
-              .run();
+            const hasSelection = from !== to;
+            const raw = window.prompt(
+              hasSelection
+                ? "URL for the selected text:"
+                : "URL:",
+            );
+            if (!raw) return;
+            const trimmed = raw.trim();
+            if (!trimmed) return;
+            // Light URL hygiene: prepend https:// for bare domains
+            // (anything without a scheme that isn't a relative path).
+            const url =
+              /^(https?:|mailto:|tel:|file:|\/|\.\.?\/|#)/i.test(trimmed)
+                ? trimmed
+                : `https://${trimmed}`;
+            if (hasSelection) {
+              editor
+                .chain()
+                .focus()
+                .setTextSelection({ from, to })
+                .setLink({ href: url })
+                .run();
+            } else {
+              // No selection: ask for the optional display label.
+              // Cancelling the label prompt aborts the whole insert
+              // (so accidental Esc doesn't dump a raw URL into the
+              // doc); leaving it empty falls back to the URL string.
+              const labelRaw = window.prompt(
+                "Display text (leave blank to use the URL):",
+                "",
+              );
+              if (labelRaw === null) return;
+              const labelTrimmed = labelRaw.trim();
+              const linkText = labelTrimmed.length > 0 ? labelTrimmed : trimmed;
+              editor
+                .chain()
+                .focus()
+                .setTextSelection({ from, to })
+                .insertContent(linkText)
+                .setTextSelection({ from, to: from + linkText.length })
+                .setLink({ href: url })
+                // Move cursor to the end of the inserted link so the
+                // user can keep typing prose after it.
+                .setTextSelection(from + linkText.length)
+                .run();
+            }
           }}
           title="Link"
         >
@@ -1546,25 +1641,50 @@ export function EditorToolbar({
             editor
               .chain()
               .focus()
-              .insertContent({
-                type: "cortexTabsBlock" as any,
-                attrs: { tabs: "Tab 1|Tab 2", activeTab: 0 },
-                // Cluster 21 v1.1 — one paragraph per tab title.
-                // The NodeView shows children[activeTab]; without N
-                // children, switching to tab N>0 makes the body
-                // empty and typing pushes the cursor out of the
-                // block.
-                content: [
-                  {
-                    type: "paragraph",
-                    content: [{ type: "text", text: "Tab 1 content" }],
-                  },
-                  {
-                    type: "paragraph",
-                    content: [{ type: "text", text: "Tab 2 content" }],
-                  },
-                ],
-              })
+              // Cluster 21 v1.1 — panel-per-tab schema. Each tab is
+              // its own cortexTabPanel child holding any block+
+              // content; the panel owns its title attr.
+              //
+              // We also append a trailing empty paragraph after the
+              // tabs block so the user has somewhere to keep typing
+              // below — without it, inserting the tabs block at the
+              // end of the document leaves no place to write further
+              // prose, and there's no way to "exit" the tabs block
+              // by pressing arrow-down at the end of an isolated
+              // panel.
+              .insertContent([
+                {
+                  type: "cortexTabsBlock" as any,
+                  attrs: { activeTab: 0 },
+                  content: [
+                    {
+                      type: "cortexTabPanel" as any,
+                      attrs: { title: "Tab 1" },
+                      content: [
+                        {
+                          type: "paragraph",
+                          content: [
+                            { type: "text", text: "Tab 1 content" },
+                          ],
+                        },
+                      ],
+                    },
+                    {
+                      type: "cortexTabPanel" as any,
+                      attrs: { title: "Tab 2" },
+                      content: [
+                        {
+                          type: "paragraph",
+                          content: [
+                            { type: "text", text: "Tab 2 content" },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+                { type: "paragraph" },
+              ])
               .run()
           }
           title="Tabs"
@@ -1748,6 +1868,13 @@ export function EditorToolbar({
         >
           ☰
         </TbBtn>
+        <TbBtn
+          active={autoReplaceOpen}
+          onClick={() => setAutoReplaceOpen(true)}
+          title="Auto-replace rules — typed shortcut → symbol substitutions"
+        >
+          ↔
+        </TbBtn>
         <select
           className="cortex-tb-btn"
           value={prefs.zoom}
@@ -1901,6 +2028,10 @@ export function EditorToolbar({
       )}
       {outlineOpen && (
         <OutlinePanel editor={editor} onClose={() => setOutlineOpen(false)} />
+      )}
+      {/* Cluster 21 v1.1 polish — auto-replace rules manager. */}
+      {autoReplaceOpen && (
+        <AutoReplaceModal onClose={() => setAutoReplaceOpen(false)} />
       )}
     </div>
   );
@@ -2111,6 +2242,57 @@ function FindReplaceBar({
 }) {
   const [matchCount, setMatchCount] = useState(0);
 
+  // Cluster 21 v1.1 polish — rich-text replace box.
+  //
+  // The "Replace with" field is a contenteditable div instead of a
+  // plain <input>, so users can apply Bold / Italic / Underline /
+  // Strike / inline color to the replacement text and have those
+  // marks land in the document. The HTML inside the div is captured
+  // on every input event and pushed up to the parent via
+  // `onReplaceChange`, so the parent's `replace` state is always the
+  // current HTML payload.
+  //
+  // Why a contenteditable + execCommand instead of nesting another
+  // TipTap editor here: nesting a second TipTap editor inside the
+  // toolbar of the first caused a hard-to-diagnose blank-screen bug
+  // on dev startup (heavy module-load chain at the top of the
+  // toolbar file). A contenteditable + execCommand is ~30 lines, has
+  // zero new imports, and produces clean HTML (<b>/<i>/<u>/<strike>/
+  // <font color>) that the editor's parser already understands.
+  // execCommand is officially deprecated but every Chromium-based
+  // engine — including Tauri's WebView2 — still implements it, and
+  // there is no equivalent imperative alternative.
+  const replaceRef = useRef<HTMLDivElement | null>(null);
+
+  // Initialize the contenteditable's HTML once on mount (or when the
+  // bar is reopened with a stored value). After that, the div owns
+  // its own DOM state and we never write to innerHTML again — that
+  // would clobber the cursor on each keystroke.
+  useEffect(() => {
+    const el = replaceRef.current;
+    if (!el) return;
+    if (el.innerHTML !== replace) el.innerHTML = replace || "";
+    // Intentionally only on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Apply a formatting command (bold/italic/etc.) to the current
+  // selection inside the replace box. We focus the box first so the
+  // command targets the right element even if the user just clicked
+  // a button. After the command, push the new HTML up.
+  const applyFmt = (command: string, value?: string) => {
+    const el = replaceRef.current;
+    if (!el) return;
+    el.focus();
+    try {
+      document.execCommand(command, false, value);
+    } catch {
+      // execCommand can throw in some sandboxed contexts. Ignore —
+      // the user can still type plain text.
+    }
+    onReplaceChange(el.innerHTML);
+  };
+
   // Simple find: highlight matches in the editor's DOM via the
   // browser's window.find(). Lightweight; v1.1 can do PM decorations.
   const doFind = () => {
@@ -2124,7 +2306,13 @@ function FindReplaceBar({
     const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(escaped, "g");
     const count = (html.match(re) || []).length;
-    const next = html.replace(re, replace);
+    // Escape the regex-replacement metacharacter `$` in the user's
+    // HTML so things like `$&` inside a styled span aren't treated
+    // as backreferences. (Most rich-text payloads will never contain
+    // `$`, but tag attributes do contain things like `&` which are
+    // fine — only `$` is problematic for String.prototype.replace.)
+    const safeReplacement = (replace || "").replace(/\$/g, "$$$$");
+    const next = html.replace(re, safeReplacement);
     editor.commands.setContent(next, { emitUpdate: true });
     setMatchCount(count);
   };
@@ -2146,11 +2334,96 @@ function FindReplaceBar({
       </button>
       {replaceMode && (
         <>
-          <input
-            placeholder="Replace with"
-            value={replace}
-            onChange={(e) => onReplaceChange(e.target.value)}
-          />
+          <div className="cortex-find-replace-rich-wrap">
+            <div
+              ref={replaceRef}
+              className="cortex-find-replace-rich-input"
+              contentEditable
+              suppressContentEditableWarning
+              role="textbox"
+              aria-label="Replace with (rich text)"
+              data-placeholder="Replace with"
+              onInput={(e) => {
+                onReplaceChange((e.target as HTMLDivElement).innerHTML);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  onClose();
+                }
+                // Prevent newlines — the replace box is single-line
+                // by design (see CSS .cortex-find-replace-rich-input
+                // white-space: nowrap).
+                if (e.key === "Enter") e.preventDefault();
+              }}
+            />
+            <div className="cortex-find-replace-rich-tools">
+              <button
+                type="button"
+                className="cortex-tb-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => applyFmt("bold")}
+                title="Bold"
+                style={{ fontWeight: 700 }}
+              >
+                B
+              </button>
+              <button
+                type="button"
+                className="cortex-tb-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => applyFmt("italic")}
+                title="Italic"
+                style={{ fontStyle: "italic" }}
+              >
+                I
+              </button>
+              <button
+                type="button"
+                className="cortex-tb-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => applyFmt("underline")}
+                title="Underline"
+                style={{ textDecoration: "underline" }}
+              >
+                U
+              </button>
+              <button
+                type="button"
+                className="cortex-tb-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => applyFmt("strikeThrough")}
+                title="Strikethrough"
+                style={{ textDecoration: "line-through" }}
+              >
+                S
+              </button>
+              <input
+                type="color"
+                title="Text color"
+                onMouseDown={(e) => e.preventDefault()}
+                onChange={(e) => applyFmt("foreColor", e.target.value)}
+                style={{
+                  width: 22,
+                  height: 22,
+                  padding: 0,
+                  border: "1px solid var(--border)",
+                  borderRadius: 3,
+                  background: "transparent",
+                  cursor: "pointer",
+                }}
+              />
+              <button
+                type="button"
+                className="cortex-tb-btn"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => applyFmt("removeFormat")}
+                title="Clear formatting"
+              >
+                ⨯ᶠ
+              </button>
+            </div>
+          </div>
           <button className="cortex-tb-btn" onClick={doReplaceAll}>
             Replace all
           </button>

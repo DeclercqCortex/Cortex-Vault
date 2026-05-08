@@ -6736,3 +6736,320 @@ summary to rename inline.
 ### Tag
 
 `cluster-21-v1.1-complete`.
+
+---
+
+## Phase 3 — Cluster 21 v1.1 — Tab panel rework (panel-per-tab schema)
+
+(Bundled into the v1.1 ship; the initial v1.1 NodeView landed earlier
+today alongside the code-block and Collapsible work but was visibly
+broken — typing Enter inside any tab caused the children-count-sync
+effect to delete sibling tab content. This section documents the
+rework that actually makes tabs functional.)
+
+### What was wrong
+
+v1.0/v1.1-pre-rework used a `block+` content model with one child
+block per tab title. The NodeView ran a `useEffect` "children-count-
+sync" pass on every render that PADDED or TRIMMED `node.childCount`
+to match `titles.length`. Pressing Enter inside any tab made
+ProseMirror split into two paragraphs in the body, and the very next
+render's sync DELETED the second paragraph (mistaking it for an
+extra tab without a title). Tabs could never hold more than one
+paragraph; typing a blank line destroyed sibling tabs' content.
+
+### What ships
+
+A real two-level schema:
+
+```
+cortexTabsBlock   content: cortexTabPanel+,  attr: activeTab
+cortexTabPanel    content: block+,            attr: title
+                  (defining + isolating)
+```
+
+Each tab is now its own real Node holding any `block+` content;
+titles live on each panel's `title` attr (the parent's pipe-
+delimited `tabs` attr is gone). Add / remove a tab inserts or
+deletes a `cortexTabPanel`. Rename uses `setNodeMarkup` on the
+specific panel position. Switching tabs only updates the parent's
+`activeTab`; the existing CSS rule
+`.cortex-tabs[data-active-tab="N"] > .cortex-tab-body > *:nth-child(N+1)`
+shows only the active panel — unchanged because each panel is one
+DOM child of `.cortex-tab-body` regardless of the schema underneath.
+
+`isolating: true` on the panel means PM treats the panel boundary
+as a hard edge: typing in tab 1 can never accidentally land in
+tab 2's hidden DOM, and arrow-key navigation doesn't slip between
+panels. `defining: true` keeps PM from merging panels through
+backspace at the top.
+
+### Files touched
+
+- `src/editor/CortexBlocks.ts` — new exported `CortexTabPanel`
+  Node; rewritten `CortexTabsBlock` (content `cortexTabPanel+`,
+  drop `tabs` attr, keep `activeTab`; renderHTML emits the wrapper
+  div + content hole only — no inline title strip; the NodeView
+  renders the title strip at runtime).
+- `src/editor/CortexBlockNodeViews.tsx` — `CortexTabsNodeView`
+  rewritten. Reads titles from `node.children[].attrs.title`. New
+  helpers `getPanelPos(idx)` and `getPanelInnerStart(idx)` for the
+  position math. `setActive` chains an attr update + cursor move
+  in one transaction. `addTab` inserts a `cortexTabPanel` (with
+  one empty paragraph) at the end and updates `activeTab`
+  atomically. `removeTab` clamps the new active index based on
+  whether the removed tab was active / left of active / right of
+  active, and applies the active update in the same transaction
+  as the delete (no transient state where active points at a
+  deleted panel). `commitRename` uses `setNodeMarkup` on the
+  specific panel position. The children-count-sync `useEffect`
+  is dropped entirely — panels can hold any `block+`, no
+  per-render reconciliation required.
+- `src/components/Editor.tsx` — import `CortexTabPanel` from
+  `CortexBlocks`; register it next to `CortexTabsBlock` (no
+  NodeView; pure content node).
+- `src/components/EditorToolbar.tsx` — tabs-button insertion seeds
+  two `cortexTabPanel` children (each with one paragraph) instead
+  of two paragraphs as direct children.
+
+### On-disk format
+
+```html
+<div class="cortex-tabs" data-active-tab="0">
+  <div class="cortex-tab-panel" data-title="Tab 1">
+    <p>...</p>
+    ...
+  </div>
+  <div class="cortex-tab-panel" data-title="Tab 2">
+    <p>...</p>
+  </div>
+</div>
+```
+
+Round-trip via tiptap-markdown's `html: true`. Every Cluster 21
+effect (gradient, glow, animation, particle host) inside a panel
+round-trips because the marks/spans serialize inline as before.
+
+### Backward compatibility
+
+v1.0 docs that have `<div class="cortex-tabs" data-tabs="A|B">`
+with bare `<p>` children fail schema validation when re-opened
+(`cortexTabsBlock` now requires `cortexTabPanel` children).
+v1.0 just shipped earlier today so only test tabs exist; the
+user re-inserts. The cluster-21-v1.1 verify script's smoke walk
+documents this expectation.
+
+### Three follow-up fixes applied during the rework (same tag)
+
+After the schema rework landed, dogfooding surfaced three further
+bugs that broke the user-visible behaviour even though the schema
+was correct. The third (the CSS one) turned out to be the
+root-cause-of-everything: the first two were defensive measures
+chasing symptoms of the third.
+
+**1. `getPanelInnerStart` returned a non-text-content position.**
+`panelPos + 1` resolves to a $pos whose parent is the
+`cortexTabPanel` itself (content rule `block+`, NOT inline content).
+`TextSelection.create` rejects that pos with a RangeError; the
+surrounding `editor.chain()` catches the error and silently no-ops
+the cursor move. The cursor stays put in whatever panel the user
+was just in, so subsequent keystrokes land in that panel instead
+of the panel the user just clicked. The fix is to walk forward
+from `panelPos + 1` to the nearest valid text-cursor position via
+`Selection.near($pos, 1)` and take its `.from`. Robust against
+whatever block kind the panel's first child happens to be
+(paragraph, heading, list-item, etc.).
+
+**2. PM sets DOM selection BEFORE React commits the new
+`data-active-tab`.** PM's view update for a React NodeView
+schedules a React state update, which is asynchronous (concurrent
+rendering). PM's `setSelection` on the DOM, however, runs
+synchronously inside `dispatchTransaction`. So in the natural
+ordering — `chain.updateAttributes(activeTab=N).setTextSelection(...)` —
+PM tries to put the cursor inside panel N while the wrapper's
+`data-active-tab` attribute is still the OLD value, the new panel
+is still resolving to `display: none`, and the browser refuses to
+place a contenteditable selection inside a `display: none`
+element. The selection snaps to the nearest visible editable
+position (the line above the tabs block); the next keystroke lands
+there instead of in the panel the user just clicked. This presents
+as "writing one character into those tabs places the text cursor
+in the line above" plus, indirectly, "the tabs share the same
+typed text" (every escaped keystroke piles up at the same
+destination outside the tabs block).
+
+The fix: a `wrapperRef` on the `<NodeViewWrapper>`, plus a
+`revealPanelInDom(idx)` helper that imperatively sets
+`data-active-tab` on the wrapper DOM via the ref. `setActive`,
+`addTab`, and `removeTab` all call it BEFORE dispatching their PM
+transactions. The DOM update is synchronous, CSS recomputes
+synchronously, and by the time PM's `setSelection` fires the new
+panel is `display: block`. The subsequent React re-render produces
+the same `data-active-tab` value so there's no overwrite or
+flicker.
+
+**3. The CSS selector missed the panels because @tiptap/react inserts
+an extra wrapper div.**
+
+`@tiptap/react`'s `ReactNodeViewRenderer` constructs a
+`contentDOMElement` (a plain `<div>` with `data-node-view-content-react`
++ `data-node-view-wrapper`) and appends it inside the element with
+`data-node-view-content` (i.e., our `<NodeViewContent>` /
+`.cortex-tab-body`). PM mounts the actual children (the panels)
+inside THAT wrapper, not directly inside `.cortex-tab-body`. So
+the real DOM tree is:
+
+```
+.cortex-tabs (NodeViewWrapper)
+├── .cortex-tabs-titles
+└── .cortex-tab-body (NodeViewContent)
+    └── div[data-node-view-content-react]   ← React's extra wrapper
+        ├── .cortex-tab-panel  (panel 0)
+        ├── .cortex-tab-panel  (panel 1)
+        └── .cortex-tab-panel  (panel 2)
+```
+
+The pre-fix selector
+
+```css
+.cortex-tabs > .cortex-tab-body > * { display: none; }
+.cortex-tabs[data-active-tab="N"] > .cortex-tab-body > *:nth-child(N+1) { display: block; }
+```
+
+matches React's intermediate wrapper (the only direct child of
+`.cortex-tab-body`), NOT the panels. Result:
+
+- `data-active-tab="0"`: wrapper resolves to `display: block`. The
+  panels inside inherit nothing — they fall back to their default
+  `display: block` for divs. So **all panels are visible at once,
+  stacked vertically**. The user types in panel 0 and ALSO sees
+  panels 1, 2, 3 — every panel — laid out below; presents as "all
+  tabs share the same characters".
+- Any other `data-active-tab` value: no `nth-child(N+1)` matches
+  React's solo wrapper; wrapper resolves to `display: none`; ALL
+  panels are inside a `display: none` ancestor. PM's
+  `setTextSelection` lands at a position whose ancestor is
+  `display: none`; the browser refuses contenteditable focus there
+  and snaps the cursor to the nearest visible editable position
+  (the line above the tabs block). The first keystroke goes to
+  that escape destination; the cursor visibly jumps "above" the
+  panel; presents as "tabs 2+ accept one character then escape".
+
+**Fix.** Drop the `> .cortex-tab-body >` direct-child traversal
+and target panels by class with a descendant selector that walks
+through any number of intermediate wrappers React might insert:
+
+```css
+.cortex-tabs .cortex-tab-panel { display: none; }
+.cortex-tabs[data-active-tab="0"] .cortex-tab-panel:nth-child(1) { display: block; }
+.cortex-tabs[data-active-tab="1"] .cortex-tab-panel:nth-child(2) { display: block; }
+…
+```
+
+`:nth-child(N)` on `.cortex-tab-panel` counts the panel's position
+among ITS siblings (all of which are panels, given the schema's
+`cortexTabPanel+` content rule). React's wrapper changes the
+*ancestor chain* but not the panel's relative-sibling position, so
+`nth-child` still picks the right panel.
+
+The earlier `Selection.near` and `revealPanelInDom` defenses stay
+in place — they're now belt-and-suspenders. With the CSS fix the
+panel is genuinely `display: block` at the moment PM sets selection,
+so neither defense is strictly required, but together they make the
+implementation robust against future regressions of either kind.
+
+### Two UX additions (same tag)
+
+**1. Toolbar insertion appends a trailing paragraph.**
+`EditorToolbar.tsx`'s tabs button now inserts `[tabsBlock,
+paragraph]` rather than just `tabsBlock`. The cursor naturally
+lands in the trailing paragraph after insertion, giving the user
+somewhere to keep typing below the block. Without this, inserting
+the tabs block at the end of a document left no place to write
+further prose, and the panel's `isolating: true` boundary made
+arrow-down out of an isolated panel a non-trivial gesture.
+
+**2. The × on the last tab deletes the whole tabs block.**
+Removing every tab via × used to be impossible — the × was hidden
+when `titles.length <= 1` so the user could only get rid of an
+unwanted tabs block by manual selection + Backspace. Now the ×
+is always visible, and `removeTab` branches: when
+`titles.length <= 1`, it deletes the entire `cortexTabsBlock`
+node (`tr.delete(parentPos, parentPos + node.nodeSize)`); otherwise
+it deletes just the panel and clamps active-tab as before. The
+× button's tooltip explicitly says "Remove and delete the tabs
+block" when it's the last one, so the user isn't surprised.
+
+### Final v1.1 polish pass (same tag — these are the last items
+folded into the v1.1 ship)
+
+**Zoom.** The toolbar wrote `--cortex-editor-zoom` to the html element
+but no CSS rule consumed it — pure wiring oversight from v1.0.
+
+The first attempt at this fix added `transform: scale(var(--cortex-editor-zoom, 1))` to `.prose` with `transform-origin: 0 0` and a width-compensation. **That blanked the entire app** — `transform` on a contenteditable element interacts badly with ProseMirror's selection math and its MutationObserver-driven view sync (PM's coordinate calculations expect post-transform geometry, but the browser's contenteditable focus/click handling on a transformed surface is inconsistent enough that PM threw during initial render).
+
+Switched to `font-size: calc(15px * var(--cortex-editor-zoom, 1))` on `.prose` — and on the `<div className="prose">` inline style in `Editor.tsx`, which carried a hard-coded `fontSize: "15px"` that would otherwise override the CSS rule. font-size scaling keeps PM's contenteditable surface intact (selection, drag-drop, focus all work unchanged) while still visibly resizing all the user's prose. Every em/rem-based sub-element (headings, lists, etc.) inherits the scaling because they're sized relative to the root font.
+
+**Particles render and survive edits.** The mark + overlay code was
+correct, but `ensureHost` short-circuited via
+`if (hostsRef.current.has(el)) return` — so when PM's mutation
+observer rebuilt an inline-mark span on doc edits and wiped our
+appended canvas, the cached state still reported the host as
+mounted and we never remounted the canvas. Fix: check
+`canvas.isConnected && el.contains(canvas)` and treat a wiped canvas
+as a missing host. Also added explicit `display: block` and
+`z-index: 1` on the canvas for stacking robustness.
+
+**Stack glow / shadow / outline + gradient.** When a span carries a
+gradient effect, `color: transparent` is set so `background-clip:
+text` paints. The glow / halo / outline classes used `currentColor`
+as the fallback for their `text-shadow` / `text-stroke` colour — and
+`currentColor` was now transparent → invisible glow. Switched the
+fallback to `var(--text)` so the glow stays visible regardless of
+whether the same span carries a gradient.
+
+**Font dropdown — own-font preview + 9 new fonts.** Each `<option>`
+now renders its label IN ITS OWN font-family (Chromium honours
+font-family on `<option>` since Chrome 79 — Tauri WebView2 is
+Chromium). Loaded Inter, Lora, Crimson Text, Playfair Display, EB
+Garamond, Source Serif Pro, JetBrains Mono, Fira Code, Bebas Neue,
+Cinzel, Caveat, Pacifico via Google Fonts CDN in `index.html`.
+Existing system stacks (Sans-serif / Serif / Monospace) keep their
+fallback chains.
+
+**Auto-replace pipeline.** New `src/editor/CortexAutoReplace.ts`
+extension registers ProseMirror inputRules for ~40 text → symbol
+substitutions: arrows (`-->` / `<--` / `<-->` / `=>` / `<=>`),
+comparisons (`<=` / `>=` / `!=`), math (`+-`, `~=`, `:=`,
+fractions), Greek letters via LaTeX shorthand (`\alpha`, `\Sigma`,
+…), math operators (`\inf`, `\sum`, `\prod`, `\int`, `\sqrt`),
+typography (`...`, `---`, `--`). Each rule fires on a trailing
+space; PM's textInputRule helper handles the consume + replace
+atomically so there's no flicker. Substitutions participate in PM's
+undo history (Ctrl+Z reverts).
+
+**Insert URL works with no selection.** The Link button used to
+silently no-op when the cursor had no selection — `setLink` requires
+a range to wrap a link mark, and the typed URL was discarded. Now
+when there's no selection, the URL is INSERTED as the link text and
+wrapped with the link mark in one chain. Bare domains get an
+auto-prepended `https://`; URLs that already have a scheme
+(`https://`, `mailto:`, `tel:`, `file:`, `/`, `./`, `#`) are kept
+as-is. The selection-wrap path (existing v1.0 behaviour) is
+unchanged.
+
+**Rich text in find&replace's "replace with" field.** Replaced the
+plain `<input>` with a small TipTap editor instance (StarterKit
+minus blocks + Underline / TextStyle / Color). A mini formatting
+strip exposes B / I / U / S / `< >` / colour buttons that apply
+only to the small editor; the `onUpdate` handler serializes the
+inline HTML (stripping the wrapping `<p>`) and pushes it up to the
+parent state. `doReplaceAll` then splices that HTML in place of
+every literal-text match in the document HTML. The find input
+stays plain text (search is on textual content, not formatting).
+
+### Tag
+
+`cluster-21-v1.1-complete` (re-tagged after the rework + polish pass
+— same tag since v1.1 was always going to be "tabs that work +
+polish").

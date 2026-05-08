@@ -78,6 +78,8 @@ import { CortexUnderlineStyled } from "../editor/CortexUnderlineStyled";
 import { CortexTextEffect } from "../editor/CortexTextEffect";
 import { CortexParticleHost } from "../editor/CortexParticleHost";
 import { CortexCodeBlock } from "../editor/CortexCodeBlock";
+// Cluster 21 v1.1 polish — auto-replace pipeline (--> → →, <= → ≤, etc.).
+import { CortexAutoReplace } from "../editor/CortexAutoReplace";
 import {
   CortexCollapsibleNodeView,
   CortexTabsNodeView,
@@ -98,6 +100,9 @@ import {
   CortexPageBreak,
   CortexMathBlock,
   CortexTabsBlock,
+  // Cluster 21 v1.1 — panel-per-tab schema; CortexTabPanel is the
+  // child node holding each tab's block content.
+  CortexTabPanel,
   CortexFootnoteRef,
   CortexCitationRef,
   CortexMathInline,
@@ -585,6 +590,10 @@ export function Editor({
         codeBlock: false,
       }),
       CortexCodeBlock,
+      // Cluster 21 v1.1 polish — auto-replace pipeline. See
+      // CortexAutoReplace.ts for the rule list (arrows, comparisons,
+      // typography, Greek letters, math operators).
+      CortexAutoReplace,
       HtmlStrike,
       HtmlUnderline,
       AlignmentAwareParagraph,
@@ -737,8 +746,13 @@ export function Editor({
       CortexDecoSeparator,
       CortexPageBreak,
       CortexMathBlock,
-      // Cluster 21 v1.1 — interactive NodeView for tabs
-      // (click-to-switch with active-tab persistence).
+      // Cluster 21 v1.1 — panel-per-tab schema. CortexTabPanel must be
+      // registered BEFORE the parent so the parent's `cortexTabPanel+`
+      // content constraint resolves at schema-build time. Order doesn't
+      // strictly matter for TipTap (it builds the schema after all
+      // extensions are collected), but keeping them adjacent makes the
+      // dependency obvious.
+      CortexTabPanel,
       CortexTabsBlock.extend({
         addNodeView() {
           return ReactNodeViewRenderer(CortexTabsNodeView);
@@ -1537,7 +1551,12 @@ export function Editor({
         // light mode. Our index.css drives prose colour off CSS variables
         // (`var(--text)`) which already follow the active theme.
         className="prose max-w-none"
-        style={{ fontSize: "15px" }}
+        // Cluster 21 v1.1 polish — zoom via font-size on the prose
+        // wrapper (font-size scaling keeps PM's contenteditable math
+        // intact; transform: scale broke the editor on first render).
+        // The CSS variable is set on documentElement by the toolbar's
+        // useEffect; default 1 = 15px.
+        style={{ fontSize: "calc(15px * var(--cortex-editor-zoom, 1))" }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}

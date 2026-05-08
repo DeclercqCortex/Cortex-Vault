@@ -1,54 +1,61 @@
 // Cluster 21 v1.1 — interactive NodeViews for cortexTabsBlock and
 // cortexCollapsible.
 //
-// Tabs: real tab strip — click a title to switch panels, double-
-// click to rename inline, click + to add a tab, click × to remove.
-// Active index persists in node attrs (data-active-tab=<n>). The
-// tab body always carries N child blocks for N titles; the
-// NodeView keeps panel count synced with title count.
+// Tabs (v1.1 — panel-per-tab model): real tab strip — click a title
+// to switch panels, double-click to rename inline, click + to add
+// a tab, click × to remove. Active index persists in the parent's
+// `activeTab` attr (data-active-tab=<n>). Each tab's content lives
+// in its own `cortexTabPanel` child node which can hold any block+
+// content; titles live on each panel's `title` attr.
+//
+// Why panel-per-tab:
+//   v1.0 used a `block+` content model with one child block per
+//   tab title and the title strip rendered alongside in renderHTML.
+//   Pressing Enter inside any tab made ProseMirror split into two
+//   paragraphs in the body. The NodeView's children-count-sync
+//   effect would then DELETE the second paragraph (mistaking it
+//   for an extra tab without a title) — tabs could never hold
+//   more than one paragraph. The fix: each tab is its own real
+//   node (cortexTabPanel) holding `block+`, so Enter creates a
+//   second paragraph INSIDE the same panel without disturbing
+//   any sibling panel. The children-count-sync effect is gone.
 //
 // Collapsible: click-to-toggle summary header with chevron rotation.
 // Open/closed state writes to the node's `open` attr. Double-click
 // renames the summary inline.
 //
-// v1.1.1 fix — panel visibility is driven PURELY from the wrapper's
-// data-active-tab attribute via attribute-selector + nth-child CSS
-// rules. The earlier "JS toggles a class on the active child"
-// approach mutated PM's owned DOM on every keystroke, and PM's
-// MutationObserver treated that as an external write and forced a
-// resync that disrupted the cursor.
-//
-// v1.1.2 fix — clicking a tab title now also moves PM's text
-// selection into the start of the newly-active panel via a
-// deferred setTextSelection. Initial pass had this split across
-// two animation frames; the user's keystroke could arrive in
-// between and land in the previous (now hidden) panel.
-//
-// v1.1.3 fix — both setActive AND addTab now perform their attr
-// update + cursor placement (and addTab also its empty-paragraph
-// insert) as ONE atomic chain / single transaction. With the
-// earlier multi-step approach there was always a window where the
-// new active panel was already display:block but PM's selection
-// still pointed inside the now-hidden previous panel; a keystroke
-// arriving in that window made PM "fix" the selection by jumping
-// to the nearest editable position outside the tabs block — the
-// caret-in-the-line-above bug.
+// Visibility of non-active panels is driven PURELY from the
+// wrapper's data-active-tab attribute via attribute-selector +
+// nth-child CSS rules in index.css, so React/PM never touches the
+// panel-display style and PM's MutationObserver stays quiet.
 
 import { NodeViewContent, NodeViewWrapper } from "@tiptap/react";
 import type { NodeViewProps } from "@tiptap/react";
-import { TextSelection } from "@tiptap/pm/state";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Selection, TextSelection } from "@tiptap/pm/state";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 // ---- Tabs NodeView -------------------------------------------------------
 
 export function CortexTabsNodeView(props: NodeViewProps) {
   const { node, updateAttributes, editor, getPos } = props;
+
+  // Imperatively-updated ref to the wrapper element. Used in setActive
+  // and addTab to write data-active-tab BEFORE PM dispatches the
+  // selection-changing transaction. See the comment on
+  // `revealPanelInDom` below for why this is load-bearing.
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  // Titles live on each cortexTabPanel child's `title` attr — read
+  // them straight off the node tree on every render.
   const titles = useMemo(() => {
-    return String(node.attrs.tabs ?? "")
-      .split("|")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }, [node.attrs.tabs]);
+    const out: string[] = [];
+    node.forEach((child) => {
+      if (child.type.name === "cortexTabPanel") {
+        out.push(String(child.attrs.title ?? "Tab"));
+      }
+    });
+    return out;
+  }, [node]);
 
   const rawActive = Number(node.attrs.activeTab ?? 0);
   const active = Math.min(
@@ -56,46 +63,17 @@ export function CortexTabsNodeView(props: NodeViewProps) {
     Math.max(0, titles.length - 1),
   );
 
-  // Children-count sync: pad / trim the body to match titles.length.
-  // Defensive cleanup for v1.0 docs where the body was written with
-  // a single paragraph for two titles.
-  useEffect(() => {
-    if (typeof getPos !== "function") return;
-    const need = titles.length;
-    const have = node.childCount;
-    if (need === have || need < 1) return;
-    const pos = getPos();
-    if (pos == null) return;
-    const start = pos + 1;
-    if (need > have) {
-      const insertAt = pos + node.nodeSize - 1;
-      const para = editor.schema.nodes.paragraph;
-      if (!para) return;
-      const filler = Array.from({ length: need - have }, () => para.create());
-      editor.view.dispatch(
-        editor.view.state.tr
-          .insert(insertAt, filler)
-          .setMeta("addToHistory", false),
-      );
-    } else if (need < have) {
-      let deleteFrom = start;
-      for (let i = 0; i < need; i++) {
-        deleteFrom += node.child(i).nodeSize;
-      }
-      const deleteTo = pos + node.nodeSize - 1;
-      if (deleteTo > deleteFrom) {
-        editor.view.dispatch(
-          editor.view.state.tr
-            .delete(deleteFrom, deleteTo)
-            .setMeta("addToHistory", false),
-        );
-      }
-    }
-  }, [titles.length, node, getPos, editor]);
-
-  // First position INSIDE child[idx] of the tabsBlock, computed
-  // from the current node structure.
-  const getChildInnerStart = useCallback(
+  // Position math:
+  //   parentPos = getPos()                     — the cortexTabsBlock itself
+  //   parentPos + 1                            — INSIDE the tabs block, at the
+  //                                              start of child[0]
+  //   panelPos  = parentPos + 1 + Σ child[<i].nodeSize
+  //                                            — the cortexTabPanel for index i
+  //   panelPos  + 1                            — INSIDE that panel, at the
+  //                                              start of its first block
+  // (so a `setTextSelection(panelPos + 2)` lands the cursor inside the
+  // panel's first paragraph — +1 to enter the panel, +1 to enter the para).
+  const getPanelPos = useCallback(
     (idx: number): number | null => {
       if (typeof getPos !== "function") return null;
       const pos = getPos();
@@ -105,15 +83,77 @@ export function CortexTabsNodeView(props: NodeViewProps) {
       for (let i = 0; i < safeIdx; i++) {
         target += node.child(i).nodeSize;
       }
-      return target + 1;
+      return target;
     },
     [getPos, node],
   );
 
+  const getPanelInnerStart = useCallback(
+    (idx: number): number | null => {
+      const panelPos = getPanelPos(idx);
+      if (panelPos == null) return null;
+      // panelPos is the position BEFORE the cortexTabPanel boundary.
+      // panelPos + 1 puts the resolved position INSIDE the panel but
+      // BEFORE its first child block — i.e., inside a node whose
+      // content rule is `block+`, NOT inline. Calling
+      // TextSelection.create at that exact pos throws RangeError
+      // ("not a valid text selection"), the surrounding chain catches
+      // and silently no-ops the cursor move, and the user's cursor
+      // stays put in whatever panel they were just in. Subsequent
+      // keystrokes go there — which presents as "tabs share the same
+      // typed text" / "cursor stays in the line above".
+      //
+      // Selection.near walks forward from the given position to the
+      // nearest valid text-cursor position, robustly handling whatever
+      // block kind the panel's first child happens to be (paragraph,
+      // heading, list-item, etc.).
+      const $pos = editor.state.doc.resolve(panelPos + 1);
+      try {
+        const sel = Selection.near($pos, 1);
+        return sel.from;
+      } catch {
+        return panelPos + 1;
+      }
+    },
+    [editor, getPanelPos],
+  );
+
+  // Imperatively pull the target panel out of `display: none` BEFORE
+  // PM dispatches the selection-changing transaction.
+  //
+  // Why this is load-bearing: PM's view update for a React NodeView
+  // schedules a React state update, which is async (concurrent
+  // rendering). PM's setSelection on the DOM, however, runs
+  // synchronously inside dispatchTransaction. So in the natural
+  // ordering — chain.updateAttributes(activeTab=N).setTextSelection(...) —
+  // PM tries to put the cursor inside panel N while the wrapper's
+  // data-active-tab attribute is still the OLD value, the new panel
+  // is still resolving to `display: none`, and the browser refuses to
+  // place a contenteditable selection inside a display:none element.
+  // The selection snaps to the nearest visible editable position
+  // (the line above the tabs block); the next keystroke lands there
+  // instead of in the panel the user just clicked. This presents as
+  // "writing one character into those tabs places the text cursor
+  // in the line above" plus, indirectly, "the tabs share the same
+  // typed text" (every escaped keystroke piles up at the same
+  // destination outside the tabs block).
+  //
+  // Setting data-active-tab on the DOM imperatively is synchronous,
+  // CSS recomputes synchronously, and by the time PM's setSelection
+  // fires the new panel is `display: block`. The subsequent React
+  // re-render produces the same data-active-tab value so there's no
+  // overwrite or flicker.
+  const revealPanelInDom = useCallback((idx: number) => {
+    if (wrapperRef.current) {
+      wrapperRef.current.setAttribute("data-active-tab", String(idx));
+    }
+  }, []);
+
   const setActive = useCallback(
     (idx: number) => {
       if (idx === active) return;
-      const target = getChildInnerStart(idx);
+      revealPanelInDom(idx);
+      const target = getPanelInnerStart(idx);
       try {
         const chain = editor.chain();
         chain.updateAttributes("cortexTabsBlock" as any, { activeTab: idx });
@@ -124,7 +164,7 @@ export function CortexTabsNodeView(props: NodeViewProps) {
         updateAttributes({ activeTab: idx });
       }
     },
-    [active, editor, getChildInnerStart, updateAttributes],
+    [active, editor, getPanelInnerStart, revealPanelInDom, updateAttributes],
   );
 
   const onTitleClick = useCallback(
@@ -157,11 +197,22 @@ export function CortexTabsNodeView(props: NodeViewProps) {
   const commitRename = useCallback(
     (idx: number, next: string) => {
       const trimmed = next.trim() || `Tab ${idx + 1}`;
-      const updated = titles.map((t, i) => (i === idx ? trimmed : t));
-      updateAttributes({ tabs: updated.join("|") });
       setRenamingIndex(null);
+      const panelPos = getPanelPos(idx);
+      if (panelPos == null) return;
+      const panelNode = node.child(idx);
+      if (!panelNode || panelNode.type.name !== "cortexTabPanel") return;
+      try {
+        const tr = editor.state.tr.setNodeMarkup(panelPos, null, {
+          ...panelNode.attrs,
+          title: trimmed,
+        });
+        editor.view.dispatch(tr);
+      } catch (err) {
+        console.warn("[tabs] rename failed:", err);
+      }
     },
-    [titles, updateAttributes],
+    [editor, getPanelPos, node],
   );
 
   const cancelRename = useCallback(() => {
@@ -170,6 +221,20 @@ export function CortexTabsNodeView(props: NodeViewProps) {
 
   // ---- Add / remove ------------------------------------------------------
 
+  // Add a brand-new cortexTabPanel (with a single empty paragraph) at
+  // the end of the tabs block, then atomically focus it. The whole
+  // thing is one transaction so PM never sees an intermediate state
+  // where the new active panel exists but the cursor still points
+  // inside a now-hidden sibling.
+  //
+  // Like setActive, this calls revealPanelInDom up front so PM's
+  // setTextSelection lands inside a DOM that's already resolving to
+  // `display: block` for the new panel — the panel itself doesn't
+  // exist yet at the moment we set the attribute, but as soon as PM
+  // appends it to .cortex-tab-body the existing rule
+  // `.cortex-tabs[data-active-tab="N"] > .cortex-tab-body > *:nth-child(N+1)`
+  // matches and the panel paints `display: block` synchronously
+  // before PM tries to focus inside it.
   const addTab = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -178,47 +243,122 @@ export function CortexTabsNodeView(props: NodeViewProps) {
       const pos = getPos();
       if (pos == null) return;
       const para = editor.schema.nodes.paragraph;
-      if (!para) return;
+      const panelType = editor.schema.nodes.cortexTabPanel;
+      if (!para || !panelType) return;
       const newIdx = titles.length;
-      const next = [...titles, `Tab ${newIdx + 1}`].join("|");
-      const oldNodeSize = node.nodeSize;
-      const insertAt = pos + oldNodeSize - 1;
+      revealPanelInDom(newIdx);
+      const newPanel = panelType.create(
+        { title: `Tab ${newIdx + 1}` },
+        para.create(),
+      );
+      const insertAt = pos + node.nodeSize - 1;
       try {
         const tr = editor.state.tr
-          .insert(insertAt, para.create())
-          .setNodeMarkup(pos, null, {
-            ...node.attrs,
-            tabs: next,
-            activeTab: newIdx,
-          });
-        const cursorPos = insertAt + 1;
+          .insert(insertAt, newPanel)
+          .setNodeMarkup(pos, null, { ...node.attrs, activeTab: newIdx });
+        // Cursor lands inside the new panel's first paragraph: insertAt
+        // is the position WHERE the panel was inserted (i.e., the end of
+        // the parent's content); +1 to enter the panel; +1 to enter the
+        // paragraph.
+        const cursorPos = insertAt + 2;
         tr.setSelection(TextSelection.create(tr.doc, cursorPos));
         editor.view.dispatch(tr);
         editor.commands.focus();
-      } catch {
-        updateAttributes({ tabs: next, activeTab: newIdx });
+      } catch (err) {
+        console.warn("[tabs] addTab failed:", err);
       }
     },
-    [editor, getPos, node, titles, updateAttributes],
+    [editor, getPos, node, revealPanelInDom, titles.length],
   );
 
+  // Remove a panel (and its content). When removing the LAST panel,
+  // the entire cortexTabsBlock is deleted from the doc so the user
+  // doesn't get stuck with an empty tabs shell. Otherwise, new
+  // active is clamped to the remaining range — removing the active
+  // tab shifts active to the previous one; removing a non-active
+  // tab before the active one decrements the active index by 1; a
+  // non-active tab to the right of active leaves active unchanged.
   const removeTab = useCallback(
     (idx: number) => (e: React.MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      if (titles.length <= 1) return;
-      const updated = titles.filter((_, i) => i !== idx);
-      const newActive =
-        active >= updated.length ? Math.max(0, updated.length - 1) : active;
-      updateAttributes({ tabs: updated.join("|"), activeTab: newActive });
+      if (typeof getPos !== "function") return;
+      const parentPos = getPos();
+      if (parentPos == null) return;
+
+      // Last tab → delete the entire block.
+      if (titles.length <= 1) {
+        try {
+          const tr = editor.state.tr.delete(
+            parentPos,
+            parentPos + node.nodeSize,
+          );
+          editor.view.dispatch(tr);
+          editor.commands.focus();
+        } catch (err) {
+          console.warn("[tabs] removeTab (last) failed:", err);
+        }
+        return;
+      }
+
+      const panelPos = getPanelPos(idx);
+      if (panelPos == null) return;
+      const panelNode = node.child(idx);
+      if (!panelNode || panelNode.type.name !== "cortexTabPanel") return;
+
+      const remaining = titles.length - 1;
+      let newActive: number;
+      if (idx === active) {
+        newActive = Math.min(active, remaining - 1);
+      } else if (idx < active) {
+        newActive = active - 1;
+      } else {
+        newActive = active;
+      }
+      newActive = Math.max(0, Math.min(newActive, remaining - 1));
+
+      // Same reasoning as setActive / addTab: write data-active-tab on
+      // the wrapper synchronously so the new active panel resolves to
+      // display:block before PM mutates the DOM and any subsequent
+      // selection set fires.
+      revealPanelInDom(newActive);
+
+      try {
+        const tr = editor.state.tr.delete(
+          panelPos,
+          panelPos + panelNode.nodeSize,
+        );
+        // Update activeTab on the parent in the SAME transaction so
+        // there's no transient state where active points at the now-
+        // deleted panel.
+        const mappedParentPos = tr.mapping.map(parentPos);
+        const parentAfter = tr.doc.nodeAt(mappedParentPos);
+        if (parentAfter && parentAfter.type.name === "cortexTabsBlock") {
+          tr.setNodeMarkup(mappedParentPos, null, {
+            ...parentAfter.attrs,
+            activeTab: newActive,
+          });
+        }
+        editor.view.dispatch(tr);
+      } catch (err) {
+        console.warn("[tabs] removeTab failed:", err);
+      }
     },
-    [active, titles, updateAttributes],
+    [
+      active,
+      editor,
+      getPanelPos,
+      getPos,
+      node,
+      revealPanelInDom,
+      titles.length,
+    ],
   );
 
   return (
     <NodeViewWrapper
+      ref={wrapperRef}
       className="cortex-tabs cortex-tabs-nodeview"
-      data-tabs={node.attrs.tabs}
       data-active-tab={active}
     >
       <div
@@ -269,13 +409,25 @@ export function CortexTabsNodeView(props: NodeViewProps) {
                   {t}
                 </span>
               )}
-              {titles.length > 1 && renamingIndex !== i ? (
+              {renamingIndex !== i ? (
                 <button
                   type="button"
                   className="cortex-tab-remove"
                   onClick={removeTab(i)}
-                  title={`Remove "${t}"`}
-                  aria-label={`Remove tab ${t}`}
+                  // When this is the LAST remaining tab, clicking ×
+                  // deletes the whole tabs block (see removeTab).
+                  // Surface that in the tooltip so the user isn't
+                  // surprised by the block disappearing.
+                  title={
+                    titles.length > 1
+                      ? `Remove "${t}"`
+                      : `Remove "${t}" and delete the tabs block`
+                  }
+                  aria-label={
+                    titles.length > 1
+                      ? `Remove tab ${t}`
+                      : `Remove tab ${t} and delete the tabs block`
+                  }
                 >
                   ×
                 </button>

@@ -100,6 +100,19 @@ body,
 .prose {
   line-height: 1.55;
   color: var(--text);
+  /* Cluster 21 v1.1 polish — zoom.
+   *
+   * v1 attempted `transform: scale(var(--cortex-editor-zoom))` here.
+   * That broke ProseMirror in subtle ways (transformed contenteditable
+   * elements interact poorly with PM's selection math + the
+   * MutationObserver, and on first render the page came up blank).
+   *
+   * v1.1 final: zoom via `font-size` instead. The :root inline style
+   * `--cortex-editor-zoom` is read here and multiplied against the
+   * 15px base. font-size scaling keeps the contenteditable surface
+   * intact (PM coordinate math, selection, drag-drop all work
+   * unchanged), while still visibly resizing all the user's prose. */
+  font-size: calc(15px * var(--cortex-editor-zoom, 1));
 }
 .prose h1,
 .prose h2,
@@ -1489,6 +1502,62 @@ body.cortex-mod-pressed .cortex-image:hover {
   outline: 1px solid var(--accent);
 }
 
+/* Cluster 21 v1.1 polish — rich-text replace box.
+ *
+ * Wraps a tiny TipTap editor instance so the user can apply bold /
+ * italic / underline / strike / inline-code / text-color to the
+ * replacement text. Looks like a regular input from the outside; the
+ * EditorContent inside paints over the textbox and the formatting
+ * mini-strip floats next to it. */
+.cortex-find-replace-rich-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.cortex-find-replace-rich-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 0.78rem;
+  color: var(--text);
+  min-width: 160px;
+  outline: none;
+  /* Single-line look. Multi-paragraph replacements aren't useful in
+   * the find/replace context — the editor's own paragraph collapses
+   * on Enter and we strip the wrapping <p> on serialize. */
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.cortex-find-replace-rich-input p {
+  /* Remove the default <p> margin TipTap injects so the inner content
+   * sits flush like an <input>'s value. */
+  margin: 0;
+  padding: 0;
+}
+.cortex-find-replace-rich-input:focus-within {
+  border-color: var(--accent);
+}
+/* Placeholder for the empty contenteditable replace box. We use
+ * :empty + ::before so the placeholder text never enters the DOM
+ * (and never bleeds into innerHTML on read). */
+.cortex-find-replace-rich-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.cortex-find-replace-rich-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cortex-find-replace-rich-tools .cortex-tb-btn {
+  padding: 1px 6px;
+  min-width: 22px;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
 /* Outline panel — sidebar showing headings. */
 .cortex-outline-panel {
   position: absolute;
@@ -1561,9 +1630,19 @@ body.cortex-marker-active * {
   /* Inherit color etc. by default; effect classes override. */
 }
 
-/* Glow + shadow */
+/* Glow + shadow.
+ *
+ * Cluster 21 v1.1 polish — fix gradient + glow stacking. Glow uses
+ * text-shadow; under a gradient effect the text's `color` is set to
+ * `transparent` (because gradients use background-clip:text), so a
+ * fallback of `currentColor` makes the glow's text-shadow itself
+ * transparent — the user sees the gradient fine but the glow is
+ * invisible. Falling back to var(--text) (the theme's text color)
+ * keeps the glow visible regardless of whether the same span also
+ * carries a gradient class. The user can still override per-span
+ * via the picker's color, which sets --tx-effect-color inline. */
 .tx-glow-soft {
-  text-shadow: 0 0 6px var(--tx-effect-color, currentColor);
+  text-shadow: 0 0 6px var(--tx-effect-color, var(--text));
 }
 .tx-glow-neon {
   text-shadow:
@@ -1574,8 +1653,8 @@ body.cortex-marker-active * {
 }
 .tx-halo {
   text-shadow:
-    0 0 14px var(--tx-effect-color, currentColor),
-    0 0 28px var(--tx-effect-color, currentColor);
+    0 0 14px var(--tx-effect-color, var(--text)),
+    0 0 28px var(--tx-effect-color, var(--text));
 }
 .tx-shadow-drop {
   text-shadow: 1px 2px 3px rgba(0, 0, 0, 0.45);
@@ -1608,7 +1687,12 @@ body.cortex-marker-active * {
     5px 5px 4px rgba(0, 0, 0, 0.35);
 }
 .tx-outline {
-  -webkit-text-stroke: 1.2px var(--tx-effect-color, currentColor);
+  /* Same v1.1 polish — outline strokes with a fallback that's not
+   * `currentColor`. The class itself sets `color: transparent`, and a
+   * gradient sibling does the same; either way `currentColor` is
+   * transparent and the stroke vanishes. var(--text) keeps the
+   * outline visible by default. */
+  -webkit-text-stroke: 1.2px var(--tx-effect-color, var(--text));
   color: transparent;
 }
 
@@ -2496,26 +2580,39 @@ body.cortex-theme-dark .hljs-tag {
   color: var(--text);
 }
 
-/* Active panel selection — driven PURELY from the wrapper's
- * data-active-tab attribute. Same rule set covers both the editor
- * NodeView (which sets data-active-tab via React props) and the
- * read-mode HTML (where renderHTML emits data-active-tab on the
- * outer div). The earlier "JS toggles a class on the active child"
- * approach mutated PM's owned DOM and tripped its MutationObserver,
- * which kicked the cursor out of the tab on the first keystroke. */
-.cortex-tabs > .cortex-tab-body > * {
+/* Active panel selection — driven from the wrapper's data-active-tab
+ * attribute.
+ *
+ * v1.1.1 fix: the @tiptap/react ReactNodeViewRenderer inserts an
+ * EXTRA wrapper <div data-node-view-content-react> between our
+ * NodeViewContent (.cortex-tab-body) and the real child panels
+ * (see ReactNodeViewRenderer.tsx in @tiptap/react, line ~95). The
+ * previous selector `.cortex-tab-body > *:nth-child(N)` matched
+ * React's intermediate wrapper, not the panels: data-active-tab="0"
+ * lit up the wrapper, which then revealed ALL panels inside it
+ * stacked vertically — presenting as "all tabs share the same
+ * characters" — and any other data-active-tab value hid the wrapper
+ * entirely, dropping the panels' cursor into a display:none
+ * ancestor where the browser refused contenteditable focus and
+ * snapped selection to the line above the tabs block.
+ *
+ * Targeting panels by their own class with `:nth-child(N)` walks
+ * down through whatever wrappers React adds and matches based on
+ * the panel's position among its true siblings (which are all
+ * panels, given the schema's `cortexTabPanel+` content rule). */
+.cortex-tabs .cortex-tab-panel {
   display: none;
 }
-.cortex-tabs[data-active-tab="0"] > .cortex-tab-body > *:nth-child(1),
-.cortex-tabs[data-active-tab="1"] > .cortex-tab-body > *:nth-child(2),
-.cortex-tabs[data-active-tab="2"] > .cortex-tab-body > *:nth-child(3),
-.cortex-tabs[data-active-tab="3"] > .cortex-tab-body > *:nth-child(4),
-.cortex-tabs[data-active-tab="4"] > .cortex-tab-body > *:nth-child(5),
-.cortex-tabs[data-active-tab="5"] > .cortex-tab-body > *:nth-child(6),
-.cortex-tabs[data-active-tab="6"] > .cortex-tab-body > *:nth-child(7),
-.cortex-tabs[data-active-tab="7"] > .cortex-tab-body > *:nth-child(8),
-.cortex-tabs[data-active-tab="8"] > .cortex-tab-body > *:nth-child(9),
-.cortex-tabs[data-active-tab="9"] > .cortex-tab-body > *:nth-child(10) {
+.cortex-tabs[data-active-tab="0"] .cortex-tab-panel:nth-child(1),
+.cortex-tabs[data-active-tab="1"] .cortex-tab-panel:nth-child(2),
+.cortex-tabs[data-active-tab="2"] .cortex-tab-panel:nth-child(3),
+.cortex-tabs[data-active-tab="3"] .cortex-tab-panel:nth-child(4),
+.cortex-tabs[data-active-tab="4"] .cortex-tab-panel:nth-child(5),
+.cortex-tabs[data-active-tab="5"] .cortex-tab-panel:nth-child(6),
+.cortex-tabs[data-active-tab="6"] .cortex-tab-panel:nth-child(7),
+.cortex-tabs[data-active-tab="7"] .cortex-tab-panel:nth-child(8),
+.cortex-tabs[data-active-tab="8"] .cortex-tab-panel:nth-child(9),
+.cortex-tabs[data-active-tab="9"] .cortex-tab-panel:nth-child(10) {
   display: block;
 }
 

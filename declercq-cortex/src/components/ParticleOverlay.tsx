@@ -549,7 +549,22 @@ export function ParticleOverlay({
   }, []);
 
   const ensureHost = useCallback((el: HTMLElement) => {
-    if (hostsRef.current.has(el)) return;
+    // Cluster 21 v1.1 polish — verify the cached canvas is still a
+    // live child of the host before short-circuiting. PM's
+    // MutationObserver-driven re-render of inline marks can rebuild
+    // the span's children on each doc change and wipe our appended
+    // canvas; the hostsRef map still holds the stale state, so the
+    // old `if (hostsRef.current.has(el)) return` early-exit prevented
+    // us from remounting the canvas — and particles silently stopped
+    // appearing after the first edit. Now we treat a wiped canvas as
+    // a missing host and fall through to the mount path.
+    const existing = hostsRef.current.get(el);
+    if (existing && existing.canvas.isConnected && el.contains(existing.canvas)) {
+      return;
+    }
+    if (existing) {
+      hostsRef.current.delete(el);
+    }
     const type = el.getAttribute("data-particle") as ParticleType | null;
     if (!type) return;
     const color = el.getAttribute("data-particle-color");
@@ -560,6 +575,11 @@ export function ParticleOverlay({
     canvas.style.pointerEvents = "none";
     canvas.style.width = "100%";
     canvas.style.height = "100%";
+    canvas.style.display = "block";
+    // Explicit z-index keeps the canvas above the marked text even
+    // when other absolutely-positioned siblings join the same
+    // stacking context.
+    canvas.style.zIndex = "1";
     canvas.className = "cortex-particle-canvas";
     el.appendChild(canvas);
     hostsRef.current.set(el, {

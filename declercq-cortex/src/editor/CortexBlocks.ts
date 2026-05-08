@@ -17,7 +17,9 @@
 //   CortexDecoSeparator — divider with a glyph
 //   CortexPageBreak    — page-break HR
 //   CortexMathBlock    — stylized math block (KaTeX in v1.1)
-//   CortexTabsBlock    — minimal tab-set (v1.0: stacked panels with titles)
+//   CortexTabsBlock    — tab-set; v1.1 wraps each tab's content in a
+//                         CortexTabPanel child so a tab can hold any block+.
+//   CortexTabPanel     — one tab's worth of block content (v1.1).
 //
 // Marks:
 //   CortexFootnoteRef  — `<sup class="cortex-fn" data-id>…</sup>`
@@ -289,26 +291,75 @@ export const CortexMathBlock = Node.create({
   },
 });
 
-// ---- Tabs block (v1.0: simple stacked) -----------------------------------
+// ---- Tabs block (v1.1: panel-per-tab) ------------------------------------
+//
+// v1.0 had a "1 child block per tab title" model where the tabs node's
+// content was `block+` and the title strip was rendered in renderHTML
+// alongside a `data-tabs="A|B"` pipe-list. The fundamental problem:
+// pressing Enter inside tab 1 made ProseMirror split into two paragraphs,
+// and the NodeView's children-count-sync would then DELETE the second
+// paragraph (mistaking it for a stray child without a title). Tabs
+// could never hold more than one paragraph.
+//
+// v1.1 replaces that with a real two-level schema:
+//   cortexTabsBlock   content: cortexTabPanel+, attr: activeTab
+//   cortexTabPanel    content: block+,           attr: title
+// Each panel owns its own title and can hold any block content. Add /
+// remove a tab = insert / delete a cortexTabPanel. Rename = setNodeMarkup
+// on the specific panel. Switching tabs only updates the parent's
+// activeTab attr; the CSS rule
+//   .cortex-tabs[data-active-tab="N"] > .cortex-tab-body > *:nth-child(N+1)
+// shows only the active panel.
+//
+// Old v1.0 docs that have `data-tabs="A|B"` with bare `<p>` children
+// will fail schema validation when re-opened (cortexTabsBlock now
+// requires cortexTabPanel children). That's acceptable: cluster 21
+// v1.0 just shipped, only test tabs exist; the user re-inserts.
+
+export const CortexTabPanel = Node.create({
+  name: "cortexTabPanel",
+  // No `group` — this node only ever appears inside cortexTabsBlock,
+  // which references it by name in its `content` constraint. Keeping
+  // it out of the global `block` group means the user can't accidentally
+  // wrap something in a tab panel through the structural-block menu.
+  content: "block+",
+  defining: true,
+  // Selection / paste / drag won't accidentally cross a panel boundary
+  // — typing in tab 1 stays in tab 1, even if tab 2 is rendered
+  // adjacent in the DOM (it's just hidden via CSS).
+  isolating: true,
+  addAttributes() {
+    return {
+      title: {
+        default: "Tab",
+        parseHTML: (el) => el.getAttribute("data-title") || "Tab",
+        renderHTML: (a: Record<string, unknown>) => ({
+          "data-title": String(a.title ?? "Tab"),
+        }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "div.cortex-tab-panel" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return [
+      "div",
+      mergeAttributes(HTMLAttributes, { class: "cortex-tab-panel" }),
+      0,
+    ];
+  },
+});
 
 export const CortexTabsBlock = Node.create({
   name: "cortexTabsBlock",
   group: "block",
-  content: "block+",
+  content: "cortexTabPanel+",
   defining: true,
   addAttributes() {
     return {
-      tabs: {
-        default: "Tab 1|Tab 2",
-        parseHTML: (el) => el.getAttribute("data-tabs") || "Tab 1|Tab 2",
-        renderHTML: (a: Record<string, unknown>) => ({
-          "data-tabs": String(a.tabs ?? "Tab 1|Tab 2"),
-        }),
-      },
-      // Cluster 21 v1.1 — currently visible tab index, persisted
-      // through markdown round-trip via data-active-tab so a user
-      // who switches to tab 2 and saves the file reopens with
-      // tab 2 showing rather than always defaulting to the first.
+      // Currently-visible tab index, persisted through markdown round-
+      // trip via data-active-tab so reopening lands on the same tab.
       activeTab: {
         default: 0,
         parseHTML: (el) => Number(el.getAttribute("data-active-tab") || 0),
@@ -321,32 +372,15 @@ export const CortexTabsBlock = Node.create({
   parseHTML() {
     return [{ tag: "div.cortex-tabs" }];
   },
-  renderHTML({ HTMLAttributes, node }) {
-    const titles = String(node.attrs.tabs ?? "")
-      .split("|")
-      .map((t) => t.trim())
-      .filter(Boolean);
-    const active = Math.min(
-      Math.max(0, Number(node.attrs.activeTab) || 0),
-      Math.max(0, titles.length - 1),
-    );
-    const titleEls: any[] = [
-      "div",
-      { class: "cortex-tabs-titles" },
-      ...titles.map((t, i) => [
-        "span",
-        { class: "cortex-tab-title" + (i === active ? " active" : "") },
-        t,
-      ]),
-    ];
+  // The on-disk format is just <div class="cortex-tabs" data-active-tab="N">
+  // wrapping the panel children — minimal because the interactive title
+  // strip is rendered by the NodeView at runtime, not stored in the
+  // markdown body.
+  renderHTML({ HTMLAttributes }) {
     return [
       "div",
-      mergeAttributes(HTMLAttributes, {
-        class: "cortex-tabs",
-        style: `--cortex-tab-active: ${active + 1}`,
-      }),
-      titleEls,
-      ["div", { class: "cortex-tab-body" }, 0],
+      mergeAttributes(HTMLAttributes, { class: "cortex-tabs" }),
+      0,
     ];
   },
 });
