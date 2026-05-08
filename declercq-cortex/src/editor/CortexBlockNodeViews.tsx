@@ -585,9 +585,7 @@ export function CortexMathBlockNodeView(props: NodeViewProps) {
   // v1.2.3 — right-click context menu state. Stores the viewport
   // coordinates of the click so we can render the menu at that
   // position. `null` means menu closed.
-  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(
-    null,
-  );
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     const el = renderRef.current;
@@ -679,18 +677,15 @@ export function CortexMathBlockNodeView(props: NodeViewProps) {
     [dispatchEdit],
   );
 
-  const handleContextMenu = useCallback(
-    (e: React.MouseEvent) => {
-      // Replace the native browser context menu with our own. The
-      // user gets Edit + Delete affordances tailored to math blocks
-      // instead of the generic Copy / Paste options that aren't
-      // useful for an atom node.
-      e.preventDefault();
-      e.stopPropagation();
-      setMenuPos({ x: e.clientX, y: e.clientY });
-    },
-    [],
-  );
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    // Replace the native browser context menu with our own. The
+    // user gets Edit + Delete affordances tailored to math blocks
+    // instead of the generic Copy / Paste options that aren't
+    // useful for an atom node.
+    e.preventDefault();
+    e.stopPropagation();
+    setMenuPos({ x: e.clientX, y: e.clientY });
+  }, []);
 
   const closeMenu = useCallback(() => setMenuPos(null), []);
 
@@ -798,9 +793,7 @@ function MathBlockContextMenu({
         onMouseEnter={(e) =>
           (e.currentTarget.style.background = "var(--bg-elev)")
         }
-        onMouseLeave={(e) =>
-          (e.currentTarget.style.background = "transparent")
-        }
+        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
         ✎ Edit
       </button>
@@ -811,9 +804,7 @@ function MathBlockContextMenu({
         onMouseEnter={(e) =>
           (e.currentTarget.style.background = "var(--bg-elev)")
         }
-        onMouseLeave={(e) =>
-          (e.currentTarget.style.background = "transparent")
-        }
+        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
         × Delete
       </button>

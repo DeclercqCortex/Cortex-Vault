@@ -271,9 +271,8 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
         <div style={styles.headerRow}>
           <h2 style={styles.heading}>Auto-replace rules</h2>
           <span style={styles.headerCount}>
-            {builtinByCategory.reduce((n, [, rs]) => n + rs.length, 0)}{" "}
-            built-in active · {userRules.length} custom · {disabled.size}{" "}
-            disabled
+            {builtinByCategory.reduce((n, [, rs]) => n + rs.length, 0)} built-in
+            active · {userRules.length} custom · {disabled.size} disabled
           </span>
         </div>
         <p style={styles.hint}>
@@ -511,10 +510,7 @@ function RuleEditRow({
  *  modal doesn't display a misleading blank cell for a rule whose
  *  trigger is just a space. */
 function visualize(s: string): string {
-  return s
-    .replace(/ /g, "␣")
-    .replace(/\t/g, "→")
-    .replace(/\n/g, "↵");
+  return s.replace(/ /g, "␣").replace(/\t/g, "→").replace(/\n/g, "↵");
 }
 
 const styles: Record<string, React.CSSProperties> = {

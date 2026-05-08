@@ -559,7 +559,11 @@ export function ParticleOverlay({
     // appearing after the first edit. Now we treat a wiped canvas as
     // a missing host and fall through to the mount path.
     const existing = hostsRef.current.get(el);
-    if (existing && existing.canvas.isConnected && el.contains(existing.canvas)) {
+    if (
+      existing &&
+      existing.canvas.isConnected &&
+      el.contains(existing.canvas)
+    ) {
       return;
     }
     if (existing) {

@@ -2,7 +2,6 @@ import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
-import Strike from "@tiptap/extension-strike";
 import Underline from "@tiptap/extension-underline";
 import Paragraph from "@tiptap/extension-paragraph";
 import Heading from "@tiptap/extension-heading";
@@ -80,6 +79,12 @@ import { CortexParticleHost } from "../editor/CortexParticleHost";
 import { CortexCodeBlock } from "../editor/CortexCodeBlock";
 // Cluster 21 v1.1 polish — auto-replace pipeline (--> → →, <= → ≤, etc.).
 import { CortexAutoReplace } from "../editor/CortexAutoReplace";
+// Cluster 23 v1.0 — strike with editable revision bubble (Ctrl+click).
+import {
+  CortexStrikeRevision,
+  buildStrikeRevisionPlugin,
+} from "../editor/CortexStrikeRevision";
+import { RevisionBubbleOverlay } from "./RevisionBubbleOverlay";
 import {
   CortexCollapsibleNodeView,
   CortexTabsNodeView,
@@ -265,32 +270,15 @@ const HtmlTable = Table.extend({
 });
 
 /**
- * Strike that serializes as `<s>…</s>` HTML rather than tiptap-markdown's
- * default `~~…~~`. Reason: when struck text overlaps a colour mark
- * (`<mark class="mark-X">`), the `~~` form lands adjacent to HTML tags
- * and markdown-it can mis-parse on reload (you'd see the literal
- * `<~~mark class="mark-yellow">…` text in the editor instead of a
- * highlighted, struck span). Pure-HTML strike composes with our marks
- * losslessly.
- *
- * The `markdown.serialize.{open,close}` storage hook is tiptap-markdown's
- * extension point for overriding mark serialisation.
+ * Cluster 23 v1.0 — Strike now lives in src/editor/CortexStrikeRevision.ts
+ * (CortexStrikeRevision = Strike.extend with a `revision` attr,
+ * round-tripping via `data-revision` on the `<s>` tag, plus a markdown
+ * serializer that emits the attr in the open tag when non-empty).
+ * Pre-Cluster-23 the same extension lived inline here as `HtmlStrike`.
+ * The on-disk format for plain strikes (no revision) is unchanged
+ * exactly — `<s>…</s>` — so files written before Cluster 23 keep
+ * parsing without migration. The revision attr is purely additive.
  */
-const HtmlStrike = Strike.extend({
-  addStorage() {
-    return {
-      ...this.parent?.(),
-      markdown: {
-        serialize: {
-          open: "<s>",
-          close: "</s>",
-          mixable: true,
-          expelEnclosingWhitespace: true,
-        },
-      },
-    };
-  },
-});
 
 /**
  * Cluster 8 v2.1.5: Underline support, Ctrl+U.
@@ -546,6 +534,11 @@ export function Editor({
   notePath,
   onError,
 }: EditorProps) {
+  // Cluster 23 v1.0 — ref to the prose wrapper. Used by
+  // RevisionBubbleOverlay as the (0,0) origin for bubble absolute
+  // positioning, and by the bubble's onScroll listener to re-render
+  // when the wrapper scrolls.
+  const proseWrapperRef = useRef<HTMLDivElement | null>(null);
   // Right-click context-menu state. `inTable`, `canMerge`, `canSplit`
   // are computed from the editor's selection at click time and frozen
   // for the menu's lifetime — TipTap's `editor.can().X()` predicates
@@ -570,8 +563,11 @@ export function Editor({
   } | null>(null);
   const editor = useEditor({
     extensions: [
-      // - strike: replaced with HtmlStrike below so strike serializes
-      //   as <s>…</s> rather than ~~…~~ (see HtmlStrike doc-comment).
+      // - strike: replaced with CortexStrikeRevision (Cluster 23 v1.0)
+      //   below so strike serializes as <s>…</s> rather than ~~…~~,
+      //   and carries an editable `revision` attr surfaced via a
+      //   Ctrl+click bubble. Plain strike (no revision) round-trips
+      //   identically to the pre-Cluster-23 HtmlStrike.
       // - link: StarterKit v3.22 ships its own Link, which conflicts
       //   with our explicit Link.configure(…) below. Omit StarterKit's
       //   so our configured Link is the only one registered.
@@ -595,7 +591,17 @@ export function Editor({
       // CortexAutoReplace.ts for the rule list (arrows, comparisons,
       // typography, Greek letters, math operators).
       CortexAutoReplace,
-      HtmlStrike,
+      // Cluster 23 v1.0 — strike with editable revision bubble. The
+      // mark itself adds a `revision` attr; the plugin tracks which
+      // ranges currently have an OPEN bubble (state is ephemeral —
+      // bubbles close on reload, only the revision text persists).
+      // Both registered here as a unit; RevisionBubbleOverlay reads
+      // the plugin state via strikeRevisionKey to render bubbles.
+      CortexStrikeRevision.extend({
+        addProseMirrorPlugins() {
+          return [buildStrikeRevisionPlugin()];
+        },
+      }),
       HtmlUnderline,
       AlignmentAwareParagraph,
       AlignmentAwareHeading,
@@ -1560,17 +1566,31 @@ export function Editor({
         // light mode. Our index.css drives prose colour off CSS variables
         // (`var(--text)`) which already follow the active theme.
         className="prose max-w-none"
+        ref={proseWrapperRef}
         // Cluster 21 v1.1 polish — zoom via font-size on the prose
         // wrapper (font-size scaling keeps PM's contenteditable math
         // intact; transform: scale broke the editor on first render).
         // The CSS variable is set on documentElement by the toolbar's
         // useEffect; default 1 = 15px.
-        style={{ fontSize: "calc(15px * var(--cortex-editor-zoom, 1))" }}
+        // Cluster 23 v1.0 — `position: relative` so the absolutely-
+        // positioned RevisionBubbleOverlay's bubbles anchor to this
+        // wrapper rather than the document body. The .ProseMirror
+        // child also has `position: relative` for image free-positioning
+        // (see CortexImage.css); both can coexist because they nest.
+        style={{
+          fontSize: "calc(15px * var(--cortex-editor-zoom, 1))",
+          position: "relative",
+        }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
         <EditorContent editor={editor} />
+        {/* Cluster 23 v1.0 — revision bubbles for Ctrl-clicked strike
+            marks. Lives inside the prose wrapper so it scrolls with
+            content; reads strikeRevisionKey plugin state to know which
+            bubbles are open. */}
+        <RevisionBubbleOverlay editor={editor} rootRef={proseWrapperRef} />
       </div>
       {ctxMenu && (
         <TableContextMenu

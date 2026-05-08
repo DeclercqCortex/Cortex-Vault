@@ -239,7 +239,7 @@ const UNICODE_TO_LATEX: Record<string, string> = {
   "∂": "\\partial",
   "∇": "\\nabla",
   "√": "\\surd",
-  "ℏ": "\\hbar",
+  ℏ: "\\hbar",
 };
 
 // ---- Palette content -----------------------------------------------------
@@ -520,8 +520,7 @@ const COMMON_EQUATIONS: PaletteEntry[] = [
     kind: "preset",
     display: "Schrödinger",
     preview: "iℏ ∂ψ/∂t = Ĥψ",
-    latex:
-      "i\\hbar \\frac{\\partial}{\\partial t} \\Psi = \\hat{H} \\Psi",
+    latex: "i\\hbar \\frac{\\partial}{\\partial t} \\Psi = \\hat{H} \\Psi",
   },
   {
     kind: "preset",
@@ -533,8 +532,7 @@ const COMMON_EQUATIONS: PaletteEntry[] = [
     kind: "preset",
     display: "Std dev",
     preview: "σ = √((1/n) Σ (xᵢ − x̄)²)",
-    latex:
-      "\\sigma = \\sqrt{\\frac{1}{n} \\sum_{i=1}^{n} (x_i - \\bar{x})^2}",
+    latex: "\\sigma = \\sqrt{\\frac{1}{n} \\sum_{i=1}^{n} (x_i - \\bar{x})^2}",
   },
 ];
 
@@ -546,7 +544,11 @@ const PALETTE: PaletteCategory[] = [
   { name: "Sets & Logic", cols: 10, entries: SET_LOGIC },
   { name: "Arrows", cols: 10, entries: ARROWS },
   { name: "Big operators", cols: 10, entries: BIG_OPS },
-  { name: "With bounds (∫, Σ, Riemann sum, lim)", cols: 4, entries: BIG_OPS_BOUNDS },
+  {
+    name: "With bounds (∫, Σ, Riemann sum, lim)",
+    cols: 4,
+    entries: BIG_OPS_BOUNDS,
+  },
   { name: "Templates", cols: 5, entries: TEMPLATES },
   { name: "Common equations", cols: 4, entries: COMMON_EQUATIONS },
 ];
@@ -594,9 +596,8 @@ export function MathEquationModal({
       const html = templateHtml(entry.template);
       const inserted = execInsertHtml(html);
       if (inserted) {
-        const firstSlot = inserted.querySelector<HTMLElement>(
-          ".cortex-math-slot",
-        );
+        const firstSlot =
+          inserted.querySelector<HTMLElement>(".cortex-math-slot");
         if (firstSlot) placeCursorAtEnd(firstSlot);
       }
     } else if (entry.kind === "bigop") {
@@ -1066,8 +1067,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "4px 6px",
     fontSize: "0.92rem",
     color: "var(--text)",
-    fontFamily:
-      "'Cambria Math', 'STIX Two Math', 'Latin Modern Math', serif",
+    fontFamily: "'Cambria Math', 'STIX Two Math', 'Latin Modern Math', serif",
     minHeight: "26px",
     overflow: "hidden",
     whiteSpace: "nowrap",

@@ -1440,19 +1440,18 @@ export function EditorToolbar({
             const to = sel.to;
             const hasSelection = from !== to;
             const raw = window.prompt(
-              hasSelection
-                ? "URL for the selected text:"
-                : "URL:",
+              hasSelection ? "URL for the selected text:" : "URL:",
             );
             if (!raw) return;
             const trimmed = raw.trim();
             if (!trimmed) return;
             // Light URL hygiene: prepend https:// for bare domains
             // (anything without a scheme that isn't a relative path).
-            const url =
-              /^(https?:|mailto:|tel:|file:|\/|\.\.?\/|#)/i.test(trimmed)
-                ? trimmed
-                : `https://${trimmed}`;
+            const url = /^(https?:|mailto:|tel:|file:|\/|\.\.?\/|#)/i.test(
+              trimmed,
+            )
+              ? trimmed
+              : `https://${trimmed}`;
             if (hasSelection) {
               editor
                 .chain()
@@ -1725,9 +1724,7 @@ export function EditorToolbar({
                       content: [
                         {
                           type: "paragraph",
-                          content: [
-                            { type: "text", text: "Tab 1 content" },
-                          ],
+                          content: [{ type: "text", text: "Tab 1 content" }],
                         },
                       ],
                     },
@@ -1737,9 +1734,7 @@ export function EditorToolbar({
                       content: [
                         {
                           type: "paragraph",
-                          content: [
-                            { type: "text", text: "Tab 2 content" },
-                          ],
+                          content: [{ type: "text", text: "Tab 2 content" }],
                         },
                       ],
                     },

@@ -7053,3 +7053,373 @@ stays plain text (search is on textual content, not formatting).
 `cluster-21-v1.1-complete` (re-tagged after the rework + polish pass
 — same tag since v1.1 was always going to be "tabs that work +
 polish").
+
+## Phase 3 — Cluster 23 v1.0 — Revision strikethrough
+
+User-driven session immediately after Cluster 22 v1.0. Goal: extend
+strikethrough so a struck phrase can carry an editable "revision" —
+the replacement text the user would have written instead of the
+struck phrase. Surfaced via a single-line, rectangular, contenteditable
+bubble that floats **directly above the strike, centered horizontally
+over the struck text** when the user Ctrl+clicks it — the lab-notebook
+gesture of crossing out, signing, and writing the revised idea above
+the cross-out.
+
+(Initial cut anchored top-right of the strike's last char — wrong
+gesture; the v1.0.1 pass below corrects it. The same pass also fixes
+a bug where reopening a bubble on a strike that already had a saved
+revision rendered the bubble visibly empty, even though the
+`data-revision` attr was on disk.)
+
+### Decisions locked before implementation
+
+1. **Mark scope: every strikethrough can carry a revision.** No new
+   "revision" mark — the existing strike mark (Cluster 2's resolved-
+   item marker) gains a `revision: string | null` attr. The Reviews
+   pipeline reads strike-presence and ignores the new attr; revision
+   composes with resolve cleanly.
+2. **Bubble open/closed is ephemeral.** Only the revision text
+   persists. Avoids saving redundant UI state in the markdown.
+3. **Empty Ctrl+click opens an empty editable bubble.** Plain strike
+   on first reveal → empty input ready for typing. If left empty
+   on close, the strike stays plain (`<s>…</s>` with no `data-revision`
+   attr).
+4. **No new toolbar button.** Existing Strike / Ctrl+Shift+X creates
+   plain strike; Ctrl+click adds revision. One gesture chain.
+5. **Single-line bubble.** `height: 1.5em`, no wrap, horizontal scroll
+   for long replacements (per spec — "rectangular bubble that is one
+   line height-wise").
+
+### What ships
+
+- **Mark + plugin in one file** — `src/editor/CortexStrikeRevision.ts`
+  bundles both. Mirrors the `imageMultiSelect.ts` shape (Cluster 19
+  v1.2): the extension's `addProseMirrorPlugins` returns the plugin,
+  so registration is one line in Editor.tsx.
+
+- **Mark side.** `CortexStrikeRevision = Strike.extend({…})`. The
+  `revision` attr's `parseHTML` reads `data-revision` off any `<s>` /
+  `<strike>` / `<del>` element; null when missing. `renderHTML` emits
+  `data-revision="…"` only when non-empty so plain strikes' on-disk
+  shape is unchanged. The markdown serializer is a function-based
+  open tag: `<s data-revision="…escaped…">` when present, `<s>`
+  otherwise. HTML-escapes `&`, `<`, `>`, `"` (the four characters
+  with attribute-value meaning). Round-trips through tiptap-markdown's
+  `html: true` parser on reload.
+
+- **Plugin state.** `Array<{id, from, to}>`. `id` is a fresh
+  `rb-<base36ts>-<counter>` per open — stable React key, doesn't
+  change when the user types in the bubble. `from`/`to` are the
+  contiguous strike run's bounds.
+
+- **Meta kinds.** `toggle` (with from/to) / `close` (with id) /
+  `closeAll` / `ignore`. The `ignore` meta is what `setStrikeRevision`
+  tags onto its `removeMark + addMark` transaction so the apply-time
+  prune-pass doesn't fire while the strike's own attrs are being
+  modified — without it, the bubble's own keystrokes would prune the
+  bubble out of the open-set.
+
+- **Click handling.** `props.handleClick(view, pos, event)` — if
+  Ctrl/Cmd held AND `findStrikeRangeAtPos(state, pos)` returns a
+  range, dispatch `toggle` and consume the click. Otherwise return
+  false (lets wikilink-follow downstream still work for non-strike
+  Ctrl+clicks). `findStrikeRangeAtPos` walks both directions from
+  the click position while `$pos.marks()` contains the strike mark;
+  returns the contiguous strike run or null.
+
+- **Position handling on doc changes.** On `tr.docChanged` with no
+  toggle meta, every stored range maps through `tr.mapping`. Ranges
+  that collapse (`from >= to`) or no longer carry a strike on
+  `state.doc.resolve(from).marks()` are dropped. The "still has
+  strike" check uses `$pos.marks()` over `rangeHasMark` so a
+  zero-length-mapped position still resolves correctly.
+
+- **Esc handler.** `props.handleKeyDown` — Esc dispatches `closeAll`
+  if any bubble is open, returns true. Otherwise false (so shape
+  editor / modals downstream of us still consume Esc when no
+  bubble is open).
+
+- **Overlay side.** `src/components/RevisionBubbleOverlay.tsx`. Mounts
+  inside the `.prose` wrapper (sibling of `<EditorContent>`).
+  Subscribes to `editor.on("transaction")` to re-render in lockstep
+  with PM state changes; subscribes to wrapper `scroll` + window
+  `scroll`/`resize` so positions track scroll. Each render reads
+  `getOpenBubbles(view.state)`, walks the list, computes the strike's
+  bounding box from `view.coordsAtPos(b.from)` and
+  `view.coordsAtPos(b.to)`, anchors at the strike's TOP edge +
+  HORIZONTAL MIDPOINT (`top = startCoords.top - rootRect.top`,
+  `left = (startCoords.left + endCoords.right) / 2 - rootRect.left`).
+  The bubble's own inline `transform: translate(-50%, calc(-100% -
+  4px))` then pulls it UP by its own height plus a 4-px gap and
+  centers it horizontally — net effect: bubble's bottom edge sits
+  4 px above the strike's top, centered on it. Standard CSS-tooltip
+  pattern.
+
+- **Bubble lifecycle.** Mount → seed `el.textContent = bubble.revision`
+  (v1.0.1 fix; without this, reopening on a saved revision renders
+  the bubble empty because the post-focus "external sync" effect
+  early-returns when `document.activeElement === el`) → focus the
+  div (`{ preventScroll: true }`) → place caret at end so the user
+  appends rather than overwrites. Input → `setStrikeRevision(state,
+  from, to, text)` which dispatches `removeMark + addMark` tagged
+  `{kind: "ignore"}`. Esc / Enter → `{kind: "close", id}` + return
+  focus to editor. Outside-update sync (`useEffect`) re-mounts
+  content from PM only when the bubble isn't focused — scaffolded
+  for v1.1+ external producers; no internal producers exist.
+
+- **Event isolation.** `onKeyDown` calls `e.stopPropagation()` on
+  every keystroke so editor shortcuts (`Ctrl+S` save, `Ctrl+1-7`
+  color marks, `Ctrl+Shift+X` strike) don't fire while the bubble
+  has focus. Without this stop, typing into the bubble could
+  silently invoke the editor's command handlers.
+
+### Architectural choices worth flagging
+
+- **PM plugin state, not React state.** Open ranges live in plugin
+  state because (a) we need positions to map through transactions
+  via `tr.mapping`, and (b) the bubble's underlying transactions
+  (the `setStrikeRevision` `removeMark + addMark` flow) shouldn't
+  cause the bubble to remount — plugin state survives transactions
+  cleanly. React state would have required us to manually map
+  positions in the React layer.
+
+- **Anchored on the END of the strike, not the start.** The user's
+  spec said "slightly offset top right." `coordsAtPos(b.to)` gives
+  the right edge of the last character of the strike (or last
+  visual line if the strike wraps); `(right + 8, top - 4)` lands
+  the bubble at the visually correct spot for both single-line and
+  wrapped strikes. We considered anchoring on a midpoint or
+  centroid; rejected because both can land the bubble in the
+  middle of struck text rather than next to it.
+
+- **Bubble id is a fresh string per open.** Tempting to use
+  `${from}-${to}` as the id, but that changes every time the
+  user types into the strike (positions shift), which would
+  remount the bubble and lose focus. A stable per-open id keeps
+  React mounting stable; the `from`/`to` ride along as separate
+  fields and update on every transaction.
+
+- **HTML-escape just the four attribute characters.** `data-revision`
+  is an HTML attribute value; the four characters with structural
+  meaning are `&`, `<`, `>`, `"`. Newlines / quotes / non-ASCII
+  text round-trip without escaping (markdown-it's HTML parser
+  preserves them). We're not URL-encoding (the value isn't a URL)
+  and we're not JSON-encoding (the value isn't JSON).
+
+- **Bubble is `contentEditable`, not `<input>`.** Two reasons:
+  (a) arrow-key navigation inside contenteditable is more
+  predictable in the prose-wrapper context; (b) future "rich
+  text inside the revision" path (italic, link, etc.) only needs
+  to teach the bubble to accept marks, not swap out the element
+  type.
+
+- **Reviews-pipeline integration deferred.** The Rust extractor
+  (`extract_marks` / Cluster 3) reads strike-presence to mark
+  items resolved. It doesn't read `data-revision`. We could
+  surface revised strikes in a future "review my edits"
+  destination but that needs trial-data evidence the user wants
+  the view; v1.0 just adds the data, doesn't add a consumer.
+
+### Files added
+
+- `src/editor/CortexStrikeRevision.ts` — mark + plugin + helpers
+  (`findStrikeRangeAtPos`, `setStrikeRevision`, `getOpenBubbles`).
+- `src/components/RevisionBubbleOverlay.tsx` — React overlay +
+  per-bubble component.
+- `verify-cluster-23-v1.0.ps1`.
+
+### Files modified
+
+- `src/components/Editor.tsx`
+  - Removed `import Strike from "@tiptap/extension-strike"`.
+  - Removed inline `HtmlStrike` extension definition (replaced by
+    the `CortexStrikeRevision` import).
+  - Added imports for `CortexStrikeRevision`,
+    `buildStrikeRevisionPlugin`, `RevisionBubbleOverlay`.
+  - Replaced the `HtmlStrike` registration in the `extensions` array
+    with `CortexStrikeRevision.extend({addProseMirrorPlugins(){return
+    [buildStrikeRevisionPlugin()]}})`. Same shape as the Cluster 19
+    v1.2 multi-select plugin wiring.
+  - Added `proseWrapperRef = useRef<HTMLDivElement>(null)` and
+    attached it to the `.prose` div.
+  - Added `position: relative` to the `.prose` div's inline style so
+    absolute-positioned bubbles anchor to the wrapper.
+  - Mounted `<RevisionBubbleOverlay editor={editor}
+    rootRef={proseWrapperRef} />` inside the `.prose` div, after
+    `<EditorContent>`.
+  - Comment cleanup — referenced "HtmlStrike" now points readers at
+    Cluster 23 history.
+- `src/components/ShortcutsHelp.tsx` — new EDITOR_MODE row:
+  "Ctrl+Click (on strikethrough) — Open / close a single-line
+  revision bubble for the struck text…".
+- `src/index.css` — new `.cortex-revision-bubble` rule block at
+  z-index 50 (above prose, below modals at ≥900 and image bubbles
+  at 800). 1.5em tall, no wrap, horizontal scroll, `var(--bg-card)`
+  background, `var(--border)` border, `:focus` ring on
+  `var(--accent)`.
+
+### Edge cases handled in v1.0
+
+- **User un-strikes a phrase that has an open bubble.** The prune
+  pass detects the strike mark is gone → bubble auto-closes.
+- **User deletes a struck phrase entirely.** The mapped range
+  collapses (from >= to) → bubble auto-closes.
+- **User types inside the struck range while the bubble is open.**
+  PM's mapping shifts the range; the bubble's position re-anchors
+  to the new end-of-strike each render.
+- **User opens a bubble in slot 1, switches to slot 2, opens a
+  bubble there, returns to slot 1.** Each slot has its own editor
+  and plugin state — bubbles in slot 1 stay open across the slot
+  switch.
+- **Multiple bubbles open simultaneously.** Each render iterates
+  the open list; each `<RevisionBubble>` is independent.
+- **HTML-meta characters in the revision** (`&` / `<` / `>` / `"`).
+  Escaped on serialize; markdown-it's HTML parser unescapes on
+  reload.
+
+### Edge cases NOT handled (deferred)
+
+- **Visible indicator** on strikes that carry a revision. v1.0
+  ships nothing — user discovers via Ctrl+click. Spec said "purely
+  an editable text box"; minimum chrome.
+- **Multi-line revisions.** Single-line by spec. Enter commits +
+  closes. v1.1+ would need vertical-grow + Enter-as-newline.
+- **Rich text inside the bubble.** v1.0 reads `el.textContent`
+  verbatim. Bubble is contenteditable so v1.1+ can teach it to
+  accept marks.
+- **Hover-to-preview.** v1.0 requires Ctrl+click to read a
+  revision. A read-only tooltip on hover would be friendlier for
+  proofreading workflows.
+- **External revision producers** (AI suggestions, etc.). The
+  bubble's external-update sync `useEffect` is scaffolded for this.
+- **Flip-below-when-no-room-above.** Strikes at the very top of
+  the document have their bubble clipped above the editor's top
+  edge. v1.1 should detect this (`startCoords.top - bubbleHeight
+  - 4 < 0`) and flip to render below the strike instead.
+- **Multi-line strike anchoring.** Wrapped strikes use the bbox
+  midpoint of `(start.left, end.right)` which can land the bubble
+  somewhere other than directly over actual struck text on a
+  wrapped run. Worth a smarter "above the first line at its
+  center" calculation if multi-line strikes become common.
+
+### v1.0.1 — bundled correction pass (same tag)
+
+Two issues caught in immediate dogfooding after v1.0 first landed:
+
+1. **Position was wrong.** v1.0 anchored the bubble at the strike's
+   end-of-last-char + a 4-px up / 8-px right offset — visually the
+   bubble floated to the right of the document at the strike's line.
+   The lab-notebook gesture is "cross out, sign, write the revision
+   ABOVE the cross-out", so the bubble should sit directly above
+   the struck text, centered horizontally over it. Reanchored at
+   the strike's `(top edge, horizontal-midpoint)` and applied a
+   `transform: translate(-50%, calc(-100% - 4px))` on the bubble so
+   its bottom edge ends up 4 px above the strike's top, centered.
+
+2. **Bubble showed empty when reopening a strike with a saved
+   revision.** v1.0's `useLayoutEffect` focused the bubble and
+   placed the caret at end of existing revision text — but never
+   actually wrote `bubble.revision` to `el.textContent`. The
+   "external sync" `useEffect` that runs after that early-returns
+   when `document.activeElement === el`, which it always is by then
+   (we just focused). Net effect: the saved revision lived on disk
+   in `data-revision` perfectly, but every reopen showed the bubble
+   empty, and the user's first keystroke would `setStrikeRevision`
+   the new (incomplete) text and overwrite the saved value.
+
+   Fix: in the same `useLayoutEffect`, write
+   `el.textContent = bubble.revision` BEFORE focusing. The caret-
+   to-end logic then operates on the populated content; the
+   external-sync effect's early-return is now a no-op (textContent
+   already matches).
+
+3. **CSS — horizontal scroll inside an unfocused bubble was
+   unreadable.** v1.0 set `white-space: nowrap; overflow-x: auto`,
+   which meant a long replacement showed only the first ~28 rem
+   followed by a tiny scrollbar. Switched to `white-space: pre;
+   overflow: hidden; text-overflow: ellipsis` so unfocused bubbles
+   show as much as fits and ellipsis-truncate beyond. Focused
+   bubbles re-enable `overflow-x: auto` so the caret stays visible
+   while typing past the visible width.
+
+These three corrections all live under the original `cluster-23-v1.0-
+complete` tag (v1.0 hadn't been pushed yet at the time of the
+correction — see the `git tag -f` convention in COWORK_HANDOFF). If
+you're auditing the diff later, the correction commit is identifiable
+by the `RevisionBubbleOverlay.tsx` lines that mention "v1.0.1" or
+"lab-notebook positioning".
+
+### v1.0.2 — bubble width matches strike width (same tag)
+
+User feedback after v1.0.1 landed: the bubble was opening "in the
+middle of the document" rather than visually attached to the strike.
+Two compounding causes:
+
+1. **Min-width fallback was too wide for short strikes.** v1.0.1 set
+   `min-width: 6rem` (~96 px) and `max-width: 28rem`. For strikes
+   shorter than 96 px (a single word, an abbreviation, an em-dashed
+   phrase), the bubble extended past the strike's edges in both
+   directions and looked detached.
+
+2. **Horizontal centering looked wrong even at correct widths.** The
+   `transform: translate(-50%, calc(-100% - 4px))` centered the
+   bubble on the strike's midpoint. For long strikes this still
+   produced left/right overshoot when the bubble's content-driven
+   width didn't match the strike's width. The visual feel was
+   "floating tooltip", not "lab-notebook annotation glued to the
+   cross-out".
+
+### What ships in v1.0.2
+
+The bubble's WIDTH is now set inline to match the strike's bounding-
+box width exactly, and the bubble is left-aligned with the strike's
+left edge (no more horizontal centering).
+
+```ts
+const sameLine = Math.abs(startCoords.top - endCoords.top) < 4;
+const top = startCoords.top - rootRect.top;
+const left = startCoords.left - rootRect.left;
+const rawWidth = sameLine
+  ? endCoords.right - startCoords.left
+  : rootRect.right - startCoords.left;
+const width = Math.max(rawWidth, 16);  // 16 px floor for usability
+```
+
+The bubble's transform changes from `translate(-50%, calc(-100% -
+4px))` to `translateY(calc(-100% - 4px))` — Y-only, no horizontal
+shift. Combined with the inline `left` and `width`, the bubble's
+left edge sits exactly at the strike's left edge and its right edge
+exactly at the strike's right edge.
+
+### CSS changes
+
+Removed `min-width: 6rem` and `max-width: 28rem`. The bubble's width
+is fully inline-driven now. Added `box-sizing: border-box` so the
+inline width includes padding (0.5em on each side) and border (1 px)
+— without it, the bubble would render wider than the strike by ~17 px
+and the visual "spans the cross-out" intent would break.
+
+### Multi-line wrapped strikes
+
+When `startCoords.top !== endCoords.top` (wrap detected via 4-px
+tolerance), `endCoords.right - startCoords.left` may be small or
+negative (line N ends to the LEFT of where line 1 began). The
+fallback uses `rootRect.right - startCoords.left` so the bubble at
+least extends from the strike's start to the wrapper's right edge,
+hovering above line 1. Proper "first-line end-of-line" detection
+(binary-search coordsAtPos for the position where coords.top jumps)
+is deferred to v1.1+.
+
+### Width floor
+
+`Math.max(rawWidth, 16)` ensures even a 1- or 2-character strike
+produces a 16-px-wide bubble, big enough to click on. The natural
+width might be smaller (e.g., a struck "i" could be 4 px); below the
+floor the bubble would be smaller than the user's cursor target.
+
+### Tag
+
+`cluster-23-v1.0-complete` (re-tagged after both v1.0.1 and v1.0.2
+correction passes — same tag because v1.0 hadn't shipped to remote
+yet; per the project's `git tag -f` convention the tag captures the
+current state of the cluster, not a frozen snapshot).

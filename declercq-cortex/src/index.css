@@ -1298,6 +1298,74 @@ body.cortex-mod-pressed .cortex-image:hover {
 }
 
 /* ---------------------------------------------------------------------------
+ * Cluster 23 v1.0 — Revision strikethrough bubble
+ *
+ * Single-line, rectangular, contenteditable bubble that floats slightly
+ * up-and-right from a struck range. Open via Ctrl+click on the strike
+ * (toggles); close with Esc / Enter or another Ctrl+click. The bubble
+ * is positioned by RevisionBubbleOverlay.tsx via inline `top`/`left`
+ * styles in the prose wrapper's coordinate system.
+ *
+ * The strike mark itself (`<s>` / `<strike>` / `<del>`) keeps the
+ * browser default rendering plus whatever the prose typography sheet
+ * adds — we don't restyle the strike itself, only the bubble.
+ * --------------------------------------------------------------------------- */
+.cortex-revision-bubble {
+  /* `position: absolute`, `top`, `left`, `width`, and `transform:
+     translateY(calc(-100% - 4px))` are all set inline by the bubble
+     component. The bubble's WIDTH matches the strike's bounding-box
+     width exactly — that's the lab-notebook gesture: the revision
+     occupies the same horizontal extent as the cross-out, sitting
+     just above it. translateY pulls the bubble up by its own height
+     plus a 4-px gap so its bottom edge ends up 4 px above the
+     strike's top edge. No horizontal transform — left + width
+     position the bubble flush with the strike's left and right
+     edges.
+
+     z-index above prose content but below modals (>=900 — see
+     TableContextMenu / ImageContextMenu / OrphanModal) and below
+     image bubbles (800). */
+  z-index: 50;
+  /* "One line height-wise" per the cluster spec. The bubble's WIDTH
+     is set inline (= strike's bbox width); we don't constrain it
+     here. Long replacements that exceed the strike's width
+     ellipsis-truncate when unfocused, scroll horizontally when
+     focused (the :focus rule below). */
+  height: 1.5em;
+  line-height: 1.5em;
+  padding: 0 0.5em;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
+  font-size: 0.85rem;
+  font-family: inherit;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+  /* Caret + selection. */
+  caret-color: var(--accent);
+}
+/* When focused, drop the ellipsis so the user can read / edit the
+   full content. The bubble still respects max-width but reveals a
+   horizontal scroll inside the focused element so the caret stays
+   visible as the user types past the visible width. Unfocused
+   bubbles in v1.0 don't render — they're unmounted via plugin
+   state — but if v1.1+ adds a "show all bubbles" mode, the closed-
+   state ellipsis preview will be the visible cue. */
+.cortex-revision-bubble:focus,
+.cortex-revision-bubble:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0px;
+  border-color: var(--accent);
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-overflow: clip;
+}
+
+/* ---------------------------------------------------------------------------
  * Cluster 20 v1.0 — Shape Editor
  * --------------------------------------------------------------------------- */
 

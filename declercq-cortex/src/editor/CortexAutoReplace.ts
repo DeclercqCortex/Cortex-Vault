@@ -187,10 +187,7 @@ export function readDisabledBuiltins(): Set<string> {
 
 export function writeDisabledBuiltins(set: Set<string>) {
   try {
-    localStorage.setItem(
-      AUTOREPLACE_DISABLED_LS_KEY,
-      JSON.stringify([...set]),
-    );
+    localStorage.setItem(AUTOREPLACE_DISABLED_LS_KEY, JSON.stringify([...set]));
   } catch {
     /* localStorage may be unavailable */
   }

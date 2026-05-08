@@ -51,6 +51,11 @@ const EDITOR_MODE: Row[] = [
   { keys: "Ctrl+I", action: "Italic" },
   { keys: "Ctrl+U", action: "Underline" },
   { keys: "Ctrl+Shift+X", action: "Strikethrough (also resolves a mark)" },
+  {
+    keys: "Ctrl+Click (on strikethrough)",
+    action:
+      "Open / close a single-line revision bubble for the struck text — type the replacement; saved on the strike's data-revision attr (Cluster 23)",
+  },
   { keys: "Ctrl+Shift+L", action: "Align left" },
   { keys: "Ctrl+Shift+E", action: "Align centre" },
   { keys: "Ctrl+Shift+R", action: "Align right" },
