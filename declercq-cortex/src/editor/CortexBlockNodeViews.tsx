@@ -32,7 +32,8 @@
 import { NodeViewContent, NodeViewWrapper } from "@tiptap/react";
 import type { NodeViewProps } from "@tiptap/react";
 import { Selection, TextSelection } from "@tiptap/pm/state";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal as ReactDOMCreatePortal } from "react-dom";
 
 // ---- Tabs NodeView -------------------------------------------------------
 
@@ -553,4 +554,298 @@ export function CortexCollapsibleNodeView(props: NodeViewProps) {
       <NodeViewContent className="cortex-toggle-body" />
     </NodeViewWrapper>
   );
+}
+
+// ---- Math block NodeView (v1.2.2) ----------------------------------------
+//
+// Renders the cortexMathBlock's `latex` attribute as actual math via
+// KaTeX (loaded from CDN in index.html). The rendered output replaces
+// the textual LaTeX that the document used to show.
+//
+// KaTeX may not be on `window.katex` yet at first paint (the CDN
+// script is `defer`-loaded). The effect retries on a short interval
+// until KaTeX is available, then renders. If KaTeX never loads (e.g.
+// offline), we fall back to plain text so the user at least sees
+// their LaTeX rather than nothing.
+//
+// Editing: double-clicking the rendered block emits a window-level
+// `cortex:edit-math-block` CustomEvent carrying the node position and
+// current LaTeX. The toolbar listens for it and reopens the math
+// modal pre-filled, then on Done updates the node's `latex` attr in
+// place via `updateAttributes`.
+//
+// Single click selects the node (NodeSelection) so Backspace deletes
+// the whole equation, matching the existing decorative-separator and
+// page-break atoms.
+
+export function CortexMathBlockNodeView(props: NodeViewProps) {
+  const { node, getPos } = props;
+  const latex = String(node.attrs.latex ?? "");
+  const renderRef = useRef<HTMLDivElement | null>(null);
+  // v1.2.3 — right-click context menu state. Stores the viewport
+  // coordinates of the click so we can render the menu at that
+  // position. `null` means menu closed.
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const el = renderRef.current;
+    if (!el) return;
+
+    let cancelled = false;
+
+    function attempt(): boolean {
+      const k = (window as unknown as { katex?: KatexGlobal }).katex;
+      if (!k || !el) return false;
+      try {
+        if (!latex) {
+          el.textContent = "";
+          return true;
+        }
+        k.render(latex, el, {
+          displayMode: true,
+          throwOnError: false,
+          // KaTeX colours errors red by default. Keep the badge but
+          // tone it to the theme so it doesn't scream against the
+          // surrounding paper.
+          errorColor: "#c0392b",
+          strict: "ignore",
+          trust: false,
+        });
+        return true;
+      } catch {
+        // Final fallback: show the LaTeX as plain text so the user
+        // still knows what's there.
+        el.textContent = latex;
+        return true;
+      }
+    }
+
+    if (attempt()) return;
+
+    // Poll briefly while the deferred CDN script finishes loading.
+    const interval = window.setInterval(() => {
+      if (cancelled) return;
+      if (attempt()) window.clearInterval(interval);
+    }, 80);
+    // Give up after 5s — at that point the user is offline / the CDN
+    // is blocked, and the plain-text fallback is appropriate.
+    const giveUp = window.setTimeout(() => {
+      if (cancelled) return;
+      window.clearInterval(interval);
+      if (el) el.textContent = latex;
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.clearTimeout(giveUp);
+    };
+  }, [latex]);
+
+  const dispatchEdit = useCallback(() => {
+    const pos = typeof getPos === "function" ? getPos() : null;
+    try {
+      window.dispatchEvent(
+        new CustomEvent("cortex:edit-math-block", {
+          detail: { pos, latex },
+        }),
+      );
+    } catch {
+      /* CustomEvent ctor missing in old engines — ignore */
+    }
+  }, [getPos, latex]);
+
+  const dispatchDelete = useCallback(() => {
+    const pos = typeof getPos === "function" ? getPos() : null;
+    try {
+      window.dispatchEvent(
+        new CustomEvent("cortex:delete-math-block", {
+          detail: { pos },
+        }),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [getPos]);
+
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dispatchEdit();
+    },
+    [dispatchEdit],
+  );
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      // Replace the native browser context menu with our own. The
+      // user gets Edit + Delete affordances tailored to math blocks
+      // instead of the generic Copy / Paste options that aren't
+      // useful for an atom node.
+      e.preventDefault();
+      e.stopPropagation();
+      setMenuPos({ x: e.clientX, y: e.clientY });
+    },
+    [],
+  );
+
+  const closeMenu = useCallback(() => setMenuPos(null), []);
+
+  return (
+    <NodeViewWrapper
+      as="div"
+      className="cortex-math-block"
+      data-latex={latex}
+      onDoubleClick={handleDoubleClick}
+      onContextMenu={handleContextMenu}
+      title="Double-click to edit · right-click for more"
+    >
+      <div ref={renderRef} className="cortex-math-render" />
+      {menuPos && (
+        <MathBlockContextMenu
+          x={menuPos.x}
+          y={menuPos.y}
+          onEdit={() => {
+            closeMenu();
+            dispatchEdit();
+          }}
+          onDelete={() => {
+            closeMenu();
+            // No confirm here — the user explicitly chose Delete in
+            // the context menu, so two-step would feel pestering.
+            // The modal-Delete path (which can fire after the user
+            // has typed an edit) does confirm.
+            dispatchDelete();
+          }}
+          onClose={closeMenu}
+        />
+      )}
+    </NodeViewWrapper>
+  );
+}
+
+// ---- Context menu sub-component -----------------------------------------
+//
+// Tiny floating menu rendered via portal so it isn't clipped by the
+// editor's overflow:hidden. Closes on outside-click or Esc. Uses
+// fixed positioning at the click coordinates; clamped against the
+// viewport so it stays on screen near the right/bottom edges.
+
+function MathBlockContextMenu({
+  x,
+  y,
+  onEdit,
+  onDelete,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  onEdit: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onMouseDown = () => onClose();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    // Use mousedown (not click) so we close before a click can
+    // re-trigger the same context menu we just opened.
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+
+  // Clamp to viewport so a click near the right/bottom edge doesn't
+  // push the menu off-screen. Approximate menu size: 140 wide × 70
+  // tall — tighter clamping than that costs more measurement than
+  // it's worth.
+  const W = 140;
+  const H = 76;
+  const left = Math.min(x, window.innerWidth - W - 4);
+  const top = Math.min(y, window.innerHeight - H - 4);
+
+  return ReactDOMCreatePortal(
+    <div
+      role="menu"
+      onMouseDown={(e) => e.stopPropagation()}
+      style={{
+        position: "fixed",
+        left,
+        top,
+        background: "var(--bg-card)",
+        border: "1px solid var(--border)",
+        borderRadius: "6px",
+        padding: "3px",
+        boxShadow: "var(--shadow, 0 6px 20px rgba(0,0,0,0.25))",
+        zIndex: 1100,
+        minWidth: W,
+        display: "flex",
+        flexDirection: "column",
+        gap: "2px",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onEdit}
+        style={menuItemStyle()}
+        onMouseEnter={(e) =>
+          (e.currentTarget.style.background = "var(--bg-elev)")
+        }
+        onMouseLeave={(e) =>
+          (e.currentTarget.style.background = "transparent")
+        }
+      >
+        ✎ Edit
+      </button>
+      <button
+        type="button"
+        onClick={onDelete}
+        style={{ ...menuItemStyle(), color: "var(--danger)" }}
+        onMouseEnter={(e) =>
+          (e.currentTarget.style.background = "var(--bg-elev)")
+        }
+        onMouseLeave={(e) =>
+          (e.currentTarget.style.background = "transparent")
+        }
+      >
+        × Delete
+      </button>
+    </div>,
+    document.body,
+  );
+}
+
+function menuItemStyle(): React.CSSProperties {
+  return {
+    cursor: "pointer",
+    padding: "5px 10px",
+    fontSize: "0.85rem",
+    background: "transparent",
+    border: "none",
+    color: "var(--text)",
+    textAlign: "left",
+    borderRadius: "4px",
+  };
+}
+
+// Minimal type for the global KaTeX object loaded from the CDN.
+interface KatexGlobal {
+  render(
+    expression: string,
+    element: HTMLElement,
+    options?: {
+      displayMode?: boolean;
+      throwOnError?: boolean;
+      errorColor?: string;
+      strict?: "ignore" | "warn" | "error";
+      trust?: boolean;
+    },
+  ): void;
 }

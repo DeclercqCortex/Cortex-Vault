@@ -38,6 +38,7 @@ import {
 } from "../editor/CortexParticleHost";
 import { CORTEX_CODE_LANGUAGES } from "../editor/CortexCodeBlock";
 import { AutoReplaceModal } from "./AutoReplaceModal";
+import { MathEquationModal } from "./MathEquationModal";
 
 // ---- Toolbar prefs (persisted in localStorage) ---------------------------
 
@@ -355,6 +356,21 @@ export function EditorToolbar({
   const [outlineOpen, setOutlineOpen] = useState(false);
   // Cluster 21 v1.1 polish — auto-replace pipeline manager modal.
   const [autoReplaceOpen, setAutoReplaceOpen] = useState(false);
+  // Cluster 21 v1.2 — math-equation builder modal. We capture the
+  // selection from BEFORE the modal opens so that on Done we know
+  // where in the doc to insert the resulting block. The modal steals
+  // focus from the editor, so reading editor.state.selection at Done
+  // time would always point to the doc's start.
+  // v1.2.2: also support EDIT mode — when the user double-clicks an
+  // existing rendered math block, the NodeView dispatches the
+  // `cortex:edit-math-block` window event with the node's PM
+  // position + current LaTeX. The toolbar opens the modal seeded
+  // with that LaTeX; on Done we updateAttributes at the captured
+  // node position instead of inserting a new block.
+  const [mathOpen, setMathOpen] = useState(false);
+  const [mathInitial, setMathInitial] = useState("");
+  const mathInsertPos = useRef<{ from: number; to: number } | null>(null);
+  const mathEditPos = useRef<number | null>(null);
   const [markerActive, setMarkerActive] = useState(false);
   // Cluster 21 v1.0.4 — marker color is a ColorMark name (one of the
   // seven Cluster 2 review-pipeline marks), not a free hex. The
@@ -379,6 +395,52 @@ export function EditorToolbar({
   useEffect(() => {
     document.body.classList.toggle("cortex-marker-active", markerActive);
   }, [markerActive]);
+
+  // Cluster 21 v1.2.2 — listen for the math-block NodeView's
+  // edit request. The NodeView dispatches `cortex:edit-math-block`
+  // with `{ pos, latex }` on double-click. We open the modal seeded
+  // with that LaTeX and remember the node position so the Done
+  // handler can `updateAttributes` in place rather than inserting.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ pos: number | null; latex: string }>)
+        .detail;
+      if (!detail) return;
+      mathEditPos.current = detail.pos ?? null;
+      mathInsertPos.current = null;
+      setMathInitial(detail.latex || "");
+      setMathOpen(true);
+    };
+    window.addEventListener("cortex:edit-math-block", handler);
+    return () => window.removeEventListener("cortex:edit-math-block", handler);
+  }, []);
+
+  // Cluster 21 v1.2.3 — listen for the right-click delete request
+  // dispatched by the math-block context menu. Selects the atom at
+  // the given position and deletes it. PM's transaction is one
+  // step so Ctrl+Z brings the equation back if the click was a
+  // mistake.
+  useEffect(() => {
+    if (!editor) return;
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ pos: number | null }>).detail;
+      if (!detail || detail.pos == null) return;
+      try {
+        editor
+          .chain()
+          .focus()
+          .setNodeSelection(detail.pos)
+          .deleteSelection()
+          .run();
+      } catch {
+        // Position may have shifted between dispatch and handle —
+        // ignore so a stale event doesn't crash the editor.
+      }
+    };
+    window.addEventListener("cortex:delete-math-block", handler);
+    return () =>
+      window.removeEventListener("cortex:delete-math-block", handler);
+  }, [editor]);
 
   // Apply marker state to the editor plugin.
   // v1.0.1 — defensive view access. v1.0.4 — color is now the
@@ -1540,16 +1602,16 @@ export function EditorToolbar({
         </TbPopover>
         <TbBtn
           onClick={() => {
-            const tex = window.prompt("LaTeX (e.g. x^2 + y^2 = z^2):") || "";
-            if (tex) {
-              editor
-                .chain()
-                .focus()
-                .insertContent(
-                  `<span class="cortex-math-inline" data-tex="${tex}">$${tex}$</span>`,
-                )
-                .run();
-            }
+            // Cluster 21 v1.2 — open the math-equation builder modal
+            // instead of a single window.prompt(). We capture the
+            // current selection BEFORE the modal opens so the Done
+            // callback can splice the resulting cortexMathBlock back
+            // in at the right place — by the time Done fires, the
+            // editor has lost focus to the modal and its selection
+            // would have collapsed to position 0.
+            const sel = editor.state.selection;
+            mathInsertPos.current = { from: sel.from, to: sel.to };
+            setMathOpen(true);
           }}
           title="Math equation"
         >
@@ -2032,6 +2094,83 @@ export function EditorToolbar({
       {/* Cluster 21 v1.1 polish — auto-replace rules manager. */}
       {autoReplaceOpen && (
         <AutoReplaceModal onClose={() => setAutoReplaceOpen(false)} />
+      )}
+      {/* Cluster 21 v1.2 — math-equation builder.
+          v1.2.2: handles both insert (mathInsertPos set) and edit
+          (mathEditPos set) modes. The modal is seeded with mathInitial
+          when editing so the user sees their existing LaTeX as the
+          starting state of the composition area. */}
+      {mathOpen && (
+        <MathEquationModal
+          initial={mathInitial}
+          onCancel={() => {
+            setMathOpen(false);
+            mathInsertPos.current = null;
+            mathEditPos.current = null;
+            setMathInitial("");
+          }}
+          onDone={(latex) => {
+            const trimmed = latex.trim();
+            const insertPos = mathInsertPos.current;
+            const editPos = mathEditPos.current;
+            setMathOpen(false);
+            mathInsertPos.current = null;
+            mathEditPos.current = null;
+            setMathInitial("");
+            if (!trimmed) return;
+            if (editPos != null) {
+              // Update an existing math block in place. setNodeSelection
+              // targets the atom; updateAttributes rewrites its `latex`
+              // attr. The NodeView re-renders KaTeX automatically when
+              // its `node.attrs.latex` prop changes.
+              editor
+                .chain()
+                .focus()
+                .setNodeSelection(editPos)
+                .updateAttributes("cortexMathBlock", { latex: trimmed })
+                .run();
+            } else {
+              // Insert a new cortexMathBlock at the captured selection.
+              // The CSS counter on .cortex-math-block auto-numbers
+              // blocks by document order, so renumbering on insert-
+              // before-existing-equations is free.
+              const chain = editor.chain().focus();
+              if (insertPos) chain.setTextSelection(insertPos);
+              chain
+                .insertContent({
+                  type: "cortexMathBlock" as any,
+                  attrs: { latex: trimmed },
+                })
+                .run();
+            }
+          }}
+          // v1.2.3 — show the Delete button only when editing an
+          // existing equation. The modal confirms before calling
+          // back, so a stray click can't lose work silently.
+          onDelete={
+            mathEditPos.current != null
+              ? () => {
+                  const editPos = mathEditPos.current;
+                  setMathOpen(false);
+                  mathInsertPos.current = null;
+                  mathEditPos.current = null;
+                  setMathInitial("");
+                  if (editPos != null) {
+                    try {
+                      editor
+                        .chain()
+                        .focus()
+                        .setNodeSelection(editPos)
+                        .deleteSelection()
+                        .run();
+                    } catch {
+                      /* stale pos — ignore */
+                    }
+                  }
+                }
+              : undefined
+          }
+        />
       )}
     </div>
   );

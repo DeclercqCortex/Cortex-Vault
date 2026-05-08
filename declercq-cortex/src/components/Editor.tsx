@@ -83,6 +83,7 @@ import { CortexAutoReplace } from "../editor/CortexAutoReplace";
 import {
   CortexCollapsibleNodeView,
   CortexTabsNodeView,
+  CortexMathBlockNodeView,
 } from "../editor/CortexBlockNodeViews";
 import {
   buildCortexMarkerPlugin,
@@ -745,7 +746,15 @@ export function Editor({
       CortexPullQuote,
       CortexDecoSeparator,
       CortexPageBreak,
-      CortexMathBlock,
+      // Cluster 21 v1.2.2 — math block now uses a NodeView that
+      // renders the `latex` attr via KaTeX. The schema also flipped
+      // from `content: "text*"` to `atom: true` so PM treats the
+      // block as a single selectable unit.
+      CortexMathBlock.extend({
+        addNodeView() {
+          return ReactNodeViewRenderer(CortexMathBlockNodeView);
+        },
+      }),
       // Cluster 21 v1.1 — panel-per-tab schema. CortexTabPanel must be
       // registered BEFORE the parent so the parent's `cortexTabPanel+`
       // content constraint resolves at schema-build time. Order doesn't

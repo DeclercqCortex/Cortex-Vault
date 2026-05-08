@@ -271,22 +271,56 @@ export const CortexPageBreak = Node.create({
   },
 });
 
-// ---- Math block (v1.0: stylized text; KaTeX render in v1.1) --------------
+// ---- Math block (v1.2.2: atom + KaTeX-rendered NodeView) -----------------
+//
+// v1.0 stored the LaTeX as the node's text content (`content: "text*"`)
+// and showed it as italic monospace — basically a stylized text echo.
+// v1.2 added the math-equation builder modal but the document still
+// rendered raw LaTeX source, which the user (rightly) called out.
+//
+// v1.2.2 makes the node ATOMIC and stores the LaTeX in a `latex` attr.
+// Why atomic: a NodeView that renders KaTeX would conflict with PM's
+// expectation that the node's contentDOM holds the visible content.
+// With `atom: true` there is no contentDOM — the NodeView fully owns
+// what's painted on screen, and PM treats the node as one selectable
+// unit (NodeSelection on click, single-keystroke delete, etc.).
+//
+// Backward compatibility: the parseHTML fallback reads `el.textContent`
+// when data-latex is missing, so existing math blocks saved as
+// `<div class="cortex-math-block">x^2</div>` parse correctly into
+// `{ latex: "x^2" }`. They re-emit on next save with the new attr form.
+//
+// renderHTML emits both data-latex (for round-trip) AND the LaTeX as
+// text content inside the div, so a markdown export viewed without
+// JS still shows something readable.
 
 export const CortexMathBlock = Node.create({
   name: "cortexMathBlock",
   group: "block",
-  content: "text*",
-  marks: "",
-  defining: true,
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes() {
+    return {
+      latex: {
+        default: "",
+        parseHTML: (el) =>
+          el.getAttribute("data-latex") || el.textContent || "",
+        renderHTML: (a: Record<string, unknown>) => ({
+          "data-latex": String(a.latex ?? ""),
+        }),
+      },
+    };
+  },
   parseHTML() {
     return [{ tag: "div.cortex-math-block" }];
   },
-  renderHTML({ HTMLAttributes }) {
+  renderHTML({ HTMLAttributes, node }) {
+    const latex = String(node.attrs.latex ?? "");
     return [
       "div",
       mergeAttributes(HTMLAttributes, { class: "cortex-math-block" }),
-      0,
+      latex,
     ];
   },
 });

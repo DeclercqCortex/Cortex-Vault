@@ -113,6 +113,12 @@ body,
    * intact (PM coordinate math, selection, drag-drop all work
    * unchanged), while still visibly resizing all the user's prose. */
   font-size: calc(15px * var(--cortex-editor-zoom, 1));
+  /* Cluster 21 v1.2 — auto-numbered math equations. The
+   * .cortex-math-block ::after rule reads counter(cortex-equation),
+   * which the browser increments per descendant block in document
+   * order. Resetting on .prose scopes the counter per editor pane
+   * so numbering restarts at 1 in each open document. */
+  counter-reset: cortex-equation;
 }
 .prose h1,
 .prose h2,
@@ -2250,21 +2256,253 @@ sup.cortex-fn:hover {
   font-size: 0.85em;
 }
 
-/* Math — inline + block */
-.cortex-math-inline,
-.cortex-math-block {
+/* Math — inline + block.
+ *
+ * v1.2.2: the BLOCK variant now renders KaTeX inside the NodeView
+ * (see .cortex-math-render), so the wrapper no longer needs the
+ * bg-elev box / italic / serif styling — KaTeX brings its own.
+ * The INLINE variant still uses these styles since it has no
+ * NodeView yet (round-tripped as plain HTML span containing the
+ * tex source). */
+.cortex-math-inline {
   font-family: ui-serif, Georgia, "STIX Two Math", "Cambria Math", serif;
   background: var(--bg-elev);
   padding: 0 4px;
   border-radius: 3px;
   font-style: italic;
 }
+/* Cluster 21 v1.2 — math equation overhaul.
+ *
+ * Each block is centered on its line and gets an auto-numbered
+ * `(N)` tag flush to the right margin. Numbering uses a CSS counter
+ * (counter-reset on .prose, counter-increment on each block) so
+ * inserting a new equation BEFORE existing ones renumbers the doc
+ * for free — there is no per-node counter attribute that would
+ * need a JS pass after every edit.
+ *
+ * Padding-left mirrors padding-right so the centered text remains
+ * visually centered between both margins, not pushed leftward by
+ * the right-side number badge.
+ */
 .cortex-math-block {
   display: block;
+  position: relative;
   text-align: center;
-  padding: 0.4em 0.6em;
-  margin: 0.5em 0;
+  padding: 0.4em 3.5em;
+  margin: 0.7em 0;
   font-size: 1.1em;
+  counter-increment: cortex-equation;
+}
+.cortex-math-block::after {
+  content: "(" counter(cortex-equation) ")";
+  position: absolute;
+  right: 0.7em;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-style: normal;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.92em;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* Cluster 21 v1.2.1 — Math equation modal: composition area + atoms.
+ *
+ * The modal's input is a contenteditable div that shows actual
+ * math symbols, not LaTeX source. Structural atoms (fractions,
+ * roots, sub/sup) render via inline-flex stacks — no rendering
+ * library required, just CSS positioning and Unicode glyphs.
+ *
+ * Atoms are atomic from the user's perspective: contenteditable=
+ * false on the wrapper means backspace-after-atom deletes the
+ * whole construct, while inner `.cortex-math-slot` spans are
+ * editable so users can fill in numerators/exponents/etc.
+ */
+.cortex-math-input {
+  /* Inherits styles via inline `style={styles.input}`. The selector
+   * here adds the empty-state placeholder. */
+}
+.cortex-math-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-style: italic;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  pointer-events: none;
+}
+
+/* Editable slot inside any structural atom. Shows a light border
+ * when empty so the user knows there's something to fill in. */
+.cortex-math-slot {
+  display: inline-block;
+  min-width: 0.9em;
+  min-height: 1em;
+  padding: 0 1px;
+  outline: none;
+  vertical-align: baseline;
+}
+.cortex-math-slot:empty {
+  border: 1px dashed var(--border-2);
+  border-radius: 2px;
+  background: rgba(127, 127, 127, 0.06);
+}
+
+/* Generic atom: tiny visual lift + select-all on click so a single
+ * tap selects the whole atom (Backspace then deletes it). */
+.cortex-math-atom {
+  display: inline-block;
+  vertical-align: middle;
+  user-select: none;
+  margin: 0 1px;
+}
+.cortex-math-atom .cortex-math-slot {
+  user-select: text;
+}
+
+/* Fraction: numerator on top, bar in the middle, denominator
+ * below — implemented as an inline-flex column. */
+.cortex-math-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: -0.55em;
+  line-height: 1.05;
+  margin: 0 2px;
+}
+.cortex-math-frac .cortex-math-num,
+.cortex-math-frac .cortex-math-den {
+  font-size: 0.85em;
+  padding: 0 3px;
+  text-align: center;
+}
+.cortex-math-frac .cortex-math-bar {
+  display: block;
+  width: 100%;
+  height: 1px;
+  background: currentColor;
+  margin: 1px 0;
+}
+
+/* Square root: a √ glyph followed by an arg slot with an overline
+ * (the vinculum). */
+.cortex-math-sqrt,
+.cortex-math-nthroot {
+  display: inline-flex;
+  align-items: baseline;
+  margin: 0 2px;
+}
+.cortex-math-sqrt .cortex-math-radical,
+.cortex-math-nthroot .cortex-math-radical {
+  font-size: 1.05em;
+  margin-right: 1px;
+}
+.cortex-math-sqrt .cortex-math-arg,
+.cortex-math-nthroot .cortex-math-arg {
+  border-top: 1px solid currentColor;
+  padding: 0 3px;
+  margin-top: -2px;
+}
+.cortex-math-nthroot .cortex-math-idx {
+  font-size: 0.7em;
+  align-self: flex-start;
+  margin-right: -3px;
+  margin-top: -2px;
+}
+
+/* Superscript / subscript atoms: just a slot positioned vertically. */
+.cortex-math-sup .cortex-math-arg {
+  display: inline-block;
+  font-size: 0.75em;
+  vertical-align: super;
+  line-height: 1;
+  padding: 0 2px;
+}
+.cortex-math-sub .cortex-math-arg {
+  display: inline-block;
+  font-size: 0.75em;
+  vertical-align: sub;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+/* Common-equation preset atoms — a labelled chip showing the
+ * Unicode preview, with the LaTeX in data-latex for the Done
+ * walker. */
+.cortex-math-preset {
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 0.95em;
+  cursor: default;
+}
+
+/* Big operators with bounds — ∫_a^b, Σ_{i=1}^n, ∏, ∮, ⋃, ⋂, lim.
+ * "bounds" variant: a flex row [glyph][stack(upper, lower)], so the
+ * subscript and superscript sit alongside the operator like inline
+ * LaTeX rendering. "limits" variant (\lim): glyph stacked above
+ * the under-slot, since the subscript belongs underneath the word
+ * "lim" not next to it. */
+.cortex-math-bigop {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0 2px;
+  line-height: 1.05;
+}
+.cortex-math-bigop-sym {
+  font-size: 1.4em;
+  margin-right: 1px;
+}
+.cortex-math-bigop-bounds .cortex-math-bigop-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  font-size: 0.7em;
+  line-height: 1.05;
+  margin-left: 1px;
+}
+.cortex-math-bigop-bounds .cortex-math-bigop-upper,
+.cortex-math-bigop-bounds .cortex-math-bigop-lower {
+  padding: 0 2px;
+}
+.cortex-math-bigop-limits {
+  flex-direction: column;
+  align-items: center;
+}
+.cortex-math-bigop-limits .cortex-math-bigop-sym {
+  font-size: 1em;
+  font-style: normal;
+}
+.cortex-math-bigop-limits .cortex-math-bigop-lower {
+  font-size: 0.7em;
+  line-height: 1.05;
+  margin-top: 1px;
+}
+
+/* Cluster 21 v1.2.2 — math-block NodeView wrapper.
+ *
+ * The atom NodeView renders KaTeX output inside `.cortex-math-render`
+ * inside `.cortex-math-block`. The existing `.cortex-math-block`
+ * rules (centering, padding, counter-increment, ::after numbering)
+ * still apply because the NodeView wrapper carries the same class.
+ * We just need the inner `.cortex-math-render` to render flat (no
+ * background or border, since KaTeX does its own).
+ */
+.cortex-math-render {
+  display: inline-block;
+  background: transparent;
+  font-style: normal;
+}
+/* While KaTeX is still loading from the CDN, the inner div is empty
+ * — show a subtle pulsing placeholder so the user doesn't see a
+ * collapsed block. The pulse animation respects the global
+ * cortex-anim-paused / reduce-motion preference. */
+.cortex-math-render:empty::before {
+  content: "…";
+  color: var(--text-muted);
+  opacity: 0.6;
 }
 
 /* Particle host — gives the canvas overlay a place to anchor. */
