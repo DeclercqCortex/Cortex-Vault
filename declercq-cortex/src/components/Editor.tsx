@@ -43,6 +43,8 @@ import { CortexColumnResize } from "../editor/CortexColumnResize";
 import { CortexTableView } from "../editor/CortexTableView";
 // Cluster 19 v1.0 — image embeds.
 import { CortexImage, type CortexImageWrap } from "../editor/CortexImageNode";
+import { CortexPlot } from "../editor/CortexPlotNode";
+import { CortexPlotNodeView } from "./CortexPlotNodeView";
 import {
   CortexImageNodeView,
   EDIT_IMAGE_ANNOTATION_EVENT,
@@ -674,6 +676,31 @@ export function Editor({
           return [buildImageMultiSelectPlugin()];
         },
       }),
+      // Cluster 27 v1.0 — CortexPlot atom node with React NodeView.
+      // storage.notePath mirrors cortexImage; the NodeView reads it
+      // (with the plot's id) to resolve the sidecar JSON path. The
+      // dataCache is warmed by the PlotterSidebar after a sidecar
+      // load + save so the NodeView re-renders without a second
+      // round-trip. cacheVersion is a monotonic counter the sidebar
+      // bumps on every dataCache.set() — the NodeView watches it via
+      // a useEffect dependency so swapping plots in the sidebar
+      // visibly updates them in the doc.
+      CortexPlot.extend({
+        addStorage() {
+          return {
+            notePath: "" as string,
+            // Cluster 27 v1.0 pass 2 — vaultPath needed by the NodeView
+            // to resolve `<note-stem>-plots/<plotId>.json` via the
+            // read_plot_sidecar Tauri command on mount (Bug 3 fix).
+            vaultPath: "" as string,
+            dataCache: new Map<string, unknown>(),
+            cacheVersion: 0 as number,
+          };
+        },
+        addNodeView() {
+          return ReactNodeViewRenderer(CortexPlotNodeView);
+        },
+      }),
       // Text alignment with Ctrl+Shift+L/E/R shortcuts. Round-trips
       // through tiptap-markdown's html:true as inline style attributes.
       TextAlignWithShortcuts.configure({
@@ -922,13 +949,24 @@ export function Editor({
 
   // Publish the open note's path into the cortexImage extension's
   // storage so the NodeView can resolve relative img src attrs.
+  // Cluster 27 v1.0 — cortexPlot reads the same notePath to resolve
+  // its sidecar JSON path (`<parent>/<stem>-plots/<plotId>.json`).
+  // Pass 2 (Bug 3 fix) — cortexPlot also reads vaultPath so the
+  // NodeView can call read_plot_sidecar on mount.
   useEffect(() => {
     if (!editor) return;
-    const storage = editor.storage as Record<string, { notePath?: string }>;
+    const storage = editor.storage as Record<
+      string,
+      { notePath?: string; vaultPath?: string }
+    >;
     if (storage.cortexImage) {
       storage.cortexImage.notePath = notePath ?? "";
     }
-  }, [editor, notePath]);
+    if (storage.cortexPlot) {
+      storage.cortexPlot.notePath = notePath ?? "";
+      storage.cortexPlot.vaultPath = vaultPath ?? "";
+    }
+  }, [editor, notePath, vaultPath]);
 
   // Listen for the NodeView's CustomEvents on view.dom.
   useEffect(() => {

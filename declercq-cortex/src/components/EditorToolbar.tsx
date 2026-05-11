@@ -292,6 +292,10 @@ export interface EditorToolbarProps {
   ) => void;
   onInsertWikilink?: () => void;
   onInsertGitHubBlock?: () => void;
+  /** Cluster 27 v1.0 — insert a cortexPlot atom node at the cursor
+   *  via the active TabPane's `insertPlot` method. Mirrors the
+   *  shortcut path (Ctrl+Alt+P). */
+  onInsertPlot?: () => void;
 }
 
 export function EditorToolbar({
@@ -303,6 +307,7 @@ export function EditorToolbar({
   onOpenBlockModal,
   onInsertWikilink,
   onInsertGitHubBlock,
+  onInsertPlot,
 }: EditorToolbarProps) {
   // ---- selection memory ----
   // Cluster 21 v1.0.3 — clicking a toolbar button (especially a
@@ -2138,6 +2143,15 @@ export function EditorToolbar({
           title="GitHub commits today (Ctrl+Shift+G)"
         >
           🐙
+        </TbBtn>
+        {/* Cluster 27 v1.0 — Interactive Plotter trigger. Inserts a
+            cortexPlot atom node at the cursor; clicking the inserted
+            plot opens the right-side PlotterSidebar bound to it. */}
+        <TbBtn
+          onClick={() => onInsertPlot?.()}
+          title="Insert interactive plot (Ctrl+Alt+P)"
+        >
+          📈
         </TbBtn>
       </Group>
 

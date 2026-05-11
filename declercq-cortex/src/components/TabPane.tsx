@@ -139,6 +139,22 @@ export type TabPaneHandle = {
   /** Cluster 19 v1.0 — open the OS file picker for image files,
    *  copy the chosen one in, and insert at the cursor. */
   insertImageDialog(): Promise<boolean>;
+  /**
+   * Cluster 27 v1.0 — insert a fresh cortexPlot atom node at the
+   * cursor (defaults to scatter). Returns true on success, false if
+   * the pane has no markdown note open. The PlotterSidebar opens
+   * itself via the focus-plot event the NodeView emits on click;
+   * pass 2 may add a direct open-sidebar dispatch here so the
+   * sidebar opens immediately on insert.
+   */
+  insertPlot(plotType?: string): Promise<boolean>;
+  /**
+   * Cluster 27 v1.0 — expose the live TipTap editor instance so
+   * App.tsx's plotter binding can dispatch attr-patch transactions
+   * without going through a method-per-attribute wrapper. Returns
+   * null when no editor is mounted (PDF / image view).
+   */
+  getEditor(): import("@tiptap/core").Editor | null;
   /** Read the current open path (for tree highlight + per-slot save). */
   getPath(): string | null;
   /** Read the current active view. */
@@ -948,6 +964,44 @@ export const TabPane = forwardRef<TabPaneHandle, TabPaneProps>(
           } catch (e) {
             console.warn("[TabPane] insertImageDialog failed:", e);
             setError(`Image dialog failed: ${e}`);
+            return false;
+          }
+        },
+        getEditor() {
+          return editorInstanceRef.current ?? null;
+        },
+        async insertPlot(plotType?: string) {
+          // Cluster 27 v1.0 — Insert a fresh cortexPlot node at the
+          // cursor. Refuses if the pane has no markdown note open, or
+          // if it's currently showing a non-editor view (PDF / image
+          // viewer / structured view).
+          if (!selectedPath || !/\.md$/i.test(selectedPath)) return false;
+          if (activeView !== "editor") return false;
+          const ed = editorInstanceRef.current;
+          if (!ed) return false;
+          try {
+            const { defaultCortexPlotAttrs } =
+              await import("../editor/CortexPlotNode");
+            const attrs = defaultCortexPlotAttrs(
+              (plotType as
+                | "scatter"
+                | "line"
+                | "bar"
+                | "histogram"
+                | "pie"
+                | "area"
+                | "bar-horizontal"
+                | "error-bar"
+                | undefined) ?? "scatter",
+            );
+            ed.chain()
+              .focus()
+              .insertContent({ type: "cortexPlot", attrs })
+              .run();
+            return true;
+          } catch (e) {
+            console.warn("[TabPane] insertPlot failed:", e);
+            setError(`Insert plot failed: ${e}`);
             return false;
           }
         },

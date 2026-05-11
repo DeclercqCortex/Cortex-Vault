@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
@@ -55,6 +55,15 @@ import { ReviewSettingsModal } from "./components/ReviewSettingsModal";
 // Cluster 26 — Cerebrum splash. Renders during loading + welcome states;
 // fades out after vault is selected.
 import { CerebrumSplash } from "./components/CerebrumSplash";
+import {
+  PlotterSidebar,
+  type PlotterBinding,
+} from "./components/PlotterSidebar";
+import {
+  FOCUS_PLOT_EVENT,
+  type FocusPlotDetail,
+} from "./components/CortexPlotNodeView";
+import type { PlotData } from "./editor/CortexPlotNode";
 
 /** Local YYYY-MM-DD — uses the user's timezone, never UTC. */
 function todayLocal(): string {
@@ -412,6 +421,33 @@ function App() {
     });
   }
 
+  // --- Cluster 27 v1.0 — Plotter sidebar state ---------------------------
+  // Bound to whichever cortexPlot node was last clicked / focused.
+  // Cleared when the user explicitly closes the sidebar.
+  const [plotterBinding, setPlotterBinding] = useState<PlotterBinding | null>(
+    null,
+  );
+  const [plotterSidebarWidth, setPlotterSidebarWidth] = useState<number>(() => {
+    try {
+      const v = parseInt(
+        localStorage.getItem("cortex:plotter-sidebar-width") ?? "420",
+        10,
+      );
+      if (Number.isFinite(v) && v >= 360 && v <= 640) return v;
+    } catch {
+      // ignore
+    }
+    return 420;
+  });
+  const persistPlotterSidebarWidth = useCallback((next: number) => {
+    setPlotterSidebarWidth(next);
+    try {
+      localStorage.setItem("cortex:plotter-sidebar-width", String(next));
+    } catch {
+      // ignore
+    }
+  }, []);
+
   // --- Cluster 26 — draggable sidebar width ----------------------------
   // The sidebar's expanded width is now user-resizable via a vertical
   // drag handle on its right edge. Width persists in localStorage.
@@ -564,6 +600,74 @@ function App() {
     }
     document.addEventListener("cortex:open-file", onOpen);
     return () => document.removeEventListener("cortex:open-file", onOpen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSlotIdx, vaultPath]);
+
+  // Cluster 27 v1.0 — Listen for cortex:focus-plot events bubbling
+  // up from every TabPane's editor view.dom. The NodeView emits these
+  // when the user clicks a plot; we bind the PlotterSidebar to the
+  // clicked plot. The active slot's pane is the one we read attrs
+  // through (updateAttrs walks the editor doc to find the cortexPlot
+  // node at `pos` and patches it via a ProseMirror transaction).
+  useEffect(() => {
+    function onFocusPlot(e: Event) {
+      const ce = e as CustomEvent<FocusPlotDetail>;
+      const detail = ce.detail;
+      if (!detail) return;
+      const slotIdx = activeSlotIdxRef.current ?? activeSlotIdx;
+      const pane = paneRefs.current[slotIdx];
+      const notePath = pane?.getPath() ?? null;
+      if (!vaultPath || !notePath) return;
+      setPlotterBinding({
+        vaultPath,
+        notePath,
+        plotId: detail.plotId,
+        plotType: detail.plotType,
+        width: detail.width,
+        height: detail.height,
+        configB64: detail.configB64,
+        dataB64: detail.dataB64,
+        updateAttrs: (patch) => {
+          // Walk the pane's editor doc for a cortexPlot node whose
+          // plotId matches, then dispatch a setNodeMarkup transaction.
+          // The handle exposes the editor via a method we add below.
+          const ed = pane?.getEditor?.();
+          if (!ed) return;
+          let targetPos: number | null = null;
+          ed.state.doc.descendants((node, pos) => {
+            if (
+              node.type.name === "cortexPlot" &&
+              node.attrs.plotId === detail.plotId
+            ) {
+              targetPos = pos;
+              return false;
+            }
+            return true;
+          });
+          if (targetPos == null) return;
+          const node = ed.state.doc.nodeAt(targetPos);
+          if (!node) return;
+          const nextAttrs = { ...node.attrs, ...patch };
+          const tr = ed.state.tr.setNodeMarkup(targetPos, undefined, nextAttrs);
+          ed.view.dispatch(tr);
+        },
+        warmDataCache: (data: PlotData) => {
+          const ed = pane?.getEditor?.();
+          if (!ed) return;
+          const storage = ed.storage as Record<
+            string,
+            { dataCache?: Map<string, PlotData>; cacheVersion?: number }
+          >;
+          const slot = storage.cortexPlot;
+          if (!slot) return;
+          if (!slot.dataCache) slot.dataCache = new Map();
+          slot.dataCache.set(detail.plotId, data);
+          slot.cacheVersion = (slot.cacheVersion ?? 0) + 1;
+        },
+      });
+    }
+    document.addEventListener(FOCUS_PLOT_EVENT, onFocusPlot);
+    return () => document.removeEventListener(FOCUS_PLOT_EVENT, onFocusPlot);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSlotIdx, vaultPath]);
 
@@ -1193,6 +1297,24 @@ function App() {
         }
       } else if (
         (e.ctrlKey || e.metaKey) &&
+        e.altKey &&
+        (e.key === "P" || e.key === "p")
+      ) {
+        // Cluster 27 v1.0 — insert a fresh cortexPlot at the cursor in
+        // the active slot, then open the PlotterSidebar bound to it.
+        // No-op if the active slot has no md open (the pane handle's
+        // method silently bails).
+        e.preventDefault();
+        const handle = paneRefs.current[activeSlotIdx];
+        if (handle?.insertPlot) {
+          handle.insertPlot().catch((err: unknown) => {
+            console.warn("[cortex] insertPlot failed:", err);
+          });
+        } else {
+          console.info("[cortex] Insert plot: open a markdown note first.");
+        }
+      } else if (
+        (e.ctrlKey || e.metaKey) &&
         e.shiftKey &&
         (e.key === "D" || e.key === "d")
       ) {
@@ -1771,6 +1893,16 @@ function App() {
               setPaletteOpen(true);
             }
           }}
+          onInsertPlot={() => {
+            // Cluster 27 v1.0 — toolbar entry point. Same pathway as the
+            // Ctrl+Alt+P shortcut: insert a fresh cortexPlot atom node
+            // at the active pane's cursor. The PlotterSidebar opens
+            // when the user clicks the inserted plot.
+            const handle = paneRefs.current[activeSlotIdx];
+            handle?.insertPlot?.().catch((err: unknown) => {
+              console.warn("[cortex] insertPlot failed:", err);
+            });
+          }}
         />
         <div style={baseStyles.appShell} className="cortex-app-shell">
           <aside
@@ -2217,6 +2349,15 @@ function App() {
             vaultPath={vaultPath}
             isOpen={orphanModalOpen}
             onClose={() => setOrphanModalOpen(false)}
+          />
+          {/* Cluster 27 v1.0 — Plotter sidebar. Renders only when a
+              plot is bound (click on any cortexPlot focuses + binds).
+              Click the × in the header to close + clear the binding. */}
+          <PlotterSidebar
+            binding={plotterBinding}
+            onClose={() => setPlotterBinding(null)}
+            width={plotterSidebarWidth}
+            onWidthChange={persistPlotterSidebarWidth}
           />
           {templatesModalOpen && (
             <TemplatesModal

@@ -18,6 +18,11 @@ const ALWAYS: Row[] = [
   { keys: "Ctrl+Shift+B", action: "Insert ::experiment block in editor" },
   { keys: "Ctrl+Shift+T", action: "Insert a table at the cursor" },
   { keys: "Ctrl+Shift+G", action: "Insert today's GitHub summary at cursor" },
+  {
+    keys: "Ctrl+Alt+P",
+    action:
+      "Insert an interactive plot at the cursor (Cluster 27 — opens the Plotter sidebar on click)",
+  },
   { keys: "Ctrl+Shift+C", action: "Switch active slot to the Calendar view" },
   {
     keys: "Ctrl+Shift+M",
