@@ -40,6 +40,7 @@
 
 import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 
 export const AUTOREPLACE_LS_KEY = "cortex:autoreplace:user-rules";
 export const AUTOREPLACE_DISABLED_LS_KEY =
@@ -53,6 +54,22 @@ export interface AutoReplaceRule {
   /** Replacement string. Should normally include the same trailing
    *  char so the trigger is preserved. Example: "→ ". */
   after: string;
+  /** Cluster 21 v1.2 — optional rich-content replacement. When present,
+   *  the input-rule handler parses this HTML through the editor's
+   *  schema into a ProseMirror Slice and replaces the matched range
+   *  with the resulting nodes. Supports structural blocks (Frame /
+   *  Tabs / Callout / Columns / Collapsible / etc.) and rich marks
+   *  (font, color, effects, particles).
+   *
+   *  When absent (every built-in plus most user rules), the plain
+   *  `after` string is used via the textInputRule path — same
+   *  behavior as v1.0/v1.1.
+   *
+   *  The plain `after` field is still required even when `afterHtml`
+   *  is present: it serves as the textual fallback shown in the
+   *  rule list, and as a sensible default if the schema parser
+   *  can't make sense of the HTML for some reason. */
+  afterHtml?: string;
   /** Optional category label for grouping in the UI. Built-ins only. */
   category?: string;
 }
@@ -135,21 +152,36 @@ export const CORTEX_AUTOREPLACE_BUILTIN: AutoReplaceRule[] = [
   { before: "\\partial ", after: "∂ ", category: "Math" },
 ];
 
-/** Read user-added rules from localStorage. Returns [] on parse failure. */
+/** Read user-added rules from localStorage. Returns [] on parse failure.
+ *  Cluster 21 v1.2 — also reads the optional `afterHtml` field for
+ *  rich-content rules. Older entries without `afterHtml` round-trip
+ *  unchanged. */
 export function readUserAutoReplaceRules(): AutoReplaceRule[] {
   try {
     const raw = localStorage.getItem(AUTOREPLACE_LS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (r): r is AutoReplaceRule =>
-        r &&
-        typeof r === "object" &&
-        typeof r.before === "string" &&
-        typeof r.after === "string" &&
-        r.before.length > 0,
-    );
+    return parsed
+      .filter(
+        (r): r is AutoReplaceRule =>
+          r &&
+          typeof r === "object" &&
+          typeof r.before === "string" &&
+          typeof r.after === "string" &&
+          r.before.length > 0,
+      )
+      .map((r) => {
+        // Strip / coerce afterHtml to a string|undefined.
+        const out: AutoReplaceRule = { before: r.before, after: r.after };
+        if (typeof (r as { afterHtml?: unknown }).afterHtml === "string") {
+          out.afterHtml = (r as { afterHtml?: string }).afterHtml;
+        }
+        if (typeof (r as { category?: unknown }).category === "string") {
+          out.category = (r as { category?: string }).category;
+        }
+        return out;
+      });
   } catch {
     return [];
   }
@@ -283,19 +315,76 @@ export const CortexAutoReplace = Extension.create({
                 const replaceFrom = from - (matchLen - text.length);
                 if (replaceFrom < blockStart) continue; // out of block
 
+                // Cluster 21 v1.2 — RICH-CONTENT path. When the rule
+                // carries an afterHtml string, parse it through the
+                // editor's schema into a ProseMirror Slice and replace
+                // the matched range with the resulting nodes. Lets the
+                // user expand a trigger like `--frame-- ` into a real
+                // Frame block, or `--tabs-- ` into a Tabs container,
+                // by editing the rule's "after" with the rich editor.
+                if (rule.afterHtml && rule.afterHtml.length > 0) {
+                  try {
+                    const tmp = document.createElement("div");
+                    tmp.innerHTML = rule.afterHtml;
+                    const pmParser = PMDOMParser.fromSchema(view.state.schema);
+                    const slice = pmParser.parseSlice(tmp);
+                    const tr = view.state.tr.replaceRange(
+                      replaceFrom,
+                      to,
+                      slice,
+                    );
+                    tr.setMeta("cortexAutoReplace", true);
+                    view.dispatch(tr);
+                    return true;
+                  } catch {
+                    // Fall through to the plain-text path below if HTML
+                    // parsing fails for any reason — the user still
+                    // gets the textual `after` as a graceful fallback.
+                  }
+                }
+
                 // Preserve the active marks (bold, italic, etc.) at
                 // the cursor so an auto-replace inside bold text
                 // stays bold.
                 const marks = view.state.storedMarks ?? $from.marks();
+
+                // Cluster 26 — consume the trigger whitespace.
+                //
+                // Built-ins were originally authored with `after`
+                // including a trailing space (e.g., "→ ") to "preserve
+                // the trigger" character. In practice users expect
+                // Word/Notion-style autocorrect: typing `--> ` should
+                // produce `→` with the cursor parked right after the
+                // arrow, NOT `→ ` with a leftover space.
+                //
+                // We strip the trailing trigger char from `after` at
+                // apply time WHEN the trigger char (last char of
+                // `before`) is whitespace AND `after` ends with that
+                // same char. Non-whitespace triggers (e.g., `)` in
+                // `(c)`) are preserved untouched — those rules don't
+                // have the same "leftover whitespace" feel. Stored
+                // rule values are NOT mutated; the strip is purely
+                // run-time so users can still edit / inspect rules
+                // exactly as authored.
+                let effectiveAfter = rule.after;
+                const trigger = rule.before[rule.before.length - 1];
+                if (
+                  trigger &&
+                  /\s/.test(trigger) &&
+                  effectiveAfter.endsWith(trigger)
+                ) {
+                  effectiveAfter = effectiveAfter.slice(0, -1);
+                }
+
                 let tr;
-                if (rule.after.length === 0) {
+                if (effectiveAfter.length === 0) {
                   // Empty replacement = delete the trigger entirely.
                   tr = view.state.tr.delete(replaceFrom, to);
                 } else {
                   tr = view.state.tr.replaceWith(
                     replaceFrom,
                     to,
-                    view.state.schema.text(rule.after, marks),
+                    view.state.schema.text(effectiveAfter, marks),
                   );
                 }
                 tr.setMeta("cortexAutoReplace", true);

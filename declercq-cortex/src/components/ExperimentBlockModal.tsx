@@ -186,12 +186,13 @@ export function ExperimentBlockModal({
   }
 
   return (
-    <div style={styles.scrim} onClick={onClose}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKey}
         role="dialog"
+        data-cortex-modal
         aria-label="Insert experiment block"
       >
         <h2 style={styles.heading}>Insert block</h2>

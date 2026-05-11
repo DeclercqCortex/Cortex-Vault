@@ -4745,6 +4745,14 @@ const DOC_TYPES: &[&str] = &[
     "idea",
     "method",
     "note",
+    // Cluster 24 v1.0.1 — templates for the recurring weekly + monthly
+    // review log files auto-created by ensure_review_log_file. Editing
+    // these via the Templates modal lets the user customize the
+    // "What was this review about? / What I learned / Action items"
+    // structure once and have every Sunday's auto-created log inherit
+    // the changes.
+    "weekly-review",
+    "monthly-review",
 ];
 
 fn valid_document_type(doc_type: &str) -> bool {
@@ -4772,6 +4780,8 @@ fn default_template_for(doc_type: &str) -> &'static str {
         "idea" => DEFAULT_TEMPLATE_IDEA,
         "method" => DEFAULT_TEMPLATE_METHOD,
         "note" => DEFAULT_TEMPLATE_NOTE,
+        "weekly-review" => DEFAULT_TEMPLATE_WEEKLY_REVIEW,
+        "monthly-review" => DEFAULT_TEMPLATE_MONTHLY_REVIEW,
         _ => "",
     }
 }
@@ -4939,6 +4949,89 @@ date: \"{{date}}\"\n\
 \n\
 # {{title}}\n\
 \n";
+
+// Cluster 24 v1.0.1 — Weekly + Monthly review log templates.
+//
+// Auto-applied by ensure_review_log_file when it creates the per-Sunday
+// log file under `<vault>/Reviews/Weekly/` or `Reviews/Monthly/`. Edit
+// these via the Templates modal to change the structure of every
+// future review log without touching code.
+//
+// Placeholders supported here: {{date}} (the Sunday's local YYYY-MM-DD),
+// {{title}} (the auto-generated filename stem), and the standard
+// {{week_number}}, {{day_of_week}} from PlaceholderContext. Unknown
+// tokens stay literal so a user who adds {{author}} to their template
+// will see the literal token until that placeholder is wired (or until
+// they remove it).
+const DEFAULT_TEMPLATE_WEEKLY_REVIEW: &str = "---\n\
+id: review-weekly-{{date}}\n\
+type: review\n\
+kind: weekly\n\
+date: \"{{date}}\"\n\
+---\n\
+\n\
+# Weekly Review — {{date}}\n\
+\n\
+## What was this review about?\n\
+\n\
+_What did you sit down to look at this week? What questions were you asking yourself?_\n\
+\n\
+\n\
+\n\
+## What did you learn?\n\
+\n\
+_What conclusions, surprises, or follow-ups came out of the session?_\n\
+\n\
+\n\
+\n\
+## Wins this week\n\
+\n\
+- \n\
+\n\
+## Stuck on\n\
+\n\
+- \n\
+\n\
+## Action items for next week\n\
+\n\
+- [ ] \n";
+
+const DEFAULT_TEMPLATE_MONTHLY_REVIEW: &str = "---\n\
+id: review-monthly-{{date}}\n\
+type: review\n\
+kind: monthly\n\
+date: \"{{date}}\"\n\
+---\n\
+\n\
+# Monthly Review — {{date}}\n\
+\n\
+## What was this review about?\n\
+\n\
+_Big picture: what did you set out to accomplish this month? What questions were guiding you?_\n\
+\n\
+\n\
+\n\
+## What did you learn?\n\
+\n\
+_Themes across the four weekly reviews. Surprises. Course corrections._\n\
+\n\
+\n\
+\n\
+## Wins this month\n\
+\n\
+- \n\
+\n\
+## What didn't work\n\
+\n\
+- \n\
+\n\
+## Goals for next month\n\
+\n\
+- [ ] \n\
+\n\
+## Open questions carried forward\n\
+\n\
+- \n";
 
 /// Context bag for placeholder substitution. Every field is optional; the
 /// substituter leaves unknown tokens in place untouched (so an experiment
@@ -6661,6 +6754,35 @@ fn expand_recurrence(
                 },
                 None => master.title.clone(),
             };
+            // Cluster 24 v1.0.1 — review events get per-instance bodies
+            // with a wikilink to that Sunday's log file. The 12-hour
+            // shift puts us at "local noon" for any timezone within ±12h
+            // of UTC, so ymd_from_unix returns the local date the user
+            // sees on the calendar.
+            let effective_body = if master.id == CORTEX24_REVIEW_WEEKLY_ID
+                || master.id == CORTEX24_REVIEW_MONTHLY_ID
+            {
+                let kind = if master.id == CORTEX24_REVIEW_WEEKLY_ID {
+                    "Weekly"
+                } else {
+                    "Monthly"
+                };
+                let noon_local_approx = effective_start + 12 * 3600;
+                let (yy, mo, dd) = ymd_from_unix(noon_local_approx);
+                let date_iso = format!("{:04}-{:02}-{:02}", yy, mo, dd);
+                let basename = format!("{} {} Review", date_iso, kind);
+                let descriptor = if kind == "Weekly" {
+                    "this Sunday's"
+                } else {
+                    "this month's"
+                };
+                format!(
+                    "[[{}]]\n\n*Click the link above to open {} review log — what was the review about, and what did you learn?*",
+                    basename, descriptor
+                )
+            } else {
+                master.body.clone()
+            };
             out.push(Event {
                 id: master.id.clone(),
                 title: effective_title,
@@ -6669,7 +6791,7 @@ fn expand_recurrence(
                 all_day: master.all_day,
                 category: master.category.clone(),
                 status: master.status.clone(),
-                body: master.body.clone(),
+                body: effective_body,
                 created_at: master.created_at,
                 updated_at: master.updated_at,
                 recurrence_rule: master.recurrence_rule.clone(),
@@ -6738,10 +6860,19 @@ fn expand_recurrence(
             }
         }
         "MONTHLY" => {
-            // Walk forward month by month, emitting on BYMONTHDAY (or
-            // master's day-of-month when not specified).
+            // Walk forward month by month. Cluster 24 v1.0 adds support for
+            // POSITIONAL BYDAY tokens (1SU = "first Sunday of month",
+            // -1MO = "last Monday", etc.) so the recurring monthly review
+            // can land on the first Sunday. When a positional token is
+            // present, BYMONTHDAY is ignored (positional wins). When no
+            // BYDAY appears, we fall back to BYMONTHDAY (or the master's
+            // day-of-month) — pre-Cluster-24 behaviour, unchanged.
             let (mut y, mut m, _) = ymd_from_unix(master.start_at);
-            let target_day = by_monthday.unwrap_or_else(|| {
+            let positional_byday: Option<(i32, u32)> = parts
+                .get("BYDAY")
+                .and_then(|s| s.split(',').next())
+                .and_then(cortex24_parse_positional_byday);
+            let default_target_day = by_monthday.unwrap_or_else(|| {
                 let (_, _, d) = ymd_from_unix(master.start_at);
                 d
             });
@@ -6750,6 +6881,28 @@ fn expand_recurrence(
             let mut safety = 0;
             while safety < hard_cap {
                 safety += 1;
+                let target_day = match positional_byday {
+                    Some((occ, weekday_iso)) => {
+                        match cortex24_nth_weekday_of_month(y, m, weekday_iso, occ) {
+                            Some(d) => d,
+                            None => {
+                                // No Nth-weekday in this month (e.g., -5SU).
+                                // Skip and advance.
+                                let mut steps = interval;
+                                while steps > 0 {
+                                    m += 1;
+                                    if m > 12 {
+                                        m = 1;
+                                        y += 1;
+                                    }
+                                    steps -= 1;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    None => default_target_day,
+                };
                 if let Some(unix) = unix_from_ymd_hms(y, m, target_day, sh, sm, ss) {
                     if unix >= master.start_at && unix <= walk_end {
                         push_instance(&mut out, unix);
@@ -7164,8 +7317,22 @@ fn get_time_tracking_aggregates(
         // override (Cluster 14 v1.3) — in which case use the override's
         // actual_minutes. Skipped instances were already dropped by
         // expand_recurrence and don't appear here.
-        // For non-recurring events, the master's actual_minutes (set
-        // post-hoc via the modal) is the source of truth.
+        //
+        // Non-recurring events:
+        //   - If the user has recorded an actual_minutes (Some(m), m>=0):
+        //     use that.
+        //   - Cluster 24 v1.0.1: if no actual_minutes is recorded AND the
+        //     event has already PASSED (end_at <= now), auto-credit as
+        //     fully spent — the event happened, the user just didn't
+        //     record a custom value, so planned is the best estimate.
+        //     This matches the recurring-event behaviour and removes the
+        //     need to manually fill actual on every past meeting.
+        //   - If the event is in the future, leave actual at 0 with no
+        //     has_actual flag (planned-only counted).
+        // The NULL-vs-0 distinction is preserved: explicit 0 stays 0
+        // (recorded as "really spent zero"); NULL on a past event is
+        // assumed to be planned.
+        let now_unix = unix_now();
         let is_recurring = evt.recurrence_rule.is_some();
         let (actual, has_actual) = if is_recurring {
             match evt.actual_minutes {
@@ -7175,7 +7342,13 @@ fn get_time_tracking_aggregates(
         } else {
             match evt.actual_minutes {
                 Some(m) if m >= 0 => (m, true),
-                _ => (0, false),
+                _ => {
+                    if evt.end_at <= now_unix {
+                        (planned, true)
+                    } else {
+                        (0, false)
+                    }
+                }
             }
         };
         let row = by_category
@@ -7504,6 +7677,11 @@ fn get_time_tracking_daily_rollup(
         };
         let day_iso = local_iso_date_for(evt.start_at, tz_offset_minutes);
         let planned = ((evt.end_at - evt.start_at).max(0)) / 60;
+        // Cluster 24 v1.0.1 — same auto-credit-past-events rule as
+        // get_time_tracking_aggregates. NULL actual on a past non-
+        // recurring event is treated as planned; NULL on a future
+        // event stays 0.
+        let now_unix = unix_now();
         let is_recurring = evt.recurrence_rule.is_some();
         let actual = if is_recurring {
             match evt.actual_minutes {
@@ -7513,7 +7691,13 @@ fn get_time_tracking_daily_rollup(
         } else {
             match evt.actual_minutes {
                 Some(m) if m >= 0 => m,
-                _ => 0,
+                _ => {
+                    if evt.end_at <= now_unix {
+                        planned
+                    } else {
+                        0
+                    }
+                }
             }
         };
         let key = (day_iso.clone(), cat_key.clone());
@@ -7589,6 +7773,12 @@ fn aggregate_time_tracking_in_window(
             raw_cat.to_string()
         };
         let planned = ((evt.end_at - evt.start_at).max(0)) / 60;
+        // Cluster 24 v1.0.1 — same auto-credit-past-events rule as the
+        // public aggregator. NULL actual on a past non-recurring event
+        // is treated as planned. The splice runs against yesterday's
+        // window, so virtually every non-recurring event in scope has
+        // already passed — this matters most here.
+        let now_unix = unix_now();
         let is_recurring = evt.recurrence_rule.is_some();
         let (actual, has_actual) = if is_recurring {
             match evt.actual_minutes {
@@ -7598,7 +7788,13 @@ fn aggregate_time_tracking_in_window(
         } else {
             match evt.actual_minutes {
                 Some(m) if m >= 0 => (m, true),
-                _ => (0, false),
+                _ => {
+                    if evt.end_at <= now_unix {
+                        (planned, true)
+                    } else {
+                        (0, false)
+                    }
+                }
             }
         };
         let row = by_category
@@ -9993,6 +10189,714 @@ fn delete_shape_template(vault_path: String, name: String) -> Result<(), String>
 // App entry
 // -----------------------------------------------------------------------------
 
+// =============================================================================
+// Cluster 24 v1.0 — File operations (create / rename / delete) for the vault
+// sidebar, plus auto-recurring weekly + monthly reviews on the calendar.
+// =============================================================================
+
+/// Reject path segments that contain OS-reserved characters, are empty, or
+/// would walk out of the vault. Names are trimmed before the checks so a user
+/// who types a trailing space doesn't get a confusing error.
+fn cortex24_validate_filename_segment(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Name is empty".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("Reserved name".to_string());
+    }
+    for c in trimmed.chars() {
+        if c.is_control() {
+            return Err("Name contains control characters".to_string());
+        }
+        if "/\\:*?\"<>|".contains(c) {
+            return Err(format!("Name contains invalid character: {}", c));
+        }
+    }
+    if trimmed.len() > 255 {
+        return Err("Name is too long (max 255 chars)".to_string());
+    }
+    Ok(())
+}
+
+/// Lexical containment check (no canonicalize so it works for not-yet-
+/// existing paths too). Sufficient because every path the FileTree
+/// surfaces is already a real filesystem path under the vault root.
+fn cortex24_ensure_within_vault(vault: &str, path: &Path) -> Result<(), String> {
+    let vault_path = PathBuf::from(vault);
+    if !path.starts_with(&vault_path) {
+        return Err(format!("Path is outside the vault: {}", path.display()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn create_file_in_folder(
+    vault_path: String,
+    parent_dir: String,
+    name: String,
+) -> Result<String, String> {
+    cortex24_validate_filename_segment(&name)?;
+    let parent = PathBuf::from(&parent_dir);
+    cortex24_ensure_within_vault(&vault_path, &parent)?;
+    if !parent.exists() || !parent.is_dir() {
+        return Err(format!("Parent folder doesn't exist: {}", parent.display()));
+    }
+    // Auto-append .md when the user didn't supply an extension. Anyone who
+    // wants a different extension is expected to type "name.txt" etc.
+    let mut filename = name.trim().to_string();
+    if !filename.contains('.') {
+        filename.push_str(".md");
+    }
+    let new_path = parent.join(&filename);
+    if new_path.exists() {
+        return Err("A file with that name already exists".to_string());
+    }
+    fs::write(&new_path, "").map_err(|e| e.to_string())?;
+    let new_path_str = new_path.to_string_lossy().to_string();
+    if filename.to_lowercase().ends_with(".md") {
+        let _ = index_single_file(vault_path.clone(), new_path_str.clone());
+    }
+    Ok(new_path_str)
+}
+
+#[tauri::command]
+fn create_folder_in_folder(
+    vault_path: String,
+    parent_dir: String,
+    name: String,
+) -> Result<String, String> {
+    cortex24_validate_filename_segment(&name)?;
+    let parent = PathBuf::from(&parent_dir);
+    cortex24_ensure_within_vault(&vault_path, &parent)?;
+    if !parent.exists() || !parent.is_dir() {
+        return Err(format!("Parent folder doesn't exist: {}", parent.display()));
+    }
+    let new_path = parent.join(name.trim());
+    if new_path.exists() {
+        return Err("A folder with that name already exists".to_string());
+    }
+    fs::create_dir(&new_path).map_err(|e| e.to_string())?;
+    Ok(new_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn rename_path(
+    vault_path: String,
+    old_path: String,
+    new_name: String,
+    update_wikilinks: bool,
+) -> Result<String, String> {
+    cortex24_validate_filename_segment(&new_name)?;
+    let old = PathBuf::from(&old_path);
+    cortex24_ensure_within_vault(&vault_path, &old)?;
+    if !old.exists() {
+        return Err(format!("Path doesn't exist: {}", old.display()));
+    }
+    let parent = old
+        .parent()
+        .ok_or_else(|| "Cannot rename a path with no parent (the vault root)".to_string())?;
+
+    // Preserve the original extension if the user didn't include one in the
+    // new name, but only for files (folders never have extensions).
+    let is_file = old.is_file();
+    let new_filename = if is_file && !new_name.contains('.') {
+        if let Some(ext) = old.extension().and_then(|s| s.to_str()) {
+            format!("{}.{}", new_name.trim(), ext)
+        } else {
+            new_name.trim().to_string()
+        }
+    } else {
+        new_name.trim().to_string()
+    };
+
+    let new_path_buf = parent.join(&new_filename);
+    if new_path_buf.exists() {
+        return Err(format!(
+            "A file or folder with that name already exists: {}",
+            new_path_buf.display()
+        ));
+    }
+
+    let is_md_file = is_file
+        && old
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("md"))
+            .unwrap_or(false);
+
+    let old_basename = old
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let new_basename = new_path_buf
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    fs::rename(&old, &new_path_buf).map_err(|e| e.to_string())?;
+    let new_path_str = new_path_buf.to_string_lossy().to_string();
+
+    let conn = open_or_init_db(&vault_path)?;
+
+    if is_file {
+        cortex24_purge_path_from_index(&conn, &old_path)?;
+        if is_md_file {
+            let _ = index_single_file(vault_path.clone(), new_path_str.clone());
+        }
+        if update_wikilinks && is_md_file && old_basename != new_basename {
+            let _ = cortex24_rewrite_wikilinks_in_vault(
+                &vault_path,
+                &old_basename,
+                &new_basename,
+                &new_path_str,
+            );
+        }
+    } else if old.is_dir() || new_path_buf.is_dir() {
+        // Folder rename: every md/pdf file inside changed paths. Re-walk
+        // the new location, purge old paths from the index, re-index the
+        // new ones. Wikilinks aren't affected by folder renames (they
+        // reference filenames not paths).
+        let new_folder = new_path_buf.clone();
+        let mut to_reindex: Vec<String> = Vec::new();
+        cortex24_walk_for_indexable_files(&new_folder, &mut to_reindex);
+        let new_prefix = new_folder.to_string_lossy().to_string();
+        for new_p in &to_reindex {
+            if let Some(rel) = new_p.strip_prefix(&new_prefix) {
+                let old_p = format!("{}{}", &old_path, rel);
+                cortex24_purge_path_from_index(&conn, &old_p)?;
+                let _ = index_single_file(vault_path.clone(), new_p.clone());
+            }
+        }
+    }
+
+    Ok(new_path_str)
+}
+
+fn cortex24_walk_for_indexable_files(dir: &Path, out: &mut Vec<String>) {
+    let rd = match fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            cortex24_walk_for_indexable_files(&path, out);
+        } else if path.is_file() {
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_lowercase());
+            if matches!(ext.as_deref(), Some("md") | Some("pdf")) {
+                out.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+}
+
+/// Remove every path-keyed row from the index for the given file path.
+/// Mirrors index_single_file's DELETE statements without the INSERTs, plus
+/// the hierarchy table. Idempotent.
+fn cortex24_purge_path_from_index(conn: &Connection, path: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM notes WHERE path = ?1", params![path])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM metadata WHERE path = ?1", params![path])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM links WHERE source = ?1", params![path])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM marks WHERE source_path = ?1", params![path])
+        .map_err(|e| e.to_string())?;
+    let _ = conn.execute("DELETE FROM hierarchy WHERE path = ?1", params![path]);
+    Ok(())
+}
+
+/// Walk every .md file in the vault, rewrite wikilinks whose target matches
+/// `old_basename` (case-insensitive, trim-aware) to `new_basename`. Skips the
+/// renamed file itself (already at its new path; its content doesn't reference
+/// itself by old basename). Returns the count of touched files.
+fn cortex24_rewrite_wikilinks_in_vault(
+    vault_path: &str,
+    old_basename: &str,
+    new_basename: &str,
+    skip_path: &str,
+) -> Result<usize, String> {
+    let mut count = 0usize;
+    let mut to_visit: Vec<PathBuf> = vec![PathBuf::from(vault_path)];
+    while let Some(dir) = to_visit.pop() {
+        let rd = match fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "node_modules" {
+                continue;
+            }
+            if path.is_dir() {
+                to_visit.push(path);
+            } else if path.is_file() {
+                let p_str = path.to_string_lossy().to_string();
+                if p_str == skip_path {
+                    continue;
+                }
+                let is_md = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false);
+                if !is_md {
+                    continue;
+                }
+                let content = match fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let rewritten =
+                    cortex24_rewrite_wikilinks_in_string(&content, old_basename, new_basename);
+                if rewritten != content {
+                    if fs::write(&path, &rewritten).is_ok() {
+                        count += 1;
+                        let _ = index_single_file(vault_path.to_string(), p_str);
+                    }
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Manual scan that handles `[[name]]`, `[[name|alias]]`, `[[name#section]]`,
+/// `[[name#section|alias]]`. The `name` portion ends at the first `#` or `|`,
+/// whichever appears first; everything from that point on is preserved
+/// verbatim. Whitespace surrounding the target is preserved so a wikilink
+/// like `[[ My Note ]]` rewrites to `[[ Renamed ]]` rather than collapsing.
+fn cortex24_rewrite_wikilinks_in_string(
+    content: &str,
+    old_basename: &str,
+    new_basename: &str,
+) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("[[") {
+        out.push_str(&rest[..start]);
+        out.push_str("[[");
+        let after_open = &rest[start + 2..];
+        let end = match after_open.find("]]") {
+            Some(e) => e,
+            None => {
+                // Unclosed [[. Preserve the remainder verbatim and stop.
+                out.push_str(after_open);
+                return out;
+            }
+        };
+        let inner = &after_open[..end];
+        if inner.contains('\n') {
+            out.push_str(inner);
+            out.push_str("]]");
+            rest = &after_open[end + 2..];
+            continue;
+        }
+        let target_end = inner
+            .find(|c: char| c == '#' || c == '|')
+            .unwrap_or(inner.len());
+        let target = &inner[..target_end];
+        let suffix = &inner[target_end..];
+        if target.trim().eq_ignore_ascii_case(old_basename) {
+            // Preserve leading / trailing whitespace inside the [[…]] target.
+            let leading_end = target
+                .find(|c: char| !c.is_whitespace())
+                .unwrap_or(target.len());
+            let trailing_start = target
+                .rfind(|c: char| !c.is_whitespace())
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            out.push_str(&target[..leading_end]);
+            out.push_str(new_basename);
+            if trailing_start > leading_end {
+                out.push_str(&target[trailing_start..]);
+            }
+            out.push_str(suffix);
+        } else {
+            out.push_str(inner);
+        }
+        out.push_str("]]");
+        rest = &after_open[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[tauri::command]
+fn trash_path(vault_path: String, path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    cortex24_ensure_within_vault(&vault_path, &p)?;
+    if !p.exists() {
+        return Err(format!("Path doesn't exist: {}", p.display()));
+    }
+    let conn = open_or_init_db(&vault_path)?;
+    if p.is_file() {
+        cortex24_purge_path_from_index(&conn, &path)?;
+    } else if p.is_dir() {
+        let mut files = Vec::new();
+        cortex24_walk_for_indexable_files(&p, &mut files);
+        for fpath in files {
+            cortex24_purge_path_from_index(&conn, &fpath)?;
+        }
+    }
+    trash::delete(&p).map_err(|e| format!("Failed to send to Recycle Bin: {}", e))?;
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Cluster 24 v1.0 — Review schedule (weekly + monthly recurring all-day events)
+// -----------------------------------------------------------------------------
+
+const CORTEX24_REVIEW_WEEKLY_ID: &str = "cortex-review-weekly";
+const CORTEX24_REVIEW_MONTHLY_ID: &str = "cortex-review-monthly";
+const CORTEX24_REVIEW_CATEGORY_NAME: &str = "Review";
+const CORTEX24_REVIEW_CATEGORY_COLOR: &str = "#a78bfa";
+
+fn cortex24_most_recent_sunday_local_midnight_utc(tz_offset_minutes: i32) -> i64 {
+    let now_utc = unix_now();
+    let now_local = now_utc + (tz_offset_minutes as i64) * 60;
+    let local_today_midnight = (now_local / 86_400) * 86_400;
+    let weekday = weekday_iso_for_unix(local_today_midnight);
+    let days_back = if weekday == 7 { 0 } else { weekday as i64 };
+    let local_sunday_midnight = local_today_midnight - days_back * 86_400;
+    local_sunday_midnight - (tz_offset_minutes as i64) * 60
+}
+
+/// Return the day-of-month (1..=31) of the Nth weekday in the given month,
+/// or None if there aren't N occurrences. `n > 0` means "Nth from start";
+/// `n = -1` means "last"; other negative values are also supported.
+/// `weekday_iso`: 1 = Mon, 2 = Tue, …, 7 = Sun.
+fn cortex24_nth_weekday_of_month(year: i32, month: u32, weekday_iso: u32, n: i32) -> Option<u32> {
+    let mut occurrences: Vec<u32> = Vec::new();
+    for day in 1..=31u32 {
+        let unix = match unix_from_ymd_hms(year, month, day, 0, 0, 0) {
+            Some(u) => u,
+            None => continue,
+        };
+        let (uy, um, _) = ymd_from_unix(unix);
+        if uy != year || um != month {
+            continue;
+        }
+        if weekday_iso_for_unix(unix) == weekday_iso {
+            occurrences.push(day);
+        }
+    }
+    if n > 0 {
+        occurrences.get((n - 1) as usize).copied()
+    } else if n < 0 {
+        let idx = (occurrences.len() as i32) + n;
+        if idx >= 0 {
+            occurrences.get(idx as usize).copied()
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse a positional BYDAY token like "1SU", "-1MO", "2WE" into
+/// (occurrence, weekday_iso). A bare "SU" without a numeric prefix returns
+/// None — the WEEKLY-style multi-day BYDAY is handled elsewhere.
+fn cortex24_parse_positional_byday(s: &str) -> Option<(i32, u32)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Find where the digit portion ends (after optional leading sign).
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    if bytes[0] == b'-' || bytes[0] == b'+' {
+        i = 1;
+    }
+    let digit_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == digit_start {
+        return None;
+    }
+    let n: i32 = s[..i].parse().ok()?;
+    let day_part = &s[i..];
+    let day = weekday_iso_index_from_short(day_part)?;
+    Some((n, day))
+}
+
+fn cortex24_ensure_review_category(conn: &Connection) -> Result<String, String> {
+    // The events table's `category` column references event_categories.id —
+    // and the v1 schema's columns are (id, label, color, sort_order). v1.0
+    // of Cluster 24 mistakenly used `name` and `created_at` here, which
+    // failed every INSERT with "no such column: name" and silently broke
+    // the whole ensure_review_events call. The fix below uses the correct
+    // column names; the stable id stays "cat-review".
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM event_categories WHERE id = ?1 OR label = ?2 LIMIT 1",
+            params!["cat-review", CORTEX24_REVIEW_CATEGORY_NAME],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let id = "cat-review".to_string();
+    // Sort_order: place after the bundled defaults (0..=4) so it shows
+    // last in the picker if the user never customises.
+    conn.execute(
+        "INSERT INTO event_categories (id, label, color, sort_order)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            &id,
+            CORTEX24_REVIEW_CATEGORY_NAME,
+            CORTEX24_REVIEW_CATEGORY_COLOR,
+            10i64,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+fn cortex24_upsert_review_event(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    start_at: i64,
+    end_at: i64,
+    rrule: &str,
+    category_id: &str,
+    now: i64,
+) -> Result<(), String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM events WHERE id = ?1 LIMIT 1",
+            params![id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if exists {
+        conn.execute(
+            "UPDATE events SET
+                title = ?2, start_at = ?3, end_at = ?4, all_day = 1,
+                category = ?5, status = 'planned', body = '',
+                updated_at = ?6, recurrence_rule = ?7,
+                notify_mode = 'urgent', notify_lead_minutes = NULL,
+                actual_minutes = NULL
+             WHERE id = ?1",
+            params![id, title, start_at, end_at, category_id, now, rrule],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "INSERT INTO events (id, title, start_at, end_at, all_day, category, status, body, created_at, updated_at, recurrence_rule, notify_mode, notify_lead_minutes, actual_minutes)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, 'planned', '', ?6, ?6, ?7, 'urgent', NULL, NULL)",
+            params![id, title, start_at, end_at, category_id, now, rrule],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn cortex24_delete_review_event(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM events WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn ensure_review_events(
+    vault_path: String,
+    weekly_enabled: bool,
+    monthly_enabled: bool,
+    tz_offset_minutes: i32,
+) -> Result<(), String> {
+    let conn = open_or_init_db(&vault_path)?;
+    let now = unix_now();
+    let category_id = cortex24_ensure_review_category(&conn)?;
+    let last_sunday_unix = cortex24_most_recent_sunday_local_midnight_utc(tz_offset_minutes);
+    let one_day = 86_400i64;
+
+    if weekly_enabled {
+        cortex24_upsert_review_event(
+            &conn,
+            CORTEX24_REVIEW_WEEKLY_ID,
+            "Weekly review",
+            last_sunday_unix,
+            last_sunday_unix + one_day,
+            "FREQ=WEEKLY;BYDAY=SU",
+            &category_id,
+            now,
+        )?;
+    } else {
+        cortex24_delete_review_event(&conn, CORTEX24_REVIEW_WEEKLY_ID)?;
+    }
+
+    if monthly_enabled {
+        cortex24_upsert_review_event(
+            &conn,
+            CORTEX24_REVIEW_MONTHLY_ID,
+            "Monthly review",
+            last_sunday_unix,
+            last_sunday_unix + one_day,
+            "FREQ=MONTHLY;BYDAY=1SU",
+            &category_id,
+            now,
+        )?;
+    } else {
+        cortex24_delete_review_event(&conn, CORTEX24_REVIEW_MONTHLY_ID)?;
+    }
+
+    Ok(())
+}
+
+/// Cluster 24 v1.0.1 — review-log file auto-create.
+///
+/// Each weekly / monthly review instance carries a wikilink in its
+/// body that points to a per-Sunday log file. When the user clicks
+/// the wikilink, this command runs first to ensure the file exists
+/// (creating it at `<vault>/Reviews/<Kind>/<date> <Kind> Review.md`
+/// with a default template if missing); then the existing wikilink-
+/// follow path opens it.
+///
+/// Idempotent — returns the existing path if the file is already
+/// there. Re-clicking the wikilink doesn't overwrite content the
+/// user has already typed into the log.
+#[tauri::command]
+fn ensure_review_log_file(
+    vault_path: String,
+    kind: String,
+    date_iso: String,
+) -> Result<String, String> {
+    let kind_norm = match kind.to_lowercase().as_str() {
+        "weekly" => "Weekly",
+        "monthly" => "Monthly",
+        _ => return Err(format!("Unknown review kind: {}", kind)),
+    };
+    // Validate YYYY-MM-DD shape (cheap — full validity is enforced by
+    // unix_from_ymd_hms when other code consumes the date).
+    if date_iso.len() != 10
+        || date_iso.chars().nth(4) != Some('-')
+        || date_iso.chars().nth(7) != Some('-')
+        || !date_iso[..4].chars().all(|c| c.is_ascii_digit())
+        || !date_iso[5..7].chars().all(|c| c.is_ascii_digit())
+        || !date_iso[8..10].chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(format!("Invalid date_iso (want YYYY-MM-DD): {}", date_iso));
+    }
+
+    let vault = PathBuf::from(&vault_path);
+    let folder = vault.join("Reviews").join(kind_norm);
+    if !folder.exists() {
+        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    }
+    let filename = format!("{} {} Review.md", date_iso, kind_norm);
+    let file_path = folder.join(&filename);
+
+    if !file_path.exists() {
+        // Cluster 24 v1.0.1 — go through the Cluster 22 template system
+        // so the user can customize the review-log structure once and
+        // every future Sunday's auto-created log inherits the changes.
+        // Template type is "weekly-review" or "monthly-review"; the
+        // resolver auto-creates the .md template on disk on first read
+        // (lazy init) so the user can immediately edit it via the
+        // Templates modal.
+        let template_doc_type = if kind_norm == "Weekly" {
+            "weekly-review"
+        } else {
+            "monthly-review"
+        };
+        let template_body = match read_or_init_template(&vault_path, template_doc_type) {
+            Ok(t) => t,
+            // Defensive — if template loading fails for any reason
+            // (corrupted disk, permissions), fall back to the bundled
+            // default so review-log creation never errors out.
+            Err(_) => cortex24_review_log_default_body(kind_norm, &date_iso),
+        };
+        // Apply placeholders. We only need the few fields review logs
+        // reference: date / title / slug / week_number / day_of_week.
+        let mut ctx = PlaceholderContext::default();
+        ctx.date = Some(date_iso.clone());
+        ctx.title = Some(format!("{} {} Review", date_iso, kind_norm));
+        ctx.slug = Some(
+            format!("{} {} Review", date_iso, kind_norm)
+                .to_lowercase()
+                .replace(' ', "-"),
+        );
+        // Best-effort week number + day-of-week. iso_week_number takes
+        // a YYYY-MM-DD string; day_of_week_from_iso likewise.
+        ctx.week_number = Some(iso_week_number(&date_iso));
+        ctx.day_of_week = Some(day_of_week_from_iso(&date_iso).to_string());
+        let body = apply_placeholders(&template_body, &ctx);
+
+        fs::write(&file_path, body).map_err(|e| e.to_string())?;
+        // Re-index so the file shows up in search / backlinks
+        // immediately, without waiting for the watcher's debounce.
+        let _ = index_single_file(vault_path.clone(), file_path.to_string_lossy().to_string());
+    }
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+fn cortex24_review_log_default_body(kind: &str, date_iso: &str) -> String {
+    let id_kind = kind.to_lowercase();
+    format!(
+        "---\n\
+         id: review-{}-{}\n\
+         type: review\n\
+         kind: {}\n\
+         date: \"{}\"\n\
+         ---\n\
+         \n\
+         # {} Review — {}\n\
+         \n\
+         ## What was this review about?\n\
+         \n\
+         _What did you sit down to look at? What questions were you asking yourself?_\n\
+         \n\
+         \n\
+         \n\
+         ## What did you learn?\n\
+         \n\
+         _What conclusions, surprises, or follow-ups came out of the session?_\n\
+         \n\
+         \n\
+         \n\
+         ## Action items\n\
+         \n\
+         - [ ] \n",
+        id_kind, date_iso, id_kind, date_iso, kind, date_iso,
+    )
+}
+
+#[tauri::command]
+fn get_review_settings(vault_path: String) -> Result<(bool, bool), String> {
+    let conn = open_or_init_db(&vault_path)?;
+    let weekly = conn
+        .query_row(
+            "SELECT 1 FROM events WHERE id = ?1 LIMIT 1",
+            params![CORTEX24_REVIEW_WEEKLY_ID],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    let monthly = conn
+        .query_row(
+            "SELECT 1 FROM events WHERE id = ?1 LIMIT 1",
+            params![CORTEX24_REVIEW_MONTHLY_ID],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    Ok((weekly, monthly))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -10097,6 +11001,14 @@ pub fn run() {
             write_document_template,
             reset_document_template,
             preview_document_template,
+            // Cluster 24 v1.0 — File operations + review schedule
+            create_file_in_folder,
+            create_folder_in_folder,
+            rename_path,
+            trash_path,
+            ensure_review_events,
+            get_review_settings,
+            ensure_review_log_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

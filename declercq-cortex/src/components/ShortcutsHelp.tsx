@@ -184,12 +184,13 @@ const PLANNED: Row[] = [
 export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   if (!isOpen) return null;
   return (
-    <div style={styles.scrim} onClick={onClose}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-label="Keyboard shortcuts"
+        data-cortex-modal
       >
         <h2 style={styles.heading}>Keyboard shortcuts</h2>
 

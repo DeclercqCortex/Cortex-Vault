@@ -41,10 +41,15 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   idea: "Idea",
   method: "Method",
   note: "Plain note",
+  // Cluster 24 v1.0.1 — auto-generated review log files.
+  "weekly-review": "Weekly review log",
+  "monthly-review": "Monthly review log",
 };
 
-/** All eight v1.0 doc types in a deliberate display order — Daily Log
- * lives at the top because Ctrl+D is the most-used creation flow.
+/** All ten doc types in a deliberate display order — Daily Log lives at
+ * the top because Ctrl+D is the most-used creation flow. Reviews are
+ * grouped together at the bottom; they're auto-created by the recurring
+ * calendar events rather than from a sidebar button.
  */
 const DOC_TYPE_ORDER: string[] = [
   "daily-log",
@@ -55,6 +60,8 @@ const DOC_TYPE_ORDER: string[] = [
   "project",
   "experiment",
   "iteration",
+  "weekly-review",
+  "monthly-review",
 ];
 
 const TEMPLATES_ENABLED_KEY = "cortex:templates-enabled";
@@ -176,6 +183,19 @@ function sampleContext(docType: string): Record<string, unknown> {
         slug: "spectral-collocation-on-chebyshev-grid",
         domain: "modeling",
         complexity: 3,
+      };
+    // Cluster 24 v1.0.1 — review log preview samples.
+    case "weekly-review":
+      return {
+        ...base,
+        title: `${today} Weekly Review`,
+        slug: `${today}-weekly-review`,
+      };
+    case "monthly-review":
+      return {
+        ...base,
+        title: `${today} Monthly Review`,
+        slug: `${today}-monthly-review`,
       };
     case "note":
     default:
@@ -319,13 +339,14 @@ export function TemplatesModal({
   );
 
   return (
-    <div style={styles.scrim} onClick={onClose}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKey}
         role="dialog"
         aria-label="Document templates"
+        data-cortex-modal
       >
         <div style={styles.headerRow}>
           <h2 style={styles.heading}>Document templates</h2>

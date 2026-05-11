@@ -156,8 +156,12 @@ export function CommandPalette({
         : "Search notes & PDFs…";
 
   return (
-    <div style={styles.scrim} onClick={onClose}>
-      <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
+      <div
+        style={styles.panel}
+        onClick={(e) => e.stopPropagation()}
+        data-cortex-modal
+      >
         {pickMode && (
           <div style={styles.pickBanner}>
             Picking a wikilink — click a result to insert <code>[[Title]]</code>{" "}

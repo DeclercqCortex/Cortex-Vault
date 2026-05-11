@@ -1,0 +1,287 @@
+/* ============================================================
+ * Cortex Design System — Colors + Type tokens
+ *
+ * Mirror of the live tokens from declercq-cortex/src/index.css
+ * (Aurora Glass refresh, Cluster 25 + Cluster 26).
+ *
+ * Use directly in mocks / slides / UI kit recreations. The
+ * token names match the production app exactly so designs made
+ * here paste back into the codebase with no rename.
+ * ============================================================ */
+
+/* ---------------- Webfonts (Google Fonts CDN) ---------------- */
+/* Loaded once via index.html in the production app. Mirrored
+   here so any standalone mock that imports this stylesheet
+   gets the same families. */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Lora:ital,wght@0,400;0,600;1,400&family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=Caveat:wght@400;600;700&family=Pacifico&family=Bebas+Neue&family=Cinzel:wght@400;600;700&family=Fira+Code:wght@400;500;700&family=Source+Serif+Pro:ital,wght@0,400;0,600;1,400&display=swap");
+
+/* ---------------- Dark theme (default) ---------------- */
+:root,
+:root.dark {
+  /* Surfaces */
+  --bg: #0d1018;
+  --bg-elev: rgba(30, 36, 54, 0.72);
+  --bg-elev-solid: #1a1f2e;
+  --bg-deep: #0a0d14;
+  --bg-card: rgba(26, 31, 46, 0.86);
+
+  /* Text */
+  --text: #ebeefb;
+  --text-2: #c2cae0;
+  --text-muted: rgba(235, 238, 251, 0.5);
+
+  /* Borders — cool light hairlines */
+  --border: rgba(168, 192, 240, 0.08);
+  --border-2: rgba(168, 192, 240, 0.16);
+
+  /* Accents — paired and used as a 135° gradient */
+  --accent: #7aa2ff;
+  --accent-2: #a98bff;
+  --accent-bg: rgba(122, 162, 255, 0.12);
+  --accent-bg-2: rgba(122, 162, 255, 0.22);
+  --accent-gradient: linear-gradient(135deg, #7aa2ff 0%, #a98bff 100%);
+
+  /* Status */
+  --primary: #5b8bff;
+  --danger: #ff8a8a;
+  --warning: #f5c365;
+
+  --scrim: rgba(7, 10, 18, 0.55);
+
+  /* Three-tier elevation */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.18), 0 1px 1px rgba(0, 0, 0, 0.1);
+  --shadow-2: 0 6px 22px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.18);
+  --shadow-3: 0 32px 60px -12px rgba(0, 0, 0, 0.55),
+    0 16px 28px -8px rgba(0, 0, 0, 0.35);
+  --shadow: var(--shadow-2);
+
+  --code-bg: rgba(168, 192, 240, 0.08);
+  --pre-bg: #0e1320;
+  --placeholder: rgba(235, 238, 251, 0.32);
+
+  /* Aurora corner gradients */
+  --aurora-1: rgba(122, 162, 255, 0.13);
+  --aurora-2: rgba(169, 139, 255, 0.12);
+  --aurora-3: rgba(74, 222, 188, 0.07);
+  --aurora-base: #0d1018;
+
+  /* Cluster 2 mark palette (semantic highlight colors) */
+  --mark-yellow: rgba(220, 180, 60, 0.32);
+  --mark-green: rgba(90, 180, 110, 0.32);
+  --mark-pink: rgba(220, 100, 170, 0.3);
+  --mark-blue: rgba(90, 150, 230, 0.32);
+  --mark-orange: rgba(230, 140, 60, 0.32);
+  --mark-red: rgba(220, 90, 90, 0.32);
+  --mark-purple: rgba(150, 110, 220, 0.32);
+}
+
+/* ---------------- Light theme ---------------- */
+:root.light {
+  --bg: #fbfbfd;
+  --bg-elev: rgba(255, 255, 255, 0.78);
+  --bg-elev-solid: #ffffff;
+  --bg-deep: #f3f5fa;
+  --bg-card: rgba(255, 255, 255, 0.92);
+
+  --text: #131623;
+  --text-2: #4a5169;
+  --text-muted: rgba(19, 22, 35, 0.55);
+
+  --border: rgba(15, 23, 42, 0.07);
+  --border-2: rgba(15, 23, 42, 0.14);
+
+  --accent: #4661ff;
+  --accent-2: #8d54f5;
+  --accent-bg: rgba(70, 97, 255, 0.08);
+  --accent-bg-2: rgba(70, 97, 255, 0.18);
+  --accent-gradient: linear-gradient(135deg, #4661ff 0%, #8d54f5 100%);
+
+  --primary: #3b58e8;
+  --danger: #d93838;
+  --warning: #c47e0e;
+  --scrim: rgba(15, 23, 42, 0.32);
+
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.06),
+    0 1px 1px rgba(15, 23, 42, 0.04);
+  --shadow-2: 0 4px 16px rgba(15, 23, 42, 0.08),
+    0 2px 6px rgba(15, 23, 42, 0.06);
+  --shadow-3: 0 24px 48px -12px rgba(15, 23, 42, 0.18),
+    0 12px 24px -8px rgba(15, 23, 42, 0.12);
+  --shadow: var(--shadow-2);
+
+  --code-bg: rgba(15, 23, 42, 0.05);
+  --pre-bg: #f6f8fa;
+  --placeholder: rgba(19, 22, 35, 0.32);
+
+  --aurora-1: rgba(70, 97, 255, 0.1);
+  --aurora-2: rgba(141, 84, 245, 0.1);
+  --aurora-3: rgba(60, 220, 195, 0.06);
+  --aurora-base: #fbfbfd;
+
+  --mark-yellow: rgba(255, 220, 80, 0.55);
+  --mark-green: rgba(120, 220, 130, 0.45);
+  --mark-pink: rgba(255, 130, 200, 0.4);
+  --mark-blue: rgba(120, 180, 255, 0.45);
+  --mark-orange: rgba(255, 165, 80, 0.5);
+  --mark-red: rgba(255, 100, 100, 0.45);
+  --mark-purple: rgba(180, 130, 230, 0.45);
+}
+
+/* ---------------- Theme-shared tokens ---------------- */
+:root {
+  /* Radii */
+  --radius-1: 6px;
+  --radius-2: 10px;
+  --radius-3: 14px;
+  --radius-pill: 999px;
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-medium: 220ms;
+  --motion-slow: 380ms;
+  --ease: cubic-bezier(0.25, 0.8, 0.4, 1);
+
+  /* Glass blur */
+  --blur-chrome: saturate(160%) blur(12px);
+  --blur-modal: saturate(150%) blur(20px);
+  --blur-strong: saturate(180%) blur(28px);
+
+  /* Focus rings */
+  --ring: 0 0 0 2px color-mix(in oklab, var(--accent) 45%, transparent);
+  --ring-strong:
+    0 0 0 2px color-mix(in oklab, var(--accent) 65%, transparent),
+    0 0 0 4px color-mix(in oklab, var(--accent-2) 30%, transparent);
+
+  /* Type stacks */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, "Cascadia Code",
+    Consolas, monospace;
+  --font-serif: "Lora", "Source Serif Pro", ui-serif, Georgia, serif;
+  --font-display: "Inter", system-ui, sans-serif; /* Cinzel optional */
+
+  /* Type scale (chrome — not editor body) */
+  --fs-xs: 0.7rem; /* sidebar buttons, tooltips */
+  --fs-sm: 0.8rem; /* hint text */
+  --fs-md: 0.85rem; /* body chrome */
+  --fs-lg: 0.95rem; /* panel headings, lead */
+  --fs-xl: 1.1rem; /* modal titles */
+  --fs-2xl: 1.6rem; /* H1, welcome */
+  --fs-display: clamp(2rem, 4vw, 3rem); /* splash caption */
+
+  /* Line heights */
+  --lh-tight: 1.25;
+  --lh-snug: 1.4;
+  --lh-base: 1.55;
+}
+
+/* ---------------- Body / aurora backdrop ---------------- */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+body {
+  background-color: var(--aurora-base);
+  background-image:
+    radial-gradient(ellipse 1100px 800px at 12% 0%, var(--aurora-1) 0%, transparent 65%),
+    radial-gradient(ellipse 900px 700px at 95% 100%, var(--aurora-2) 0%, transparent 60%),
+    radial-gradient(ellipse 700px 500px at 50% 50%, var(--aurora-3) 0%, transparent 70%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* ---------------- Semantic typography classes ---------------- */
+/* Use these in mocks instead of repeating font-family / size /
+   weight tuples — they match the chrome conventions exactly. */
+
+.ds-h1 {
+  margin: 0 0 0.75rem;
+  font-family: var(--font-sans);
+  font-size: var(--fs-2xl);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  color: var(--text);
+}
+.ds-h2 {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-sans);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  color: var(--text);
+}
+.ds-h3 {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-sans);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: var(--lh-snug);
+  color: var(--text);
+}
+.ds-p {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: var(--lh-base);
+  color: var(--text);
+}
+.ds-lead {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-sans);
+  font-size: var(--fs-lg);
+  font-weight: 400;
+  line-height: var(--lh-base);
+  color: var(--text);
+}
+.ds-muted {
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  line-height: var(--lh-base);
+}
+.ds-label {
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-2);
+  letter-spacing: 0.01em;
+}
+.ds-code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: var(--radius-1);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.ds-mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.ds-display {
+  font-family: var(--font-display);
+  font-size: var(--fs-display);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+/* ---------------- Reduced motion gate ---------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

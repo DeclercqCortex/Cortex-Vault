@@ -440,13 +440,14 @@ export function EventEditModal({
   }
 
   return (
-    <div style={styles.scrim} onClick={onClose}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKey}
         role="dialog"
         aria-label={existingEvent ? "Edit event" : "New event"}
+        data-cortex-modal
       >
         <h2 style={styles.heading}>
           {existingEvent ? "Edit event" : "New event"}
@@ -800,6 +801,69 @@ export function EventEditModal({
             disabled={isReadOnly}
           />
         </label>
+
+        {/* Cluster 24 v1.0.1 — for review events, the body's wikilink is
+            non-clickable (textareas don't render links). Surface a
+            dedicated button next to the body that creates / opens the
+            per-Sunday log file. The button is the source-of-truth for
+            the click; the body's wikilink remains in place as a
+            durable, reload-safe reference that ALSO works in the daily-
+            note splice (where the body renders as Markdown). */}
+        {existingEvent &&
+        (existingEvent.id === "cortex-review-weekly" ||
+          existingEvent.id === "cortex-review-monthly") ? (
+          <div style={styles.reviewLogRow}>
+            <button
+              type="button"
+              onClick={async () => {
+                if (!existingEvent) return;
+                const kind =
+                  existingEvent.id === "cortex-review-weekly"
+                    ? "Weekly"
+                    : "Monthly";
+                // Compute LOCAL date from the instance's start_at. JS
+                // Date already does the local-tz conversion via getDate
+                // / getMonth / getFullYear so we don't need a tz_offset
+                // argument here (matches the 12-hour-shift trick used
+                // server-side in the recurrence expander).
+                const d = new Date(existingEvent.start_at * 1000);
+                const dateIso = `${d.getFullYear()}-${String(
+                  d.getMonth() + 1,
+                ).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                try {
+                  const path = await invoke<string>("ensure_review_log_file", {
+                    vaultPath,
+                    kind,
+                    dateIso,
+                  });
+                  // Dispatch a CustomEvent that App.tsx routes through
+                  // selectFileInSlot. Avoids threading a callback through
+                  // Calendar → TabPane → App.
+                  document.dispatchEvent(
+                    new CustomEvent("cortex:open-file", {
+                      detail: { path },
+                    }),
+                  );
+                  onClose();
+                } catch (e) {
+                  console.warn("ensure_review_log_file failed:", e);
+                  setError(`Failed to open review log: ${String(e)}`);
+                }
+              }}
+              style={styles.btnReviewLog}
+            >
+              Open this{" "}
+              {existingEvent.id === "cortex-review-weekly"
+                ? "Sunday's"
+                : "month's"}{" "}
+              review log →
+            </button>
+            <p style={styles.reviewLogHint}>
+              Captures what the review was about and what you learned. Saved
+              under <code>Reviews/</code>.
+            </p>
+          </div>
+        ) : null}
 
         {/* Cluster 14 v1.0 / v1.3 — actual-minutes input. For one-off
             events this writes to the master event's actual_minutes
@@ -1394,6 +1458,33 @@ const styles: Record<string, React.CSSProperties> = {
     color: "white",
     border: "none",
     borderRadius: "4px",
+  },
+  // Cluster 24 v1.0.1 — review-log button row + button + hint.
+  reviewLogRow: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.25rem",
+    margin: "0.6rem 0 0.85rem 0",
+    padding: "0.7rem 0.85rem",
+    background: "var(--bg-elev)",
+    border: "1px solid var(--border)",
+    borderRadius: "6px",
+  },
+  btnReviewLog: {
+    alignSelf: "flex-start",
+    padding: "6px 14px",
+    fontSize: "0.9rem",
+    fontWeight: 600,
+    cursor: "pointer",
+    background: "var(--accent)",
+    color: "white",
+    border: "none",
+    borderRadius: "4px",
+  },
+  reviewLogHint: {
+    margin: 0,
+    fontSize: "0.78rem",
+    color: "var(--text-muted)",
   },
   btnDanger: {
     padding: "5px 12px",

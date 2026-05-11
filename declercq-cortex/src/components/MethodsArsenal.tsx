@@ -163,7 +163,7 @@ export function MethodsArsenal({
   }, [rows, domainFilter, sortKey]);
 
   return (
-    <div style={styles.wrap}>
+    <div className="cortex-view cortex-view-methods" style={styles.wrap}>
       <header style={styles.header}>
         <div style={styles.titleRow}>
           <h2 style={styles.title}>Methods Arsenal</h2>

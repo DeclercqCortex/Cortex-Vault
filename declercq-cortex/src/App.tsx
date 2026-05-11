@@ -44,6 +44,17 @@ import {
   TemplatesModal,
   readTemplatesEnabled,
 } from "./components/TemplatesModal";
+// Cluster 24 v1.0 — File operations (right-click in sidebar) + Reviews.
+import {
+  FileTreeContextMenu,
+  type FileTreeAction,
+} from "./components/FileTreeContextMenu";
+import type { FileNode, PendingEdit } from "./components/FileTree";
+import { DeleteConfirmModal } from "./components/DeleteConfirmModal";
+import { ReviewSettingsModal } from "./components/ReviewSettingsModal";
+// Cluster 26 — Cerebrum splash. Renders during loading + welcome states;
+// fades out after vault is selected.
+import { CerebrumSplash } from "./components/CerebrumSplash";
 
 /** Local YYYY-MM-DD — uses the user's timezone, never UTC. */
 function todayLocal(): string {
@@ -97,6 +108,34 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [indexVersion, setIndexVersion] = useState(0);
+
+  // --- Cluster 26 splash --------------------------------------------------
+  // Force-show the Cerebrum splash on every cold launch. The splash holds
+  // visible for at least SPLASH_MIN_MS so the user actually sees the brain
+  // rotate, regardless of how fast the vault resolves. Once that floor has
+  // elapsed AND the vault is loaded (or the user is on the welcome screen),
+  // we fade out.
+  const SPLASH_MIN_MS = 2800;
+  const [splashVisible, setSplashVisible] = useState<boolean>(true);
+  const [splashFloorReached, setSplashFloorReached] = useState<boolean>(false);
+  useEffect(() => {
+    const id = window.setTimeout(
+      () => setSplashFloorReached(true),
+      SPLASH_MIN_MS,
+    );
+    return () => window.clearTimeout(id);
+  }, []);
+  useEffect(() => {
+    // Fade conditions:
+    //   - the SPLASH_MIN_MS floor has elapsed, AND
+    //   - the loading state has resolved (vaultPath set OR welcome shown)
+    // We don't gate on vaultPath specifically because the welcome screen
+    // is itself a place the user lingers; the splash should sit behind
+    // the welcome card and fade once both are stable.
+    if (!splashFloorReached) return;
+    if (loading) return;
+    setSplashVisible(false);
+  }, [splashFloorReached, loading]);
 
   // --- multi-slot state ------------------------------------------------
   // We keep MAX_SLOTS pane components mounted always, hidden by the
@@ -265,6 +304,20 @@ function App() {
   const [wikilinkPickMode, setWikilinkPickMode] = useState(false);
   // Cluster 22 — Document Templates modal.
   const [templatesModalOpen, setTemplatesModalOpen] = useState(false);
+  // Cluster 24 v1.0 — Review schedule modal + FileTree right-click state.
+  const [reviewSettingsOpen, setReviewSettingsOpen] = useState(false);
+  const [fileTreeMenu, setFileTreeMenu] = useState<{
+    x: number;
+    y: number;
+    node: FileNode;
+  } | null>(null);
+  const [pendingEdit, setPendingEdit] = useState<PendingEdit | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    path: string;
+    name: string;
+    nodeType: "file" | "folder";
+    containedFileCount?: number;
+  } | null>(null);
 
   // Cluster 12 — auto-sync Google Calendar on startup + every 5 min.
   // Re-fetches event rows from Google → upserts into the events
@@ -272,20 +325,54 @@ function App() {
   // dateRange dep, so a sync that adds/removes rows surfaces in the
   // grid on the user's next interaction. No-op if Google Calendar
   // isn't connected.
+  //
+  // Cluster 24 v1.0.1 — permanent token failure detection. Google's
+  // OAuth refresh tokens expire after 7 days for unverified test
+  // apps, and can be revoked at any time from the user's Google
+  // Account → "Third-party access" settings. Once revoked, every
+  // 5-minute background sync would log the same error forever and
+  // the user would never know. We now:
+  //   - Detect "invalid_grant" / "expired" / "revoked" in the error
+  //     string (token-refresh failures all surface that way).
+  //   - Surface a visible banner via setError with a hint pointing
+  //     the user at IntegrationsSettings so they can re-auth.
+  //   - Stop the 5-minute interval so the console isn't spammed.
+  //   - Keep polling for transient errors (network blips, 500s) —
+  //     those resolve on their own.
   useEffect(() => {
     if (!vaultPath) return;
+    let intervalHandle: number | null = null;
+    let permanentlyFailed = false;
     const tick = () => {
       invoke("sync_google_calendar", { vaultPath }).catch((e) => {
-        // Don't surface every transient sync failure to the user;
-        // the IntegrationsSettings panel shows the last-sync state
-        // and the connection status.
-        console.warn("[google] background sync failed:", e);
+        const msg = String(e);
+        const isTokenFailure =
+          msg.includes("invalid_grant") ||
+          msg.includes("Token has been expired") ||
+          msg.includes("revoked");
+        if (isTokenFailure && !permanentlyFailed) {
+          permanentlyFailed = true;
+          console.warn("[google] refresh token expired or revoked:", e);
+          setError(
+            "Google Calendar connection expired. Open Integrations (GH button) to reconnect.",
+          );
+          if (intervalHandle != null) {
+            window.clearInterval(intervalHandle);
+            intervalHandle = null;
+          }
+        } else if (!isTokenFailure) {
+          // Transient — keep retrying on the regular schedule, log
+          // quietly so the console isn't noisy.
+          console.warn("[google] background sync failed:", e);
+        }
       });
     };
     // Run once on mount, then every 5 minutes.
     tick();
-    const interval = window.setInterval(tick, 5 * 60_000);
-    return () => window.clearInterval(interval);
+    intervalHandle = window.setInterval(tick, 5 * 60_000);
+    return () => {
+      if (intervalHandle != null) window.clearInterval(intervalHandle);
+    };
   }, [vaultPath]);
   // Slot picker (used when a search-palette result needs routing in
   // multi-slot layouts).
@@ -323,6 +410,77 @@ function App() {
       }
       return next;
     });
+  }
+
+  // --- Cluster 26 — draggable sidebar width ----------------------------
+  // The sidebar's expanded width is now user-resizable via a vertical
+  // drag handle on its right edge. Width persists in localStorage.
+  // Min 240 (keeps the action button cluster legible); max 560 (avoids
+  // squashing the main pane below useful proportions).
+  const SIDEBAR_WIDTH_MIN = 240;
+  const SIDEBAR_WIDTH_MAX = 560;
+  const SIDEBAR_WIDTH_DEFAULT = 300;
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const v = parseInt(
+        localStorage.getItem("cortex:sidebar-width") ?? "",
+        10,
+      );
+      if (
+        Number.isFinite(v) &&
+        v >= SIDEBAR_WIDTH_MIN &&
+        v <= SIDEBAR_WIDTH_MAX
+      ) {
+        return v;
+      }
+    } catch {
+      // localStorage may throw under privacy restrictions; fall through.
+    }
+    return SIDEBAR_WIDTH_DEFAULT;
+  });
+  const sidebarResizingRef = useRef<boolean>(false);
+  function startSidebarResize(e: React.PointerEvent) {
+    if (sidebarCollapsed) return;
+    e.preventDefault();
+    sidebarResizingRef.current = true;
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: PointerEvent) => {
+      if (!sidebarResizingRef.current) return;
+      const dx = ev.clientX - startX;
+      const next = Math.max(
+        SIDEBAR_WIDTH_MIN,
+        Math.min(SIDEBAR_WIDTH_MAX, startW + dx),
+      );
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      sidebarResizingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      // Persist the final width on release (not on every pointer
+      // move; that would thrash localStorage).
+      try {
+        // Read current width from state at next tick (setSidebarWidth
+        // is async). Easier: persist via setSidebarWidth callback.
+        setSidebarWidth((w) => {
+          try {
+            localStorage.setItem("cortex:sidebar-width", String(w));
+          } catch {
+            // ignore
+          }
+          return w;
+        });
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   // --- theme -----------------------------------------------------------
@@ -390,6 +548,72 @@ function App() {
         setIndexVersion((v) => v + 1);
       })
       .catch((e) => console.warn("rebuild_index failed:", e));
+  }, [vaultPath]);
+
+  // Cluster 24 v1.0.1 — listen for `cortex:open-file` CustomEvents
+  // dispatched by deeply-nested components (currently EventEditModal's
+  // "Open review log" button) so they can request a file open in the
+  // active pane without threading a callback prop through every parent.
+  useEffect(() => {
+    function onOpen(e: Event) {
+      const ce = e as CustomEvent<{ path: string }>;
+      const path = ce.detail?.path;
+      if (typeof path === "string" && path.length > 0) {
+        void selectFileInSlot(path, activeSlotIdx);
+      }
+    }
+    document.addEventListener("cortex:open-file", onOpen);
+    return () => document.removeEventListener("cortex:open-file", onOpen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSlotIdx, vaultPath]);
+
+  // Cluster 24 v1.0.1 — Review schedule auto-init.
+  //
+  // Source of truth is the events table itself: call get_review_settings
+  // first; if NEITHER weekly nor monthly currently exists, create both
+  // (matches the "fresh vault" UX). If the user has explicitly disabled
+  // one or both via the Reviews modal, at least one side will exist
+  // (or both will be deliberately absent post-disable) and we won't
+  // re-create.
+  //
+  // v1.0 used a localStorage gate, which silently kept reviews missing
+  // when the v1.0 backend SQL bug caused the first-run auto-init to fail
+  // (the localStorage flag was set before the .then handler verified
+  // success — actually it WASN'T set on failure, but the localStorage
+  // approach was fragile in other ways). v1.0.1 reads actual DB state
+  // so a successful retry on next launch fixes itself.
+  useEffect(() => {
+    if (!vaultPath) return;
+    let cancelled = false;
+    invoke<[boolean, boolean]>("get_review_settings", { vaultPath })
+      .then(([weeklyExists, monthlyExists]) => {
+        if (cancelled) return;
+        if (weeklyExists || monthlyExists) {
+          // User-managed state — leave it alone.
+          return;
+        }
+        // Neither exists. Auto-init both ON (the spec's "fresh vault"
+        // experience).
+        return invoke("ensure_review_events", {
+          vaultPath,
+          weeklyEnabled: true,
+          monthlyEnabled: true,
+          tzOffsetMinutes: -new Date().getTimezoneOffset(),
+        }).then(() => {
+          if (cancelled) return;
+          setIndexVersion((v) => v + 1);
+        });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // Surface to the user — silent failure is what made v1.0 hard
+        // to debug.
+        console.warn("Review-event auto-init failed:", e);
+        setError(`Failed to set up review schedule: ${e}`);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [vaultPath]);
 
   // -------------------------------------------------------------------------
@@ -679,6 +903,36 @@ function App() {
   async function openWikilinkInActive(target: string) {
     if (!vaultPath) return;
     try {
+      // Cluster 24 v1.0.1 — review-log routing.
+      // Detect basename pattern "YYYY-MM-DD (Weekly|Monthly) Review" and
+      // route through ensure_review_log_file so the file lands in the
+      // dedicated Reviews/Weekly/ or Reviews/Monthly/ subfolder with
+      // the review-log template, instead of going through the generic
+      // "create at vault root?" prompt below. Idempotent — if the file
+      // already exists, the command just returns its path.
+      const reviewMatch = /^(\d{4}-\d{2}-\d{2}) (Weekly|Monthly) Review$/.exec(
+        target.trim(),
+      );
+      if (reviewMatch) {
+        try {
+          const path = await invoke<string>("ensure_review_log_file", {
+            vaultPath,
+            kind: reviewMatch[2],
+            dateIso: reviewMatch[1],
+          });
+          await selectFileInSlot(path, activeSlotIdx);
+          // Bump indexVersion so search / backlinks / file tree pick up
+          // the new file immediately on first click.
+          setIndexVersion((v) => v + 1);
+          setRefreshKey((k) => k + 1);
+          return;
+        } catch (e) {
+          console.warn("ensure_review_log_file failed:", e);
+          // Fall through to the generic resolver — at worst the user
+          // sees the standard "create at vault root?" prompt.
+        }
+      }
+
       const all = await invoke<NoteListItem[]>("list_all_notes", {
         vaultPath,
       });
@@ -1166,38 +1420,205 @@ function App() {
   }
 
   // -------------------------------------------------------------------------
+  // Cluster 24 v1.0 — FileTree right-click handlers (create / rename / delete)
+  // -------------------------------------------------------------------------
+
+  /** Recursively count .md and .pdf files inside a folder node — used by
+   *  the delete-confirm modal so the user knows how much they'll lose. */
+  function countFilesInNode(node: FileNode): number {
+    if (node.type === "file") return 1;
+    let total = 0;
+    for (const c of node.children) total += countFilesInNode(c);
+    return total;
+  }
+
+  function dispatchFileTreeAction(node: FileNode, kind: FileTreeAction) {
+    if (kind === "newFile") {
+      if (node.type !== "folder") return;
+      setPendingEdit({ kind: "new-file", parentPath: node.path, draft: "" });
+    } else if (kind === "newFolder") {
+      if (node.type !== "folder") return;
+      setPendingEdit({ kind: "new-folder", parentPath: node.path, draft: "" });
+    } else if (kind === "rename") {
+      setPendingEdit({
+        kind: "rename",
+        targetPath: node.path,
+        nodeType: node.type,
+        draft: node.name,
+      });
+    } else if (kind === "delete") {
+      setDeleteConfirm({
+        path: node.path,
+        name: node.name,
+        nodeType: node.type,
+        containedFileCount:
+          node.type === "folder" ? countFilesInNode(node) : undefined,
+      });
+    }
+  }
+
+  async function commitFileTreeEdit(edit: PendingEdit) {
+    if (!vaultPath) return;
+    const draft = edit.draft.trim();
+    if (!draft) {
+      setPendingEdit(null);
+      return;
+    }
+    try {
+      if (edit.kind === "rename") {
+        // Save any dirty panes that reference the renamed path before the
+        // rename so we don't write to a path that's about to disappear.
+        for (const handle of paneRefs.current) {
+          if (
+            handle &&
+            handle.getPath() === edit.targetPath &&
+            handle.getDirty()
+          ) {
+            await handle.saveIfDirty();
+          }
+        }
+        const newPath = await invoke<string>("rename_path", {
+          vaultPath,
+          oldPath: edit.targetPath,
+          newName: draft,
+          updateWikilinks: true,
+        });
+        // Re-aim any pane currently showing the renamed file to the new
+        // path. For a folder rename, files inside changed paths too —
+        // we walk paneRefs and check whether each pane's path is under
+        // the renamed folder, then swap the prefix.
+        for (let i = 0; i < paneRefs.current.length; i++) {
+          const handle = paneRefs.current[i];
+          if (!handle) continue;
+          const cur = handle.getPath();
+          if (!cur) continue;
+          if (cur === edit.targetPath) {
+            await handle.openPath(newPath);
+          } else if (
+            edit.nodeType === "folder" &&
+            cur.startsWith(edit.targetPath + "\\")
+          ) {
+            const rel = cur.slice(edit.targetPath.length);
+            await handle.openPath(newPath + rel);
+          } else if (
+            edit.nodeType === "folder" &&
+            cur.startsWith(edit.targetPath + "/")
+          ) {
+            const rel = cur.slice(edit.targetPath.length);
+            await handle.openPath(newPath + rel);
+          }
+        }
+      } else if (edit.kind === "new-file") {
+        await invoke<string>("create_file_in_folder", {
+          vaultPath,
+          parentDir: edit.parentPath,
+          name: draft,
+        });
+      } else if (edit.kind === "new-folder") {
+        await invoke<string>("create_folder_in_folder", {
+          vaultPath,
+          parentDir: edit.parentPath,
+          name: draft,
+        });
+      }
+      setPendingEdit(null);
+      setRefreshKey((k) => k + 1);
+      setIndexVersion((v) => v + 1);
+    } catch (e) {
+      console.error("FileTree op failed:", e);
+      setError(String(e));
+      setPendingEdit(null);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteConfirm || !vaultPath) return;
+    const target = deleteConfirm;
+    try {
+      // Close any pane currently showing the deleted path or anything
+      // beneath it (folder delete).
+      for (const handle of paneRefs.current) {
+        if (!handle) continue;
+        const cur = handle.getPath();
+        if (!cur) continue;
+        const matches =
+          cur === target.path ||
+          (target.nodeType === "folder" &&
+            (cur.startsWith(target.path + "\\") ||
+              cur.startsWith(target.path + "/")));
+        if (matches) {
+          await handle.openPath(null);
+        }
+      }
+      await invoke("trash_path", {
+        vaultPath,
+        path: target.path,
+      });
+      setDeleteConfirm(null);
+      setRefreshKey((k) => k + 1);
+      setIndexVersion((v) => v + 1);
+    } catch (e) {
+      console.error("trash_path failed:", e);
+      setError(String(e));
+      setDeleteConfirm(null);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
+  // Cluster 26 — the Cerebrum splash overlays every render branch (loading,
+  // welcome, main app) at z-index: 1. It holds for SPLASH_MIN_MS minimum
+  // and then fades. Each early-return wraps its content in a fragment
+  // alongside the splash so the splash element is always present in the
+  // tree until splashVisible flips false.
   if (loading) {
-    return (
-      <main style={baseStyles.shell}>
-        <div style={baseStyles.muted}>Loading…</div>
-      </main>
-    );
+    return <CerebrumSplash visible={splashVisible} />;
   }
 
   if (!vaultPath) {
     return (
-      <main style={baseStyles.shell}>
-        <div style={baseStyles.welcomeCard}>
-          <h1 style={baseStyles.h1}>Welcome to Cortex</h1>
-          <p style={baseStyles.lead}>
-            Cortex is your research notebook. Pick a folder on disk to be your{" "}
-            <em>vault</em> — every note, experiment, and concept will live there
-            as a markdown file you fully own.
-          </p>
-          <p style={baseStyles.hint}>
-            Tip: avoid OneDrive or other syncing folders. A plain local folder
-            (e.g., <code>C:\Cortex</code>) is best.
-          </p>
-          <button onClick={pickVault} style={baseStyles.primaryBtn}>
-            Choose vault folder
-          </button>
-          {error && (
-            <p style={baseStyles.errorText}>Could not open picker: {error}</p>
-          )}
-        </div>
-      </main>
+      <>
+        <CerebrumSplash visible={splashVisible} />
+        <main style={baseStyles.shell}>
+          <div className="cortex-welcome-card" style={baseStyles.welcomeCard}>
+            {/* Cluster 26 — brand mark + wordmark above the heading.
+             *  Reads as a brand badge that anchors the card visually
+             *  before the user even reads the copy. */}
+            <div className="cortex-welcome-brand">
+              <img
+                src="/cortex-mark.svg"
+                alt=""
+                className="cortex-welcome-mark"
+              />
+              <img
+                src="/cortex-wordmark.svg"
+                alt="Cortex"
+                className="cortex-welcome-wordmark"
+              />
+            </div>
+            <h1 style={baseStyles.h1}>Welcome to Cortex</h1>
+            <p style={baseStyles.lead}>
+              Cortex is your research notebook. Pick a folder on disk to be your{" "}
+              <em>vault</em> — every note, experiment, and concept will live
+              there as a markdown file you fully own.
+            </p>
+            <p style={baseStyles.hint}>
+              Tip: avoid OneDrive or other syncing folders. A plain local folder
+              (e.g., <code>C:\Cortex</code>) is best.
+            </p>
+            <button onClick={pickVault} style={baseStyles.primaryBtn}>
+              Choose vault folder
+            </button>
+            <div className="cortex-welcome-shortcuts">
+              Ctrl+K to search · Ctrl+/ for shortcuts
+            </div>
+            {error && (
+              <p style={baseStyles.errorText}>Could not open picker: {error}</p>
+            )}
+          </div>
+        </main>
+      </>
     );
   }
 
@@ -1295,90 +1716,134 @@ function App() {
   // showing a file). Pass the active one as the primary.
   const treeHighlight = slotPaths[activeSlotIdx] ?? null;
 
+  // Cluster 26 — set of paths that are dirty in any slot. FileTree reads
+  // this to render the gradient dirty dot on the right edge of each
+  // matching row. Recomputed every render — cheap (≤ MAX_SLOTS entries).
+  const dirtyPaths = (() => {
+    const set = new Set<string>();
+    for (let i = 0; i < MAX_SLOTS; i++) {
+      const p = slotPaths[i];
+      if (p && slotDirty[i]) set.add(p);
+    }
+    return set;
+  })();
+
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100vh",
-        width: "100%",
-      }}
-    >
-      {/* Cluster 21 v1.0.2 — single universal Editor Toolbar pinned
+    <>
+      {/* Cluster 26 — splash overlays the chrome on cold launch until the
+          SPLASH_MIN_MS floor elapses + the vault has been loaded. After
+          that, the splash fades and unmounts, revealing the main app. */}
+      <CerebrumSplash visible={splashVisible} />
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          height: "100vh",
+          width: "100%",
+        }}
+      >
+        {/* Cluster 21 v1.0.2 — single universal Editor Toolbar pinned
           flush to the very top of the app, above the document area
           and the sidebar. Operates on the currently-active pane's
           editor. Stays visible in reading mode (so the user can
           always toggle it back off) and can be collapsed to a thin
           bar via its own polish-group toggle. */}
-      <EditorToolbar
-        editor={paneEditors[activeSlotIdx] ?? null}
-        notePath={slotPaths[activeSlotIdx] ?? null}
-        prefs={toolbarPrefs}
-        onPrefsChange={handleToolbarPrefsChange}
-        rescanKey={0}
-        onOpenBlockModal={() => {
-          // Cluster 21 v1.0.4 — open the existing ExperimentBlockModal
-          // (the same one Ctrl+Shift+B opens). The modal handles
-          // type / name / iteration entry and inserts the typed
-          // block at the cursor via paneRefs.insertExperimentBlock.
-          // The preselectType arg is currently ignored by the
-          // modal; v1.1 may wire it through.
-          setBlockModalOpen(true);
-        }}
-        onInsertWikilink={() => {
-          const handle = paneRefs.current[activeSlotIdx];
-          const wrapped = handle?.wrapSelectionInWikilink?.() ?? false;
-          if (!wrapped) {
-            setWikilinkPickMode(true);
-            setPaletteOpen(true);
-          }
-        }}
-      />
-      <div style={baseStyles.appShell}>
-        <aside
-          style={{
-            ...baseStyles.sidebar,
-            width: sidebarCollapsed ? "32px" : "300px",
-            minWidth: sidebarCollapsed ? "32px" : "260px",
-            borderRight:
-              activeMode === "sidebar" &&
-              activeView !== "pdf-reader" &&
-              !sidebarCollapsed
-                ? "2px solid var(--accent)"
-                : "1px solid var(--border)",
-            boxShadow:
-              activeMode === "sidebar" &&
-              activeView !== "pdf-reader" &&
-              !sidebarCollapsed
-                ? "inset -1px 0 0 var(--accent)"
-                : "none",
+        <EditorToolbar
+          editor={paneEditors[activeSlotIdx] ?? null}
+          notePath={slotPaths[activeSlotIdx] ?? null}
+          prefs={toolbarPrefs}
+          onPrefsChange={handleToolbarPrefsChange}
+          rescanKey={0}
+          onOpenBlockModal={() => {
+            // Cluster 21 v1.0.4 — open the existing ExperimentBlockModal
+            // (the same one Ctrl+Shift+B opens). The modal handles
+            // type / name / iteration entry and inserts the typed
+            // block at the cursor via paneRefs.insertExperimentBlock.
+            // The preselectType arg is currently ignored by the
+            // modal; v1.1 may wire it through.
+            setBlockModalOpen(true);
           }}
-        >
-          {sidebarCollapsed ? (
-            <div style={baseStyles.sidebarCollapsedStrip}>
-              <button
-                onClick={toggleSidebar}
-                style={baseStyles.sidebarToggleBtn}
-                title="Expand sidebar"
-                aria-label="Expand sidebar"
-              >
-                ▶
-              </button>
-            </div>
-          ) : (
-            <>
-              <header style={baseStyles.sidebarHeader}>
-                <div style={baseStyles.sidebarTitleRow}>
-                  <button
-                    onClick={toggleSidebar}
-                    style={baseStyles.sidebarToggleBtn}
-                    title="Collapse sidebar"
-                    aria-label="Collapse sidebar"
+          onInsertWikilink={() => {
+            const handle = paneRefs.current[activeSlotIdx];
+            const wrapped = handle?.wrapSelectionInWikilink?.() ?? false;
+            if (!wrapped) {
+              setWikilinkPickMode(true);
+              setPaletteOpen(true);
+            }
+          }}
+        />
+        <div style={baseStyles.appShell} className="cortex-app-shell">
+          <aside
+            className="cortex-sidebar"
+            style={{
+              ...baseStyles.sidebar,
+              width: sidebarCollapsed ? "32px" : `${sidebarWidth}px`,
+              minWidth: sidebarCollapsed ? "32px" : `${SIDEBAR_WIDTH_MIN}px`,
+              borderRight:
+                activeMode === "sidebar" &&
+                activeView !== "pdf-reader" &&
+                !sidebarCollapsed
+                  ? "2px solid var(--accent)"
+                  : "1px solid var(--border)",
+              boxShadow:
+                activeMode === "sidebar" &&
+                activeView !== "pdf-reader" &&
+                !sidebarCollapsed
+                  ? "inset -1px 0 0 var(--accent)"
+                  : "none",
+            }}
+          >
+            {sidebarCollapsed ? (
+              <div style={baseStyles.sidebarCollapsedStrip}>
+                <button
+                  onClick={toggleSidebar}
+                  style={baseStyles.sidebarToggleBtn}
+                  title="Expand sidebar"
+                  aria-label="Expand sidebar"
+                >
+                  ▶
+                </button>
+              </div>
+            ) : (
+              <>
+                <header
+                  className="cortex-sb-head"
+                  style={baseStyles.sidebarHeader}
+                >
+                  {/* Cluster 26 — brand badge: animated brain mark +
+                   *  wordmark side by side. Sized to fill the sidebar
+                   *  width. The brand mark carries a slow pulse +
+                   *  rotation animation matching the splash family. */}
+                  <div className="cortex-sb-brand">
+                    <button
+                      onClick={toggleSidebar}
+                      className="cortex-sb-collapse"
+                      style={baseStyles.sidebarToggleBtn}
+                      title="Collapse sidebar"
+                      aria-label="Collapse sidebar"
+                    >
+                      ◀
+                    </button>
+                    {/* Cluster 26 — just the brain mark. No rectangular
+                     *  frame, no aurora window, no drop-shadow halo —
+                     *  the white brain stands on its own against the
+                     *  sidebar's translucent glass. */}
+                    <img
+                      src="/cortex-mark.svg"
+                      alt=""
+                      className="cortex-sb-brand-mark"
+                      aria-hidden="true"
+                    />
+                    <img
+                      src="/cortex-wordmark.svg"
+                      alt="Cortex"
+                      className="cortex-sb-wordmark"
+                    />
+                  </div>
+                  <div
+                    className="cortex-sb-actions"
+                    style={baseStyles.sidebarActions}
                   >
-                    ◀
-                  </button>
-                  <strong style={baseStyles.sidebarTitle}>Cortex</strong>
-                  <div style={baseStyles.sidebarActions}>
                     <button
                       onClick={openTodayDailyLog}
                       style={baseStyles.changeBtn}
@@ -1515,6 +1980,13 @@ function App() {
                       Templates
                     </button>
                     <button
+                      onClick={() => setReviewSettingsOpen(true)}
+                      style={baseStyles.changeBtn}
+                      title="Review schedule — weekly + monthly all-day events"
+                    >
+                      Reviews
+                    </button>
+                    <button
                       onClick={() => setRefreshKey((k) => k + 1)}
                       style={baseStyles.iconBtn}
                       title="Refresh file tree"
@@ -1530,206 +2002,274 @@ function App() {
                       Change…
                     </button>
                   </div>
+                  <div style={baseStyles.sidebarPath} title={vaultPath}>
+                    {vaultPath}
+                  </div>
+                </header>
+                <div className="cortex-sb-body" style={baseStyles.sidebarBody}>
+                  <FileTree
+                    vaultPath={vaultPath}
+                    onSelectFile={(p, opts) =>
+                      handleTreeClick(p, !!opts?.ctrlClick)
+                    }
+                    selectedPath={treeHighlight}
+                    refreshKey={refreshKey}
+                    onContextMenu={(e, node) => {
+                      setFileTreeMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        node,
+                      });
+                    }}
+                    pendingEdit={pendingEdit}
+                    onPendingEditChange={setPendingEdit}
+                    onCommitEdit={commitFileTreeEdit}
+                    dirtyPaths={dirtyPaths}
+                  />
                 </div>
-                <div style={baseStyles.sidebarPath} title={vaultPath}>
-                  {vaultPath}
-                </div>
-              </header>
-              <div style={baseStyles.sidebarBody}>
-                <FileTree
-                  vaultPath={vaultPath}
-                  onSelectFile={(p, opts) =>
-                    handleTreeClick(p, !!opts?.ctrlClick)
-                  }
-                  selectedPath={treeHighlight}
-                  refreshKey={refreshKey}
-                />
-              </div>
-              <footer style={baseStyles.sidebarFooter}>
-                <button
-                  onClick={() => setHelpOpen(true)}
-                  style={baseStyles.iconBtn}
-                  title="Keyboard shortcuts (Ctrl+/)"
-                  aria-label="Keyboard shortcuts"
+                <footer
+                  className="cortex-sb-foot"
+                  style={baseStyles.sidebarFooter}
                 >
-                  ?
-                </button>
-                <div style={{ flex: 1 }} />
-                <ThemeToggle theme={theme} setTheme={setTheme} />
-              </footer>
-            </>
-          )}
-        </aside>
+                  <button
+                    onClick={() => setHelpOpen(true)}
+                    style={baseStyles.iconBtn}
+                    title="Keyboard shortcuts (Ctrl+/)"
+                    aria-label="Keyboard shortcuts"
+                  >
+                    ?
+                  </button>
+                  <div style={{ flex: 1 }} />
+                  <ThemeToggle theme={theme} setTheme={setTheme} />
+                </footer>
+                {/* Cluster 26 — sidebar resize handle. A thin vertical
+                 *  strip on the sidebar's right edge that captures
+                 *  pointer-down and tracks the drag to update
+                 *  sidebarWidth. Only rendered when the sidebar is not
+                 *  collapsed (collapsed state has its own fixed width).
+                 *  The handle is wider than its visible line (8 px hit
+                 *  area, 1 px visible line via ::after) so it's easy to
+                 *  grab without being obtrusive. */}
+                <div
+                  className="cortex-sidebar-resize"
+                  onPointerDown={startSidebarResize}
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize sidebar"
+                  title="Drag to resize sidebar"
+                />
+              </>
+            )}
+          </aside>
 
-        {/* Main pane area: top bar with layout picker, then layout grid. */}
-        <div style={baseStyles.mainCol}>
-          <div style={baseStyles.mainTopBar}>
-            <div style={{ flex: 1 }} />
-            <span style={baseStyles.activeSlotLabel}>
-              {slotCount > 1 ? `Active: slot ${activeSlotIdx + 1}` : ""}
-            </span>
-            <NotificationBell
-              vaultPath={vaultPath}
-              refreshTick={reminderRefreshTick}
-            />
-            <LayoutPicker mode={layoutMode} onChange={setLayoutMode} />
-          </div>
+          {/* Main pane area: top bar with layout picker, then layout grid. */}
+          <div className="cortex-main-col" style={baseStyles.mainCol}>
+            <div className="cortex-main-topbar" style={baseStyles.mainTopBar}>
+              <div style={{ flex: 1 }} />
+              <span style={baseStyles.activeSlotLabel}>
+                {slotCount > 1 ? `Active: slot ${activeSlotIdx + 1}` : ""}
+              </span>
+              <NotificationBell
+                vaultPath={vaultPath}
+                refreshTick={reminderRefreshTick}
+              />
+              <LayoutPicker mode={layoutMode} onChange={setLayoutMode} />
+            </div>
 
-          <div style={baseStyles.gridArea}>
-            <LayoutGrid
-              mode={layoutMode}
-              colFrac={colFrac}
-              rowFrac={rowFrac}
-              onColFracChange={setColFrac}
-              onRowFracChange={setRowFrac}
-            >
-              {panes.slice(0, slotCount)}
-            </LayoutGrid>
-            {/* Hidden mount-keeper: panes beyond the current layout's
+            <div style={baseStyles.gridArea}>
+              <LayoutGrid
+                mode={layoutMode}
+                colFrac={colFrac}
+                rowFrac={rowFrac}
+                onColFracChange={setColFrac}
+                onRowFracChange={setRowFrac}
+              >
+                {panes.slice(0, slotCount)}
+              </LayoutGrid>
+              {/* Hidden mount-keeper: panes beyond the current layout's
               slot count stay mounted here so their state survives a
               layout shrink (and the close handler still sees dirty
               work in any pane). */}
-            <div style={baseStyles.hiddenPaneStash} aria-hidden="true">
-              {panes.slice(slotCount)}
+              <div style={baseStyles.hiddenPaneStash} aria-hidden="true">
+                {panes.slice(slotCount)}
+              </div>
             </div>
+
+            {error && (
+              <div style={baseStyles.errorBanner}>
+                <p style={baseStyles.errorText}>
+                  {error}
+                  <button
+                    onClick={() => setError(null)}
+                    style={{ ...baseStyles.changeBtn, marginLeft: "0.75rem" }}
+                  >
+                    dismiss
+                  </button>
+                </p>
+              </div>
+            )}
           </div>
 
-          {error && (
-            <div style={baseStyles.errorBanner}>
-              <p style={baseStyles.errorText}>
-                {error}
-                <button
-                  onClick={() => setError(null)}
-                  style={{ ...baseStyles.changeBtn, marginLeft: "0.75rem" }}
-                >
-                  dismiss
-                </button>
-              </p>
-            </div>
+          <CommandPalette
+            vaultPath={vaultPath}
+            isOpen={paletteOpen}
+            onClose={() => {
+              setPaletteOpen(false);
+              // Always clear wikilink pick-mode when the palette closes,
+              // so a subsequent plain Ctrl+K isn't accidentally still in
+              // pick-mode.
+              setWikilinkPickMode(false);
+            }}
+            onOpenFile={(p) => {
+              setPaletteOpen(false);
+              // Multi-slot: ask the user which slot to open in. Single
+              // slot: just route directly.
+              if (slotCount > 1) {
+                setPendingSlotChoice({ path: p });
+              } else {
+                selectFileInSlot(p, 0);
+              }
+            }}
+            onPickResult={
+              wikilinkPickMode
+                ? (_path, title) => {
+                    const handle = paneRefs.current[activeSlotIdx];
+                    if (handle?.insertWikilinkAt) {
+                      handle.insertWikilinkAt(title);
+                    }
+                    setWikilinkPickMode(false);
+                    setPaletteOpen(false);
+                  }
+                : undefined
+            }
+          />
+          <SlotPicker
+            isOpen={!!pendingSlotChoice}
+            layout={layoutMode}
+            slotPaths={slotPaths.slice(0, slotCount)}
+            pendingPath={pendingSlotChoice?.path ?? null}
+            onPick={(slotIndex) => {
+              if (pendingSlotChoice) {
+                selectFileInSlot(pendingSlotChoice.path, slotIndex);
+              }
+              setPendingSlotChoice(null);
+            }}
+            onClose={() => setPendingSlotChoice(null)}
+          />
+          <ShortcutsHelp isOpen={helpOpen} onClose={() => setHelpOpen(false)} />
+          <ColorLegend
+            visible={legendVisible}
+            onDismiss={() => {
+              setLegendVisible(false);
+              try {
+                localStorage.setItem("cortex:legend-hidden", "true");
+              } catch {
+                // ignore
+              }
+            }}
+            onPickDestination={pickDestination}
+          />
+          <NewHierarchyModal
+            vaultPath={vaultPath}
+            kind={hierarchyKind}
+            onClose={() => setHierarchyKind(null)}
+            onCreated={(path) => {
+              setHierarchyKind(null);
+              // New file → open in active slot.
+              selectFileInSlot(path, activeSlotIdx);
+              setRefreshKey((k) => k + 1);
+            }}
+          />
+          <ExperimentBlockModal
+            vaultPath={vaultPath}
+            isOpen={blockModalOpen}
+            onClose={() => setBlockModalOpen(false)}
+            onConfirm={(type, name, iter) => {
+              setBlockModalOpen(false);
+              const handle = paneRefs.current[activeSlotIdx];
+              if (handle) handle.insertExperimentBlock(type, name, iter);
+            }}
+          />
+          <InsertTableModal
+            isOpen={tableModalOpen}
+            onClose={() => setTableModalOpen(false)}
+            onConfirm={(rows, cols, withHeaderRow) => {
+              setTableModalOpen(false);
+              const handle = paneRefs.current[activeSlotIdx];
+              if (handle) handle.insertTable(rows, cols, withHeaderRow);
+            }}
+          />
+          <IntegrationsSettings
+            vaultPath={vaultPath}
+            isOpen={integrationsOpen}
+            onClose={() => setIntegrationsOpen(false)}
+          />
+          <ReminderOverlay
+            vaultPath={vaultPath}
+            isOpen={reminderOverlayOpen}
+            onClose={() => setReminderOverlayOpen(false)}
+            onChanged={() => setReminderRefreshTick((t) => t + 1)}
+            onOpenInPane={(filePath) =>
+              selectFileInSlot(filePath, activeSlotIdx)
+            }
+          />
+          <OrphanAttachmentsModal
+            vaultPath={vaultPath}
+            isOpen={orphanModalOpen}
+            onClose={() => setOrphanModalOpen(false)}
+          />
+          {templatesModalOpen && (
+            <TemplatesModal
+              vaultPath={vaultPath}
+              onEdit={(templatePath) => {
+                // Templates are real .md files in the vault — opening one in
+                // the active slot reuses every TipTap effect and the
+                // EditorToolbar from Cluster 21 with no extra wiring.
+                setTemplatesModalOpen(false);
+                void selectFileInSlot(templatePath, activeSlotIdx);
+              }}
+              onClose={() => setTemplatesModalOpen(false)}
+            />
+          )}
+          {/* Cluster 24 v1.0 — Review schedule modal. */}
+          {reviewSettingsOpen && (
+            <ReviewSettingsModal
+              vaultPath={vaultPath}
+              onSaved={() => {
+                // Bump indexVersion so calendar / bell re-fetch after the
+                // recurring events change.
+                setIndexVersion((v) => v + 1);
+              }}
+              onClose={() => setReviewSettingsOpen(false)}
+            />
+          )}
+          {/* Cluster 24 v1.0 — FileTree right-click menu. Position is
+            captured at click time; menu closes on outside click / Esc. */}
+          {fileTreeMenu && (
+            <FileTreeContextMenu
+              x={fileTreeMenu.x}
+              y={fileTreeMenu.y}
+              nodeType={fileTreeMenu.node.type}
+              onAction={(kind) => {
+                dispatchFileTreeAction(fileTreeMenu.node, kind);
+              }}
+              onClose={() => setFileTreeMenu(null)}
+            />
+          )}
+          {/* Cluster 24 v1.0 — Delete confirmation modal. */}
+          {deleteConfirm && (
+            <DeleteConfirmModal
+              path={deleteConfirm.path}
+              name={deleteConfirm.name}
+              nodeType={deleteConfirm.nodeType}
+              containedFileCount={deleteConfirm.containedFileCount}
+              onConfirm={confirmDelete}
+              onClose={() => setDeleteConfirm(null)}
+            />
           )}
         </div>
-
-        <CommandPalette
-          vaultPath={vaultPath}
-          isOpen={paletteOpen}
-          onClose={() => {
-            setPaletteOpen(false);
-            // Always clear wikilink pick-mode when the palette closes,
-            // so a subsequent plain Ctrl+K isn't accidentally still in
-            // pick-mode.
-            setWikilinkPickMode(false);
-          }}
-          onOpenFile={(p) => {
-            setPaletteOpen(false);
-            // Multi-slot: ask the user which slot to open in. Single
-            // slot: just route directly.
-            if (slotCount > 1) {
-              setPendingSlotChoice({ path: p });
-            } else {
-              selectFileInSlot(p, 0);
-            }
-          }}
-          onPickResult={
-            wikilinkPickMode
-              ? (_path, title) => {
-                  const handle = paneRefs.current[activeSlotIdx];
-                  if (handle?.insertWikilinkAt) {
-                    handle.insertWikilinkAt(title);
-                  }
-                  setWikilinkPickMode(false);
-                  setPaletteOpen(false);
-                }
-              : undefined
-          }
-        />
-        <SlotPicker
-          isOpen={!!pendingSlotChoice}
-          layout={layoutMode}
-          slotPaths={slotPaths.slice(0, slotCount)}
-          pendingPath={pendingSlotChoice?.path ?? null}
-          onPick={(slotIndex) => {
-            if (pendingSlotChoice) {
-              selectFileInSlot(pendingSlotChoice.path, slotIndex);
-            }
-            setPendingSlotChoice(null);
-          }}
-          onClose={() => setPendingSlotChoice(null)}
-        />
-        <ShortcutsHelp isOpen={helpOpen} onClose={() => setHelpOpen(false)} />
-        <ColorLegend
-          visible={legendVisible}
-          onDismiss={() => {
-            setLegendVisible(false);
-            try {
-              localStorage.setItem("cortex:legend-hidden", "true");
-            } catch {
-              // ignore
-            }
-          }}
-          onPickDestination={pickDestination}
-        />
-        <NewHierarchyModal
-          vaultPath={vaultPath}
-          kind={hierarchyKind}
-          onClose={() => setHierarchyKind(null)}
-          onCreated={(path) => {
-            setHierarchyKind(null);
-            // New file → open in active slot.
-            selectFileInSlot(path, activeSlotIdx);
-            setRefreshKey((k) => k + 1);
-          }}
-        />
-        <ExperimentBlockModal
-          vaultPath={vaultPath}
-          isOpen={blockModalOpen}
-          onClose={() => setBlockModalOpen(false)}
-          onConfirm={(type, name, iter) => {
-            setBlockModalOpen(false);
-            const handle = paneRefs.current[activeSlotIdx];
-            if (handle) handle.insertExperimentBlock(type, name, iter);
-          }}
-        />
-        <InsertTableModal
-          isOpen={tableModalOpen}
-          onClose={() => setTableModalOpen(false)}
-          onConfirm={(rows, cols, withHeaderRow) => {
-            setTableModalOpen(false);
-            const handle = paneRefs.current[activeSlotIdx];
-            if (handle) handle.insertTable(rows, cols, withHeaderRow);
-          }}
-        />
-        <IntegrationsSettings
-          vaultPath={vaultPath}
-          isOpen={integrationsOpen}
-          onClose={() => setIntegrationsOpen(false)}
-        />
-        <ReminderOverlay
-          vaultPath={vaultPath}
-          isOpen={reminderOverlayOpen}
-          onClose={() => setReminderOverlayOpen(false)}
-          onChanged={() => setReminderRefreshTick((t) => t + 1)}
-          onOpenInPane={(filePath) => selectFileInSlot(filePath, activeSlotIdx)}
-        />
-        <OrphanAttachmentsModal
-          vaultPath={vaultPath}
-          isOpen={orphanModalOpen}
-          onClose={() => setOrphanModalOpen(false)}
-        />
-        {templatesModalOpen && (
-          <TemplatesModal
-            vaultPath={vaultPath}
-            onEdit={(templatePath) => {
-              // Templates are real .md files in the vault — opening one in
-              // the active slot reuses every TipTap effect and the
-              // EditorToolbar from Cluster 21 with no extra wiring.
-              setTemplatesModalOpen(false);
-              void selectFileInSlot(templatePath, activeSlotIdx);
-            }}
-            onClose={() => setTemplatesModalOpen(false)}
-          />
-        )}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -1818,6 +2358,12 @@ function PaneWrapper({
 
 const baseStyles: Record<string, React.CSSProperties> = {
   shell: {
+    // Cluster 26 — sits above the CerebrumSplash (z-index: 1). The
+    // welcome card inside this shell floats over the rotating brain
+    // through a glass panel. position: relative gives the shell its
+    // own stacking context so the z-index applies.
+    position: "relative",
+    zIndex: 2,
     minHeight: "100vh",
     display: "flex",
     alignItems: "center",
@@ -1827,11 +2373,13 @@ const baseStyles: Record<string, React.CSSProperties> = {
   welcomeCard: {
     maxWidth: "560px",
     width: "100%",
-    padding: "2rem 2.25rem",
-    borderRadius: "10px",
+    padding: "2.25rem 2.5rem",
+    borderRadius: "var(--radius-3)",
     background: "var(--bg-card)",
-    border: "1px solid var(--border)",
-    boxShadow: "var(--shadow)",
+    border: "1px solid var(--border-2)",
+    boxShadow: "var(--shadow-3)",
+    backdropFilter: "var(--blur-modal)",
+    WebkitBackdropFilter: "var(--blur-modal)" as unknown as undefined,
   },
   appShell: {
     display: "flex",
@@ -1861,37 +2409,42 @@ const baseStyles: Record<string, React.CSSProperties> = {
     height: "100%",
   },
   sidebarToggleBtn: {
-    width: "22px",
-    height: "22px",
+    width: "24px",
+    height: "24px",
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    fontSize: "0.7rem",
+    fontSize: "0.72rem",
     lineHeight: 1,
     cursor: "pointer",
     background: "transparent",
     color: "var(--text-2)",
     border: "1px solid var(--border-2)",
-    borderRadius: "4px",
+    borderRadius: "var(--radius-1)",
     padding: 0,
   },
   sidebarHeader: {
-    padding: "0.75rem 0.85rem",
+    // Cluster 26 — tighter padding so the brand badge + actions don't
+    // float in dead space. Was 0.85rem 0.95rem.
+    padding: "0.5rem 0.6rem 0.4rem",
     borderBottom: "1px solid var(--border)",
   },
   sidebarTitleRow: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: "0.4rem",
+    marginBottom: "0.25rem",
     gap: "0.5rem",
   },
   sidebarTitle: { fontSize: "0.95rem" },
   sidebarActions: {
     display: "flex",
     alignItems: "center",
-    gap: "4px",
+    gap: "3px",
     flexWrap: "wrap",
+    // Tighter top-margin so the actions sit just below the badge.
+    marginTop: "0",
+    rowGap: "3px",
   },
   sidebarFooter: {
     padding: "0.5rem 0.85rem",
@@ -1901,13 +2454,17 @@ const baseStyles: Record<string, React.CSSProperties> = {
     gap: "0.5rem",
   },
   changeBtn: {
-    fontSize: "0.7rem",
-    padding: "2px 8px",
+    // Cluster 26 — tighter button: smaller padding, smaller font so
+    // the dense action cluster fits more comfortably in the narrow
+    // sidebar without forcing extra wrap-rows.
+    fontSize: "0.68rem",
+    padding: "2px 7px",
     cursor: "pointer",
     background: "transparent",
     color: "var(--text-2)",
     border: "1px solid var(--border-2)",
-    borderRadius: "4px",
+    borderRadius: "var(--radius-1)",
+    whiteSpace: "nowrap",
   },
   iconBtn: {
     width: "22px",
@@ -1915,13 +2472,13 @@ const baseStyles: Record<string, React.CSSProperties> = {
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    fontSize: "0.85rem",
+    fontSize: "0.78rem",
     lineHeight: 1,
     cursor: "pointer",
     background: "transparent",
     color: "var(--text-2)",
     border: "1px solid var(--border-2)",
-    borderRadius: "4px",
+    borderRadius: "var(--radius-1)",
     padding: 0,
   },
   sidebarPath: {
@@ -1985,14 +2542,16 @@ const baseStyles: Record<string, React.CSSProperties> = {
     lineHeight: 1.5,
   },
   primaryBtn: {
-    marginTop: "1rem",
-    padding: "0.7rem 1.4rem",
+    marginTop: "1.25rem",
+    padding: "0.75rem 1.5rem",
     fontSize: "0.95rem",
     cursor: "pointer",
-    background: "var(--primary)",
+    background: "var(--accent-gradient)",
     color: "white",
     border: "none",
-    borderRadius: "6px",
+    borderRadius: "var(--radius-2)",
+    fontWeight: 500,
+    boxShadow: "0 6px 18px color-mix(in oklab, var(--accent) 30%, transparent)",
   },
   errorText: {
     margin: 0,

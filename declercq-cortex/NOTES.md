@@ -7423,3 +7423,805 @@ floor the bubble would be smaller than the user's cursor target.
 correction passes — same tag because v1.0 hadn't shipped to remote
 yet; per the project's `git tag -f` convention the tag captures the
 current state of the cluster, not a frozen snapshot).
+
+## Phase 3 — Cluster 24 v1.0 — QoL pack 2: file operations + reviews
+
+User-driven session bundling two unrelated quality-of-life additions:
+(A) right-click create / rename / delete for files and folders in the
+vault sidebar, and (B) auto-recurring weekly + monthly all-day review
+events on the calendar that surface in the notification bell.
+
+### Decisions locked before implementation
+
+1. **Files + folders.** Both kinds get a context menu. Folders get
+   four items (New file / New folder / Rename / Delete); files get
+   two (Rename / Delete).
+2. **OS trash, not permanent.** `trash = "5"` Rust crate. Deleted
+   files land in the Recycle Bin and stay recoverable via Windows
+   Explorer.
+3. **Vault-wide wikilink rewrite on rename.** When an .md file is
+   renamed, walk every other .md in the vault and rewrite
+   `[[old name]]` / `[[old name|alias]]` / `[[old name#section]]`
+   to use the new basename. Case-insensitive target match,
+   whitespace preserved.
+4. **Monthly review on the first Sunday.** RRULE
+   `FREQ=MONTHLY;BYDAY=1SU`. Required extending the recurrence
+   expander to support positional BYDAY tokens (the pre-Cluster-24
+   expander only honored BYMONTHDAY for MONTHLY frequencies).
+
+### What ships — File operations
+
+- **Backend.** Four new Tauri commands with namespaced helpers:
+  `create_file_in_folder` / `create_folder_in_folder` /
+  `rename_path(update_wikilinks)` / `trash_path`. Helpers all
+  prefixed `cortex24_`: `validate_filename_segment` (rejects
+  `/\:*?"<>|`, `..`, `.`, empty, control chars, >255 chars),
+  `ensure_within_vault` (lexical containment — no canonicalize so
+  not-yet-existing destinations work), `purge_path_from_index`
+  (DELETEs from notes / metadata / links / marks / hierarchy),
+  `walk_for_indexable_files` (recursive .md / .pdf gather),
+  `rewrite_wikilinks_in_vault` (iterate vault, call
+  `rewrite_wikilinks_in_string` per file, write back changed
+  files, re-index touched), `rewrite_wikilinks_in_string` (manual
+  scan over `[[…]]` runs — no regex; splits target from suffix at
+  the first `#` or `|`; whitespace inside the brackets preserved).
+
+- **`rename_path` flow.** Validate new_name → ensure old exists +
+  in vault → build new_path = parent/new_filename (preserve
+  original extension when new_name has no dot) → `fs::rename` (one
+  atomic op on same FS) → for files: `purge_path_from_index(old)`
+  + `index_single_file(new)` + optional wikilink rewrite. For
+  folders: walk new path, derive each file's old path via prefix
+  substitution, purge + re-index per file. Folder renames don't
+  trigger wikilink rewriting (wikilinks reference filenames not
+  paths).
+
+- **`trash_path`.** Purge index for the path (recursive for
+  folders) → `trash::delete(path)`. Index purge happens BEFORE the
+  delete so the index is already clean if the user immediately
+  searches; the deletion is fast enough that the rare race doesn't
+  matter.
+
+- **Frontend components.** Three new files:
+  - `FileTreeContextMenu.tsx` — small floating panel via
+    `clientX/clientY`. Closes on outside click + Esc. Viewport-clip
+    guard.
+  - `DeleteConfirmModal.tsx` — Recycle-Bin-flavored confirmation
+    showing path + name + (folders) contained-file count. Cancel
+    button autoFocused so a casual Enter doesn't accidentally
+    delete; confirmed action sends to OS trash.
+  - `FileTree.tsx` — modified to support `pendingEdit` (rename /
+    new-file / new-folder) + `onContextMenu` + `onCommitEdit`
+    props. New `InlineEditInput` component selects the basename
+    portion (text before the last dot) on focus so renames don't
+    re-type the extension.
+
+- **Auto-expand on phantom row.** When a `new-file` or `new-folder`
+  pendingEdit is targeted at a folder node, the folder forces its
+  expansion state to true (one-way — collapse later isn't fought).
+  Without this, the phantom row would render under a collapsed
+  folder and be invisible.
+
+- **Pane sync.** `commitFileTreeEdit` saves any pane that's dirty
+  AND showing the renamed path before the rename (so we don't
+  write to a path that's about to disappear). After the rename,
+  walks every paneRef and re-aims any pane whose `getPath()`
+  matches — for folder renames, also remaps sub-paths via prefix
+  substitution. `confirmDelete` closes any pane showing the
+  deleted path or anything beneath it before calling `trash_path`.
+
+- **Wikilink rewriter.** Manual scan (no regex) — same shape as
+  the existing `extract_wikilinks` so behavior matches. The
+  algorithm finds each `[[…]]`, splits inner at the first `#` or
+  `|` to isolate the target portion, compares `target.trim()`
+  case-insensitively to the old basename, and rewrites with the
+  new basename + the unchanged suffix. Whitespace inside the
+  brackets is preserved (`[[ Old Note ]]` → `[[ New Note ]]`)
+  because rejoining without it would silently change other notes
+  the user hadn't asked to touch. Touched files are re-indexed
+  so FTS5 / backlinks reflect the new content immediately.
+
+### What ships — Review schedule
+
+- **Stable IDs.** `cortex-review-weekly` and
+  `cortex-review-monthly`. Reusing the events table's id column
+  with a non-`evt-DATE-N` value works because the existing id
+  generator's LIKE pattern is `evt-%` — our IDs don't collide and
+  don't get caught by the auto-incrementer.
+
+- **Event shape.** Both reviews ship with `all_day = 1`,
+  `category = "Review"`, `status = 'planned'`, `body = ''`,
+  `notify_mode = 'urgent'`, `notify_lead_minutes = NULL`,
+  `actual_minutes = NULL`. The "Review" category is auto-created
+  on first ensure with color `#a78bfa` (a calm purple that doesn't
+  collide with GitHub or Google's category colors).
+
+- **Anchor times.** `start_at` / `end_at` = the most recent past
+  Sunday at LOCAL-MIDNIGHT, expressed in UTC unix seconds. Uses
+  `tz_offset_minutes` from the frontend per the Cluster 14 v1.4
+  precedent — anything that says "today's local boundary" must
+  accept this rather than computing a UTC midnight that drifts a
+  day for users not on UTC.
+
+- **`ensure_review_events` UPSERT.** `SELECT 1 FROM events WHERE
+  id = ?` → INSERT or UPDATE. Re-running with the same args is
+  idempotent. Disabling a review = `DELETE FROM events WHERE id =
+  ?` (the bell stops surfacing it instantly; the calendar stops
+  drawing it on the next fetch).
+
+- **`get_review_settings`.** Returns `(weekly_exists,
+  monthly_exists)` — used by the modal to load the current state.
+
+- **Recurrence expander extension.** The pre-Cluster-24 MONTHLY
+  arm only honored BYMONTHDAY. Cluster 24 adds positional BYDAY:
+  - `cortex24_parse_positional_byday(s)` — parse `1SU`, `-1MO`,
+    `2WE` etc. into `(occurrence, weekday_iso)`. Bare `SU` (no
+    numeric prefix) returns `None` so the WEEKLY-style multi-day
+    BYDAY path stays unaffected.
+  - `cortex24_nth_weekday_of_month(year, month, weekday_iso, n)`
+    — returns the day-of-month of the Nth occurrence, or `None`
+    if there aren't N occurrences. Iterates days 1..=31 and
+    filters by `unix_from_ymd_hms` returning a unix that
+    `ymd_from_unix` decomposes back to the same (y, m); this
+    skips invalid rollovers like Feb 30 cleanly.
+  - The MONTHLY arm tries positional BYDAY first; falls back to
+    `default_target_day` (BYMONTHDAY or master's day-of-month)
+    when no positional token is present. Months with no Nth
+    occurrence (e.g., `-5SU` in a 4-Sunday month) are skipped via
+    `continue` — the safety counter prevents infinite walks.
+
+- **`ReviewSettingsModal.tsx`.** Two checkboxes pre-loaded from
+  `get_review_settings`. Save calls `ensure_review_events` with
+  the current toggle states. Esc closes; clicking the backdrop
+  closes. Bumps `indexVersion` via `onSaved` callback so the
+  calendar / bell re-fetch.
+
+- **Auto-init on first vault load.** `App.tsx` adds a
+  `useEffect(vaultPath)` that checks
+  `localStorage[cortex:reviews-initialized:<vaultPath>]`. If
+  unset, calls `ensure_review_events(vault, true, true,
+  tzOffsetMinutes)` and sets the flag. On subsequent launches the
+  flag is already set so we don't re-create reviews the user
+  manually deleted from the calendar. Re-enabling is via the
+  Reviews modal.
+
+### Architectural choices worth flagging
+
+- **`trash` crate over hand-rolled IFileOperation.** The crate
+  abstracts Windows / macOS / Linux differences and uses
+  IFileOperation under the hood on Windows so deletion lands in
+  the Recycle Bin (recoverable). Hand-rolling this would have
+  been ~150 lines of `windows-rs` + COM interop with no
+  ergonomic improvement.
+
+- **Wikilink rewrite via manual scan, not regex.** Mirrors
+  `extract_wikilinks`'s existing scan style. Regex would handle
+  edge cases (escaped brackets) marginally better but at the cost
+  of an extra dep + the regex compiles on every call. Cargo got
+  `regex = "1"` anyway as a future scaffold (transitive in many
+  deps already), but v1.0 doesn't use it.
+
+- **OS trash, not snapshot-restore.** The cluster doc considered
+  building a Cortex-internal "deleted files" view with restore
+  support. Decided against — the Recycle Bin already handles this
+  ergonomically and most users have learned its semantics. v1.1+
+  could expose `trash::os_limited::restore_all` as a Ctrl+Z
+  affordance.
+
+- **Stable IDs for review events instead of a tag/source column.**
+  Considered adding a `is_system_review` column to the events
+  table; rejected because the current schema's `id` column is
+  unconstrained and serves the purpose. The IDs `cortex-review-
+  weekly` and `-monthly` are stable, descriptive, and don't
+  collide with the `evt-DATE-N` pattern used by user-created
+  events.
+
+- **Auto-init via localStorage flag, not config.json.** The flag
+  is per-vault-path and per-browser, so a user who clones their
+  vault to a new machine gets reviews auto-created there too.
+  Storing in vault `config.json` would have meant the flag rides
+  along with the vault — but then deleting a review on machine A
+  would also prevent re-creation on machine B, which is wrong.
+  localStorage gets the right behavior.
+
+- **Positional BYDAY in the monthly arm vs explicit per-month
+  expansion.** Considered generating explicit instances ahead-of-
+  time (one row per month for some lookahead window). Rejected
+  because the existing recurring-event infrastructure already
+  expands rules at query time; an explicit-instances approach
+  would have required a second code path for lookahead window
+  management AND a custom delete propagation when the user
+  toggles off a review. Extending the expander is one small
+  helper plus a match-arm change.
+
+### Files added
+
+- `src/components/FileTreeContextMenu.tsx`
+- `src/components/DeleteConfirmModal.tsx`
+- `src/components/ReviewSettingsModal.tsx`
+- `verify-cluster-24-v1.0.ps1`
+
+### Files modified
+
+- `src-tauri/Cargo.toml` — `trash = "5"`, `regex = "1"`.
+- `src-tauri/src/lib.rs`
+  - New Cluster 24 block at end (file-op commands + helpers,
+    review-event commands + helpers, positional-BYDAY helpers).
+  - MONTHLY arm of `expand_recurrence` extended to honor positional
+    BYDAY tokens.
+  - 6 new commands registered in `invoke_handler`.
+- `src/components/FileTree.tsx`
+  - New props `onContextMenu`, `pendingEdit`,
+    `onPendingEditChange`, `onCommitEdit`.
+  - Each row gets `onContextMenu`.
+  - Renaming swaps row text for an `InlineEditInput`.
+  - new-file / new-folder phantom rows in the children list.
+  - Folder auto-expands when a phantom is targeted at it.
+  - `InlineEditInput` selects the basename on focus, commits on
+    Enter, cancels on Esc / blur.
+- `src/App.tsx`
+  - New imports; new state for FileTree menu / pendingEdit /
+    deleteConfirm / reviewSettingsOpen.
+  - `dispatchFileTreeAction` / `commitFileTreeEdit` /
+    `confirmDelete` handlers.
+  - "Reviews" sidebar button next to "Templates".
+  - Auto-init useEffect on `vaultPath`.
+  - Modal mounts (FileTreeContextMenu, DeleteConfirmModal,
+    ReviewSettingsModal).
+- `src/index.css` — `.cortex-filetree-ctxmenu` block.
+
+### Edge cases handled in v1.0
+
+- Renaming a file open in a pane re-aims the pane to the new path.
+- Deleting a file open in a pane closes the pane (openPath(null)).
+- Folder rename: every file inside changes path; pane sync
+  handles sub-path remapping via prefix substitution.
+- Folder delete: every file inside also lands in the Recycle Bin;
+  affected panes close.
+- Validation errors surface in App's error banner; pendingEdit
+  closes so the user can try again.
+- Empty new-name on commit cancels (so accidentally pressing Enter
+  with an empty input doesn't error).
+- Blur cancels the edit — matches OS file-explorer behavior.
+- Auto-init flag is per-vault-path: switching vaults re-runs
+  initialization for the new vault.
+- Recurrence expander's safety counter (5000 iterations) prevents
+  buggy rules from starving SQLite.
+- Months with no Nth weekday (e.g., `-5SU`) are skipped cleanly
+  via `continue`.
+
+### Edge cases NOT handled (deferred)
+
+- **Drag-and-drop file move** in the sidebar. Possible v1.1 — the
+  drag-drop infrastructure is partially in place from cluster-19's
+  image-drag work.
+- **Per-Sunday monthly review choice** (first / second / third /
+  fourth / last). v1.0 hardcodes first. UI for this is small;
+  deferred until trial-data justifies the additional setting.
+- **Review-day daily-note templates** — Cluster 22 templates plus
+  an "if today is review day" condition. Bigger refactor; v1.1+.
+- **Configurable EVENT_LOOKBACK_DAYS** for review events
+  specifically — the current 1-day lookback means a missed review
+  drops off after Monday.
+- **Multi-select FileTree ops** — Shift-click select N files and
+  delete / rename in batch.
+- **Undo for trash** via `trash::os_limited::restore_all`.
+
+### Tag
+
+`cluster-24-v1.0-complete`.
+
+### v1.0.1 — fixes from immediate dogfooding (same tag)
+
+User-reported bugs after the v1.0 ship:
+
+1. **Reviews didn't appear in the calendar.** Root cause: a SQL
+   schema mismatch in `cortex24_ensure_review_category`. The
+   `event_categories` table's columns are `(id, label, color,
+   sort_order)` (verified at line 1349 of lib.rs). v1.0 used `name`
+   and `created_at`. The INSERT failed with "no such column: name",
+   the whole `ensure_review_events` call errored, the auto-init
+   useEffect's `.catch` logged a console warning that the user
+   never saw, and reviews silently never got created. Fixed: SELECT
+   matches on either `id = 'cat-review'` or `label = 'Review'` so
+   prior partial runs don't double-insert; INSERT uses the correct
+   `(id, label, color, sort_order)` column list with sort_order = 10
+   (places "Review" after the bundled defaults 0..=4 in the picker).
+
+2. **Auto-init silent on failure.** v1.0 only logged warnings.
+   v1.0.1 also calls `setError(...)` so any future Tauri-side
+   problem with review setup surfaces in the App-level error
+   banner the user can't miss.
+
+3. **localStorage gate replaced by DB-state check.** v1.0 used
+   `localStorage[cortex:reviews-initialized:<vaultPath>]` to
+   prevent re-creating reviews after the user manually deleted
+   them. The flag was set BEFORE the auto-init's success was
+   confirmed (`.then` set it, but if the call failed, the flag
+   stayed false — actually that's correct). The deeper issue:
+   localStorage is per-browser, brittle across machines, and
+   doesn't reflect DB truth. v1.0.1 calls `get_review_settings`
+   first; if NEITHER weekly nor monthly currently exists in the
+   events table, auto-init creates both. If at least one exists
+   (user has explicitly disabled or already initialized), we
+   leave state alone. If user deletes BOTH manually via the
+   calendar's right-click delete, the next launch will recreate
+   them — known minor regression vs v1.0; acceptable because
+   the Reviews modal exposes the same disable controls without
+   needing to delete from the calendar.
+
+### v1.0.1 — review log files (same tag)
+
+The user also asked for: each weekly / monthly review instance
+should carry a wikilink to a per-Sunday log file under
+`Reviews/Weekly/` or `Reviews/Monthly/`, and clicking the wikilink
+should auto-create the file if it doesn't exist. Bundled into the
+same tag.
+
+#### `ensure_review_log_file` Tauri command
+
+```rust
+ensure_review_log_file(vault_path, kind, date_iso) -> path
+```
+
+- `kind` is "Weekly" or "Monthly" (case-insensitive on input;
+  normalized to title-case for the path).
+- `date_iso` is `YYYY-MM-DD` — validated cheaply (length, dashes,
+  digits) before use.
+- Creates `<vault>/Reviews/<Kind>/<date> <Kind> Review.md` if
+  missing; calls `index_single_file` on the new file so search /
+  backlinks pick it up immediately.
+- Idempotent — returns the existing path if the file is already
+  there. Re-clicking the wikilink doesn't overwrite content.
+- Default body: frontmatter (`id`, `type: review`, `kind`, `date`)
+  plus three sections — `## What was this review about?`,
+  `## What did you learn?`, `## Action items` (with one empty
+  `- [ ]` to seed task capture).
+
+#### Per-instance bodies in `expand_recurrence`
+
+When the master event is `cortex-review-weekly` or
+`cortex-review-monthly`, the instance's body is computed fresh:
+
+```
+[[YYYY-MM-DD Kind Review]]
+
+*Click the link above to open this Sunday's / this month's review log
+— what was the review about, and what did you learn?*
+```
+
+The local date for the wikilink is computed by adding 12 hours to
+`effective_start` and calling `ymd_from_unix` on that. The 12-hour
+shift puts us at "local noon" for any timezone within ±12h of UTC,
+which is sufficient to pick the right calendar day regardless of
+where the user lives — and avoids threading `tz_offset_minutes`
+through the recurrence expander (which is called from many places
+with no tz context).
+
+#### Wikilink-follow routing
+
+`App.tsx#openWikilinkInActive` gains a regex pre-check:
+
+```ts
+const reviewMatch = /^(\d{4}-\d{2}-\d{2}) (Weekly|Monthly) Review$/.exec(target.trim());
+```
+
+When matched, the handler calls `ensure_review_log_file(vault,
+kind, date_iso)` and routes the resulting path through
+`selectFileInSlot`, then bumps `indexVersion + refreshKey`. This
+SKIPS the generic "Create note in vault root?" prompt that the
+existing wikilink auto-create flow uses — review logs go to their
+dedicated subfolder with the review template, no user
+confirmation needed (the click itself is the confirmation).
+
+If `ensure_review_log_file` fails for any reason, we fall through
+to the generic resolver — at worst the user sees the standard
+prompt and the file lands in the vault root.
+
+### Tag (re-tagged)
+
+`cluster-24-v1.0-complete` — re-tagged after the v1.0.1 fixes.
+Same tag because v1.0 hadn't shipped to remote yet; per the
+project's `git tag -f` convention the tag captures the current
+state of the cluster, not a frozen snapshot.
+
+### v1.0.1 — Weekly + Monthly review templates (same tag)
+
+The hardcoded review-log body in `ensure_review_log_file` left no
+way to customize the structure beyond editing the generated files
+one-by-one. Two new types added to the Cluster 22 template
+registry:
+
+- `weekly-review` — `<vault>/.cortex/document-templates/weekly-review.md`
+- `monthly-review` — same folder, `monthly-review.md`
+
+DOC_TYPES extended to ten entries; `default_template_for` registers
+the new types; `DEFAULT_TEMPLATE_WEEKLY_REVIEW` and
+`DEFAULT_TEMPLATE_MONTHLY_REVIEW` constants are inline in lib.rs.
+The weekly template ships with sections "What was this review
+about?", "What did you learn?", "Wins this week", "Stuck on",
+"Action items for next week"; the monthly version drops "Stuck
+on" and adds "What didn't work" + "Goals for next month" + "Open
+questions carried forward".
+
+`ensure_review_log_file` now resolves through `read_or_init_template
++ apply_placeholders` instead of using its own hardcoded body. On
+first creation, the .md template lazy-initializes on disk so the
+user can immediately edit it via the Templates modal. Placeholders
+supported: `{{date}}`, `{{title}}`, `{{slug}}`, `{{week_number}}`,
+`{{day_of_week}}`. Unknown tokens stay literal so a custom template
+referencing `{{author}}` (deferred from Cluster 22) renders the
+literal token, signalling the user to remove it.
+
+Defensive fallback: if `read_or_init_template` fails for any reason
+(corrupted disk, permissions), `ensure_review_log_file` falls back
+to `cortex24_review_log_default_body` so review-log creation never
+errors out.
+
+Frontend `TemplatesModal.tsx`:
+- `DOC_TYPE_LABELS` extended with "Weekly review log" / "Monthly review log".
+- `DOC_TYPE_ORDER` extended to ten entries; reviews live at the
+  bottom because they're auto-created by recurring events, not by
+  a sidebar button.
+- `sampleContext` adds preview samples for both review types.
+
+### v1.0.1 — Auto-credit past non-recurring events (same tag)
+
+Cluster 14 v1.1 auto-credited recurring instances as fully spent
+when `actual_minutes` was NULL. Non-recurring past events stayed
+excluded — meaning a user who didn't manually fill the actual
+field on every meeting saw their time-tracking totals show
+"planned but no actual recorded" for completed work.
+
+Cluster 24 v1.0.1 extends the auto-credit to non-recurring past
+events. The rule applied to all three aggregator paths
+(`get_time_tracking_aggregates`, `get_time_tracking_daily_rollup`,
+`aggregate_time_tracking_in_window`):
+
+```
+match (evt.recurrence_rule, evt.actual_minutes, evt.end_at vs now) {
+    (Some(_), Some(m), _) where m >= 0 => use m,        // recurring + recorded
+    (Some(_), _,       _)               => use planned, // recurring + auto-credit (existing)
+    (None,    Some(m), _) where m >= 0 => use m,        // non-recurring + recorded
+    (None,    _,       end <= now)      => use planned, // NEW v1.0.1: past + NULL → auto-credit
+    (None,    _,       end >  now)      => use 0,       // future + NULL → planned-only counted
+}
+```
+
+The NULL-vs-explicit-0 distinction is preserved by gating on
+`Some(m) where m >= 0` for the recorded case. A user who explicitly
+records "I spent 0 minutes" (rare but valid) keeps that value;
+NULL on a past event is the "didn't fill it in" case that gets
+auto-credited.
+
+All-day events stay excluded (Cluster 14 v1.5).
+
+`now_unix = unix_now()` is captured once at the top of each
+aggregator's loop; the comparison is `evt.end_at <= now_unix` so
+events that ended at exactly `now` are auto-credited (the
+boundary doesn't matter much in practice).
+
+### Tag (re-tagged again)
+
+`cluster-24-v1.0-complete` — re-tagged after the templates +
+auto-credit additions. Still the same tag; the cluster hasn't
+shipped to remote yet.
+
+## Phase 3 — Cluster 21 v1.2 — Rich auto-replace + sticky modal
+
+User-driven extension to the Cluster 21 v1.1 polish pass's
+auto-replace pipeline. Two complaints + one feature ask:
+
+1. **Auto-replace rules can only emit characters.** The user wants
+   triggers like `--frame-- ` to expand into a real Frame block, or
+   `--tabs-- ` into a Tabs container — not just a Unicode arrow.
+2. **The auto-replace modal closes on outside click**, which loses
+   the in-progress edit if the user clicks anywhere outside the
+   panel.
+3. **They want the existing text-editor toolbar accessible while
+   authoring the rich snippet** so font/color/effects/structural
+   blocks can all participate in the snippet.
+
+### What ships
+
+- **`afterHtml` field on AutoReplaceRule.** Optional rich-content
+  string. When present, the input-rule handler parses it through
+  `DOMParser.fromSchema(view.state.schema).parseSlice(div)` into a
+  ProseMirror Slice and replaces the matched range with
+  `tr.replaceRange(replaceFrom, to, slice)` instead of inserting a
+  text node. Built-ins keep using the plain `after` path; only
+  user-authored rich snippets carry `afterHtml`.
+
+- **Defensive fallback.** If schema parsing fails (e.g., an old
+  rule with malformed HTML), the handler falls through to the
+  plain-text `after` path so the user always gets *something* on
+  trigger. Prevents the editor from getting stuck mid-keystroke.
+
+- **`RichAfterEditor.tsx` sub-modal.** New file. Mounts a TipTap
+  editor with the same Cortex extension stack the main editor uses
+  (StarterKit minus strike/link/codeBlock + CortexCodeBlock +
+  CortexAutoReplace + CortexStrikeRevision + Underline / Subscript /
+  Superscript / TextStyle / Color / Highlight / TaskList /
+  TaskItem + CortexFontStyle / CortexUnderlineStyled /
+  CortexTextEffect / CortexParticleHost + ColorMark + Markdown(
+  html: true) + every CortexBlocks node + the three NodeView-
+  enabled nodes — Collapsible, MathBlock, TabsBlock — wired the
+  same way Editor.tsx wires them).
+
+- **Toolbar bound to the mini editor.** A second `EditorToolbar`
+  instance mounts inside the sub-modal, bound to its mini editor.
+  Toolbar prefs share the main editor's `cortex:editor-toolbar-
+  prefs` localStorage key so density / favorites / collapsed-
+  groups carry over (without polluting any state — the prefs are
+  just read once, mirrored on changes back to the same key).
+
+- **Save UX.** On save:
+  - `editor.getHTML()` → `afterHtml` (drives the rich-content
+    insertion path).
+  - `editor.getText()` → `after` (textual fallback shown in the
+    rule list and used if HTML parsing fails at trigger time).
+
+- **Sticky parent modal.** The AutoReplaceModal scrim's
+  `onClick={onClose}` becomes `onClick={(e) => e.stopPropagation()}`
+  so a click on the dimmed area no longer closes the modal — only
+  the explicit Close button, the Cancel buttons in edit rows, or
+  Esc dismiss it.
+
+- **Sticky sub-modal.** RichAfterEditor's scrim is also click-
+  swallowing, with Save / Cancel / Esc as the only exits.
+
+- **Rule-list visual cue.** Rules with a non-empty `afterHtml`
+  show a small ✨ badge next to their textual `after` cell so the
+  user can spot rich rules at a glance.
+
+- **Edit-row Rich button.** Both the in-place edit row and the add
+  form gain a `✨+` / `✨` button that opens the RichAfterEditor
+  pre-seeded with the current draft. Save → drafts pick up the
+  resulting HTML + text. Cancel → drafts stay as they were.
+
+### Architectural choices worth flagging
+
+- **Rich content as HTML, not Markdown.** TipTap's markdown
+  serializer is lossy for some structural blocks (Frame,
+  Collapsible nodeviews, etc.) and round-tripping markdown→HTML
+  would re-trigger any input rules. Storing `afterHtml` as raw
+  HTML and parsing through the schema directly keeps the rule's
+  output deterministic.
+
+- **Plain `after` STILL required.** Even when `afterHtml` is
+  present, the rule's textual `after` field is required. Two
+  reasons: (1) the rule list shows the textual representation in
+  its grid; (2) defensive fallback for parse failures. The
+  RichAfterEditor's Save path always fills both.
+
+- **One mini editor per open sub-modal.** Considered keeping a
+  single shared mini editor instance and swapping content based
+  on which row is being edited; rejected because TipTap editor
+  instances have their own internal state (selection, history,
+  etc.) and reusing one across draft contexts would let history
+  bleed between rules. Mounting fresh on each open is cleaner.
+
+- **Sub-modal click-outside-no-close.** The user explicitly asked
+  for click stickiness on the parent; the sub-modal mirrors that
+  for consistency (otherwise a misclick on the parent's scrim
+  would not dismiss the modal but a misclick on the sub-modal's
+  scrim would close the sub-modal — confusing).
+
+### Files added
+
+- `src/components/RichAfterEditor.tsx` — sub-modal with mini
+  editor + bound toolbar.
+
+### Files modified
+
+- `src/editor/CortexAutoReplace.ts`
+  - `AutoReplaceRule` grows optional `afterHtml`.
+  - `readUserAutoReplaceRules` parses `afterHtml` and `category`
+    into a clean shape.
+  - `handleTextInput` checks `afterHtml` first; on match, parses
+    via PMDOMParser → Slice → `tr.replaceRange`. Falls through to
+    plain-text path on parse failure.
+- `src/components/AutoReplaceModal.tsx`
+  - Imports `RichAfterEditor`.
+  - New state: `draftAfterHtml`, `editDraftAfterHtml`,
+    `richEditing`.
+  - `startEdit` / `cancelEdit` / `handleAdd` / `saveEdit` round-
+    trip `afterHtml`.
+  - `RuleDisplayRow` shows a ✨ badge when the rule has rich
+    content.
+  - `RuleEditRow` gains `hasRichDraft` + `onOpenRichEditor` props
+    and a ✨ button.
+  - Add form gains a ✨ Rich… button + a "Rich snippet attached"
+    indicator with a "clear" link.
+  - Scrim's `onClick={onClose}` removed.
+  - Sub-modal mount points for both `richEditing === "add"` and
+    `richEditing === "edit"`.
+  - Three new style entries: `richBadge`, `richIndicator`,
+    `btnLink`.
+
+### Edge cases handled
+
+- Schema parse failure on `afterHtml` → fall through to plain
+  text, no error surfaced to user.
+- User clears `afterHtml` via the indicator's "clear" link → rule
+  reverts to pure plain-text behavior on next save.
+- Editing a rule that already has `afterHtml` → drafts seed with
+  it; saving without re-opening the rich editor preserves it.
+
+### Edge cases NOT handled (deferred)
+
+- **Rich content using extensions not in RichAfterEditor's
+  whitelist.** Tables, CortexImage, WikilinkDecoration aren't
+  registered in the sub-modal's schema. If a user pastes such
+  content into the mini editor, parseSlice will skip it. v1.3+
+  could expand the whitelist or factor out a shared
+  `buildEditorExtensions(opts)` helper.
+- **Schema migrations.** If the schema changes in a future
+  cluster (e.g., a node's parseHTML stops accepting an old data-
+  attr), saved `afterHtml` from old rules might parse
+  incorrectly. v1.3+ could version `afterHtml` per schema.
+- **Per-rule preview.** v1.2 doesn't render the resulting block
+  inline in the rule list — the textual `after` plus the ✨ badge
+  is the visible cue. v1.3+ could show a thumbnail.
+
+### Tag
+
+`cluster-21-v1.2-complete` (new tag — not folded into 1.1).
+
+### v1.2 polish — Frame block color picker (same tag)
+
+User feedback after the rich auto-replace landed: the Frame block
+toolbar button always emitted a frame with the default
+`var(--accent)` border, with no way to color-customize without
+hand-editing the on-disk HTML. Added a paired UI:
+
+- **`color` attr on `CortexFrame`.** Optional string (CSS hex).
+  parseHTML reads `data-color`; renderHTML emits both `data-color`
+  (round-trip durability) and an inline style assigning
+  `--cortex-frame-color: <hex>`. The CSS rule for `.cortex-frame`
+  reads `border: 2px solid var(--cortex-frame-color, var(--accent))`
+  so frames with no color attr still render with the accent
+  default — zero migration for v1.1 documents.
+
+- **Toolbar Frame button gains a "preview chip" icon.** The square
+  glyph is now a tiny outlined box whose border color reflects the
+  currently-chosen frame color (or `currentColor` when no choice
+  has been made). Tooltip reads "Frame (color: #xxxxxx)" or
+  "Frame (default color)".
+
+- **Adjacent color-swatch button.** A small filled swatch button
+  next to the Frame button opens a `ColorPicker` popover (the
+  same component used by the text-color group). Clicking a swatch:
+  - Persists the choice to `localStorage[cortex:frame-color]` so
+    the next insert uses it.
+  - If the cursor is currently inside a `cortexFrame` node, calls
+    `editor.chain().updateAttributes("cortexFrame", { color: hex })`
+    so the existing frame re-colors immediately.
+  - Otherwise the choice is just remembered for future inserts.
+- **Reset.** The popover's Reset button clears localStorage AND
+  un-colors the current frame (if any) by setting the attr back to
+  null. Frames without a color attr render with the default
+  accent border.
+
+- **State.** `EditorToolbar` grows a `frameColor: string | null`
+  state seeded from localStorage on mount. `persistFrameColor`
+  helper updates state + localStorage in lockstep.
+
+### Files modified (Frame color)
+
+- `src/editor/CortexBlocks.ts` — `CortexFrame.addAttributes` adds
+  the `color` attr with parseHTML / renderHTML.
+- `src/index.css` — `.cortex-frame` border switched from
+  `var(--accent)` to `var(--cortex-frame-color, var(--accent))`.
+- `src/components/EditorToolbar.tsx`
+  - New `frameColor` state + `persistFrameColor` helper.
+  - Frame button passes the chosen color via `attrs: { color }`
+    when inserting; glyph reflects current choice.
+  - New `TbPopover` triggered by a swatch button; uses the existing
+    `ColorPicker` component; pick / reset persist to localStorage
+    and re-color any frame the cursor is inside.
+
+### Edge cases handled
+
+- Cursor not inside a frame when the user picks a color → silent
+  no-op for the live recolor; localStorage still updates so the
+  next insert uses the choice.
+- Old frames (no `color` attr) → render with accent default;
+  user can re-color one via the popover after entering it.
+
+### Edge cases NOT handled (deferred)
+
+- Per-frame "remember and reuse this color" — currently the chosen
+  color is GLOBAL across all frames inserted afterwards. Users who
+  want different frame colors in different documents have to
+  re-pick. v1.3+ could store per-vault or per-doc preferences.
+- Theme-aware accent → frame color binding. v1.2 uses the literal
+  hex; if the user toggles theme, the frame keeps its hex (which
+  may not work well against the new background).
+
+### v1.2 patch — RichAfterEditor focus + popover clipping (same tag)
+
+User-reported bugs immediately after the rich auto-replace shipped:
+
+1. **"Can't click in areas with the mouse to write."** Root cause:
+   the editor's contenteditable was small (single empty paragraph)
+   and the surrounding `editorShell` had no click-to-focus
+   handler, so clicks below the actual content landed on padding
+   that wasn't routed to the editor. PM only focuses on clicks
+   inside the .ProseMirror element itself.
+2. **"Toolbar popups bleed through the window."** Root cause: the
+   panel's `overflow: hidden` clipped any toolbar popover (font
+   family, color picker, structural-block submenus) that extended
+   beyond the panel's bounds.
+3. **"Some features like align don't work."** Root cause:
+   `TextAlign` extension wasn't registered on the mini editor, so
+   `editor.commands.setTextAlign()` no-op'd silently.
+4. **"Shortcuts for text don't work."** Root cause: same as #1 —
+   the editor wasn't focused, so `Ctrl+B` / `Ctrl+I` etc. didn't
+   reach it.
+5. **"When editing a rule with rich content, it doesn't allow you
+   to edit."** Root cause: same as #1 — editor mounts with seed
+   content but isn't focused, and the broken click-to-focus path
+   meant typing did nothing.
+
+### Fixes (single round of patches under the same tag)
+
+- **`overflow: hidden` → `overflow: visible`** on the modal panel.
+  The editor area's `editorShell` keeps `overflow: auto` so a
+  long snippet still scrolls inside the editor, but popovers from
+  the toolbar above can extend freely.
+- **`autofocus: "end"`** on the `useEditor()` config so the
+  editor opens with focus at the end of the seed content.
+- **Click-anywhere-on-`editorShell`-to-focus.** New `onClick`
+  handler on the shell calls `editor.commands.focus("end")` when
+  the click target isn't already inside `.ProseMirror`. The
+  `cursor: "text"` style on the shell hints at the affordance.
+- **`Link` + `TextAlign` extensions registered.** Link (with
+  `openOnClick: false` so clicks inside the editor don't navigate
+  away) and TextAlign (configured for `["heading", "paragraph"]`
+  with left/center/right) so the toolbar's URL-insert and
+  alignment buttons actually work in the snippet editor.
+
+These four patches together resolve all five reported bugs. No
+data-format changes; no breaking changes to existing rules.
+
+### v1.2 patch — Toolbar popovers in editor area (same tag)
+
+User-reported follow-on: toolbar popovers (font-family dropdown,
+color picker, structural-block submenus) that extend DOWN into
+the editor area weren't clickable on the parts that overlapped
+the editor. Two compounding issues:
+
+1. **Click-to-focus stole popover clicks.** The new
+   click-anywhere-to-focus handler on `editorShell` fired when a
+   click on a popover option BUBBLED UP through the editor shell
+   (the popover, while visually above the editor, sits in a child
+   of the shell's parent so its events propagate via React's
+   synthetic-event tree even when the popover is z-indexed
+   above). Net effect: the user's click on a font dropdown
+   option dispatched, the editor's `commands.focus("end")` fired
+   immediately after, and the popover's selection state was
+   reset before any value could commit.
+2. **Stacking ambiguity.** `editorShell` has `overflow: auto`
+   which creates its own paint layer; without explicit z-indexes
+   the toolbar popovers and the editor shell were in the same
+   stacking context and the layering depended on DOM order. In
+   some cases the popover rendered visually behind the editor
+   shell entirely.
+
+### Fix
+
+- Click-to-focus handler on `editorShell` now early-returns when
+  the click target is inside any of:
+    - `.ProseMirror` (content edit — let PM handle it)
+    - `.cortex-tb-popover` (the popover element itself)
+    - `.cortex-tb-btn` (toolbar button — clicks shouldn't refocus)
+    - `.cortex-editor-toolbar` (anything in the toolbar)
+    - `select`, `input`, `button` (form controls anywhere over
+      the editor area, defensive)
+- Explicit stacking via `position: relative` +
+  `toolbarShell.zIndex = 5` and `editorShell.zIndex = 1`. The
+  toolbar shell becomes the stacking-context root for its
+  descendants (including all popovers), guaranteeing they paint
+  above the editor area regardless of the surrounding flex /
+  overflow context.

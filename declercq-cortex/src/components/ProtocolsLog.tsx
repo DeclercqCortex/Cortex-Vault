@@ -141,7 +141,7 @@ export function ProtocolsLog({
   }, [rows, domainFilter, sortKey]);
 
   return (
-    <div style={styles.wrap}>
+    <div className="cortex-view cortex-view-protocols" style={styles.wrap}>
       <header style={styles.header}>
         <div style={styles.titleRow}>
           <h2 style={styles.title}>Protocols Log</h2>

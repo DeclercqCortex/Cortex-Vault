@@ -199,7 +199,7 @@ export function IdeaLog({
   }
 
   return (
-    <div style={styles.wrap}>
+    <div className="cortex-view cortex-view-ideas" style={styles.wrap}>
       <header style={styles.header}>
         <div style={styles.titleRow}>
           <h2 style={styles.title}>Idea Log</h2>

@@ -237,6 +237,17 @@ export function NotificationBell({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
+        // Cluster 26 — class hooks let CSS animate the brain glyph when
+        // there are active reminders. The hue class drives the subtle
+        // glow color; the animation runs only when count > 0 and is
+        // killed by prefers-reduced-motion.
+        className={`cortex-brand-bell${
+          anyPastDue
+            ? " cortex-brand-bell--urgent"
+            : count > 0
+              ? " cortex-brand-bell--unread"
+              : ""
+        }`}
         style={{
           ...styles.bellBtn,
           color: bellColor,
@@ -249,9 +260,20 @@ export function NotificationBell({
         }
         aria-label="Reminders"
       >
-        <span style={styles.bellGlyph}>🔔</span>
+        {/* Cluster 26 — bell emoji replaced with the canonical brand
+         *  mark (self-contained SVG with the brain embedded as a data
+         *  URI). Served from declercq-cortex/public/. */}
+        <img
+          src="/cortex-mark.svg"
+          alt=""
+          className="cortex-brand-bell-mark"
+          aria-hidden="true"
+        />
         {count > 0 && (
-          <span style={{ ...styles.badge, background: badgeBg }}>
+          <span
+            className="cortex-brand-bell-badge"
+            style={{ ...styles.badge, background: badgeBg }}
+          >
             {count > 99 ? "99+" : count}
           </span>
         )}

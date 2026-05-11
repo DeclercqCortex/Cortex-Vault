@@ -30,51 +30,149 @@
  *   --scrim       modal backdrop
  *   --shadow      drop shadow tint
  */
+/* --- Aurora Glass refresh ---------------------------------------------
+ *
+ * The Aurora pass keeps every original token name compatible (no rename),
+ * retunes their values for a cooler, glassier identity, and *adds* new
+ * tokens for radii, shadow tiers, motion, blur, and accent gradients.
+ *
+ * Existing components that read these variables (and almost every
+ * component already does) get the new look for free without any DOM
+ * change. The new tokens are picked up by the chrome (toolbar, sidebar,
+ * modals) via the CSS rules added later in this file.
+ *
+ * `--shadow` (singular) is preserved as an alias for --shadow-2 so any
+ * historical reference renders identically; `--shadow-1/2/3` are the
+ * new elevation tiers.
+ */
 :root,
 :root.dark {
-  --bg: #1a1a1a;
-  --bg-elev: #1f1f1f;
-  --bg-deep: #161616;
-  --bg-card: #202020;
-  --text: #e5e5e5;
-  --text-2: #cbd5e1;
-  --text-muted: rgba(229, 229, 229, 0.55);
-  --border: rgba(255, 255, 255, 0.07);
-  --border-2: rgba(255, 255, 255, 0.12);
-  --accent: #6ca0dc;
-  --accent-bg: rgba(108, 160, 220, 0.08);
-  --accent-bg-2: rgba(108, 160, 220, 0.18);
-  --primary: #3b82f6;
-  --danger: #f87171;
-  --warning: #f59e0b;
-  --scrim: rgba(0, 0, 0, 0.55);
-  --shadow: 0 6px 30px rgba(0, 0, 0, 0.35);
-  --code-bg: rgba(255, 255, 255, 0.06);
-  --pre-bg: #12161c;
-  --placeholder: rgba(229, 229, 229, 0.35);
+  /* Surface colors — slight cool-slate undertone for a deeper feel.
+   *
+   * Cluster 26 final pass — --bg-elev alpha dropped 0.72 → 0.62 so the
+   * sidebar / toolbar / topbar (which all read this token) become
+   * noticeably glassier. The body's bumped aurora wash now visibly
+   * bleeds through the chrome surfaces via backdrop-filter: blur(). */
+  --bg: #0d1018;
+  --bg-elev: rgba(30, 36, 54, 0.62);
+  --bg-elev-solid: #1a1f2e;
+  --bg-deep: #0a0d14;
+  --bg-card: rgba(26, 31, 46, 0.86);
+
+  /* Text */
+  --text: #ebeefb;
+  --text-2: #c2cae0;
+  --text-muted: rgba(235, 238, 251, 0.5);
+
+  /* Borders — cool light hairlines that pick up the aurora glow. */
+  --border: rgba(168, 192, 240, 0.08);
+  --border-2: rgba(168, 192, 240, 0.16);
+
+  /* Accent pair — used both alone and as a 135° gradient. */
+  --accent: #7aa2ff;
+  --accent-2: #a98bff;
+  --accent-bg: rgba(122, 162, 255, 0.12);
+  --accent-bg-2: rgba(122, 162, 255, 0.22);
+  --accent-gradient: linear-gradient(135deg, #7aa2ff 0%, #a98bff 100%);
+
+  /* Status */
+  --primary: #5b8bff;
+  --danger: #ff8a8a;
+  --warning: #f5c365;
+
+  /* Scrim — slightly tinted, paired with --blur-modal for a real glass. */
+  --scrim: rgba(7, 10, 18, 0.55);
+
+  /* Elevation stack — three tiers, every one a layered double shadow. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.18), 0 1px 1px rgba(0, 0, 0, 0.1);
+  --shadow-2: 0 6px 22px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.18);
+  --shadow-3:
+    0 32px 60px -12px rgba(0, 0, 0, 0.55), 0 16px 28px -8px rgba(0, 0, 0, 0.35);
+  --shadow: var(--shadow-2);
+
+  --code-bg: rgba(168, 192, 240, 0.08);
+  --pre-bg: #0e1320;
+  --placeholder: rgba(235, 238, 251, 0.32);
+
+  /* Aurora corner gradients — Cluster 26 design-system EXACT values.
+   *
+   * Reverted from the earlier 2x bump back to the canonical spec
+   * from design-system/preview/brand-mark.html. The chrome reads
+   * through these subtler alphas via backdrop-filter blur; the
+   * brand-mark frame in the sidebar uses the same gradients via
+   * background-attachment: fixed so the badge becomes a "window"
+   * into the same wash. --bg-elev's 0.62 alpha (lower in this
+   * block) stays where it is so the chrome remains glassy. */
+  --aurora-base: #141a2c;
+  --aurora-1: rgba(122, 162, 255, 0.1);
+  --aurora-2: rgba(169, 139, 255, 0.1);
+  --aurora-3: rgba(74, 222, 188, 0.04);
 }
 
 :root.light {
-  --bg: #ffffff;
-  --bg-elev: #fafafa;
-  --bg-deep: #f1f3f5;
-  --bg-card: #ffffff;
-  --text: #1a1a1a;
-  --text-2: #4b5563;
-  --text-muted: rgba(26, 26, 26, 0.55);
-  --border: rgba(0, 0, 0, 0.08);
-  --border-2: rgba(0, 0, 0, 0.16);
-  --accent: #2563eb;
-  --accent-bg: rgba(37, 99, 235, 0.08);
-  --accent-bg-2: rgba(37, 99, 235, 0.18);
-  --primary: #3b82f6;
-  --danger: #dc2626;
-  --warning: #d97706;
-  --scrim: rgba(0, 0, 0, 0.4);
-  --shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
-  --code-bg: rgba(0, 0, 0, 0.04);
+  --bg: #fbfbfd;
+  --bg-elev: rgba(255, 255, 255, 0.78);
+  --bg-elev-solid: #ffffff;
+  --bg-deep: #f3f5fa;
+  --bg-card: rgba(255, 255, 255, 0.92);
+
+  --text: #131623;
+  --text-2: #4a5169;
+  --text-muted: rgba(19, 22, 35, 0.55);
+
+  --border: rgba(15, 23, 42, 0.07);
+  --border-2: rgba(15, 23, 42, 0.14);
+
+  --accent: #4661ff;
+  --accent-2: #8d54f5;
+  --accent-bg: rgba(70, 97, 255, 0.08);
+  --accent-bg-2: rgba(70, 97, 255, 0.18);
+  --accent-gradient: linear-gradient(135deg, #4661ff 0%, #8d54f5 100%);
+
+  --primary: #3b58e8;
+  --danger: #d93838;
+  --warning: #c47e0e;
+  --scrim: rgba(15, 23, 42, 0.32);
+
+  --shadow-1:
+    0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 1px rgba(15, 23, 42, 0.04);
+  --shadow-2:
+    0 4px 16px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.06);
+  --shadow-3:
+    0 24px 48px -12px rgba(15, 23, 42, 0.18),
+    0 12px 24px -8px rgba(15, 23, 42, 0.12);
+  --shadow: var(--shadow-2);
+
+  --code-bg: rgba(15, 23, 42, 0.05);
   --pre-bg: #f6f8fa;
-  --placeholder: rgba(26, 26, 26, 0.35);
+  --placeholder: rgba(19, 22, 35, 0.32);
+
+  --aurora-1: rgba(70, 97, 255, 0.1);
+  --aurora-2: rgba(141, 84, 245, 0.1);
+  --aurora-3: rgba(60, 220, 195, 0.06);
+  --aurora-base: #fbfbfd;
+}
+
+/* New tokens — shared across both themes. Radii, motion, blur, ring. */
+:root {
+  --radius-1: 6px;
+  --radius-2: 10px;
+  --radius-3: 14px;
+  --radius-pill: 999px;
+
+  --motion-fast: 120ms;
+  --motion-medium: 220ms;
+  --motion-slow: 380ms;
+  --ease: cubic-bezier(0.25, 0.8, 0.4, 1);
+
+  --blur-chrome: saturate(160%) blur(12px);
+  --blur-modal: saturate(150%) blur(20px);
+  --blur-strong: saturate(180%) blur(28px);
+
+  --ring: 0 0 0 2px color-mix(in oklab, var(--accent) 45%, transparent);
+  --ring-strong:
+    0 0 0 2px color-mix(in oklab, var(--accent) 65%, transparent),
+    0 0 0 4px color-mix(in oklab, var(--accent-2) 30%, transparent);
 }
 
 /* App-level defaults — uses the variables above. */
@@ -84,7 +182,6 @@ body,
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--bg);
   color: var(--text);
   font-family:
     system-ui,
@@ -92,6 +189,106 @@ body,
     "Segoe UI",
     Roboto,
     sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Aurora background — three soft radial gradients over the base color
+ * are painted on body, fixed-attached so they don't scroll with content.
+ * Translucent surfaces (toolbar, sidebar, modals) pick up the glow
+ * through their backdrop-filter. Kept behind everything via z-index: -1
+ * on body's own stacking context.
+ *
+ * NOTE: paints to body, not body::before, so contenteditable surfaces
+ * like ProseMirror are unaffected. The gradient stops are subtle (0.07
+ * – 0.13 alpha) — barely a wash, never an overlay.
+ */
+body {
+  /* Cluster 26 — Aurora wash, four corner gradients only.
+   *
+   * The 5th central teal ellipse from the design-system spec was
+   * removed: it stacked with the brain mark's own drop-shadow halo
+   * to form a noticeable "ring around the brain" that competed with
+   * the brand mark's identity. The remaining four corner washes
+   * (blue top-left + bottom-right diagonal, violet bottom-right +
+   * top-left diagonal at lower alpha) frame the viewport
+   * rectangularly without focusing on the center. */
+  background-color: var(--aurora-base);
+  background-image:
+    radial-gradient(
+      ellipse 300% 270% at 0% 0%,
+      rgba(122, 162, 255, 0.1) 0%,
+      rgba(122, 162, 255, 0.02) 100%
+    ),
+    radial-gradient(
+      ellipse 300% 270% at 100% 100%,
+      rgba(169, 139, 255, 0.1) 0%,
+      rgba(169, 139, 255, 0.02) 100%
+    ),
+    radial-gradient(
+      ellipse 270% 240% at 100% 0%,
+      rgba(122, 162, 255, 0.06) 0%,
+      rgba(122, 162, 255, 0.01) 100%
+    ),
+    radial-gradient(
+      ellipse 270% 240% at 0% 100%,
+      rgba(169, 139, 255, 0.06) 0%,
+      rgba(169, 139, 255, 0.01) 100%
+    );
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* Modern scrollbars — narrow, translucent, tinted to the theme.
+ * Webkit (Chromium / Tauri-on-Windows uses WebView2 / Chromium): apply
+ * a refined track + thumb. Firefox: scrollbar-color fallback. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-2) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-2);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-pill);
+  transition: background var(--motion-fast) var(--ease);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--accent) 50%, var(--border-2));
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Selection highlight — a subtle accent tint that reads well in both
+ * themes and over translucent surfaces. */
+::selection {
+  background: color-mix(in oklab, var(--accent) 35%, transparent);
+  color: var(--text);
+}
+
+/* Reduced-motion gate — neutralizes any new transition/animation we
+ * introduce. Users with prefers-reduced-motion: reduce see the same
+ * visual outcome but without easing/animation cost. We keep the
+ * structural transition on `width` / `transform` for sidebar collapse,
+ * since it's already shipped behavior; everything else folds. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Editor fine-tuning — Tailwind typography's dark variant is solid but it
@@ -124,8 +321,30 @@ body,
 .prose h2,
 .prose h3,
 .prose h4 {
-  color: var(--text);
-  font-weight: 600;
+  /* Cluster 26 — headers carry the wordmark styling automatically.
+   * Inter 500, 0.04em letter-spacing, accent-gradient text fill via
+   * background-clip: text. Same recipe as the cortex-wordmark.svg.
+   * The previous color: var(--text) + font-weight: 600 are replaced.
+   *
+   * caret-color is set explicitly because color: transparent makes
+   * the typing caret invisible too (caret inherits color). Painting
+   * the caret in --accent keeps it visible against the gradient
+   * text without competing with the wordmark fill. */
+  font-family:
+    "Inter",
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  caret-color: var(--accent);
 }
 /* Inline emphasis colour follows the theme. Without these, dropping
    `prose-invert` from the editor would let Tailwind typography defaults
@@ -1298,6 +1517,69 @@ body.cortex-mod-pressed .cortex-image:hover {
 }
 
 /* ---------------------------------------------------------------------------
+ * Cluster 24 v1.0 — FileTree context menu + inline edit input
+ *
+ * Right-click on a file or folder row opens a small floating menu of
+ * actions (new file / new folder / rename / delete). Pure CSS chrome —
+ * the menu is positioned by App.tsx via clientX/clientY at click time
+ * and clamps inside the viewport on render.
+ * --------------------------------------------------------------------------- */
+.cortex-filetree-ctxmenu {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-3);
+  backdrop-filter: var(--blur-modal);
+  -webkit-backdrop-filter: var(--blur-modal);
+  min-width: 200px;
+  padding: 5px;
+  font-size: 0.85rem;
+  user-select: none;
+  animation: cortex-popover-in var(--motion-medium) var(--ease);
+}
+.cortex-filetree-ctxmenu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  border-radius: var(--radius-1);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: background var(--motion-fast) var(--ease);
+}
+.cortex-filetree-ctxmenu-item:hover,
+.cortex-filetree-ctxmenu-item:focus-visible {
+  background: var(--accent-bg-2);
+  outline: none;
+}
+.cortex-filetree-ctxmenu-item-danger {
+  color: var(--danger, #dc2626);
+}
+.cortex-filetree-ctxmenu-item-danger:hover,
+.cortex-filetree-ctxmenu-item-danger:focus-visible {
+  background: color-mix(in oklab, var(--danger) 18%, transparent);
+}
+.cortex-filetree-ctxmenu-shortcut {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-left: 1.5rem;
+}
+.cortex-filetree-ctxmenu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 4px;
+}
+.cortex-filetree-inline-input:focus {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------------------
  * Cluster 23 v1.0 — Revision strikethrough bubble
  *
  * Single-line, rectangular, contenteditable bubble that floats slightly
@@ -1405,28 +1687,41 @@ body.cortex-mod-pressed .cortex-image:hover {
 .cortex-editor-toolbar {
   flex-shrink: 0;
   z-index: 60;
-  background: var(--bg-card);
+  /* Glass surface — translucent panel + backdrop-filter so the aurora
+   * background bleeds through. Solid fallback via the rgba/oklch
+   * mixed token; no behaviour change for browsers without
+   * backdrop-filter (Tauri's WebView2 supports it natively).
+   *
+   * Cluster 26 design-system refinement: vertical gradient from the
+   * raised glass tier down to the recessed deep tier so the toolbar
+   * reads as a panel sitting forward of the canvas, plus a 1px inset
+   * top highlight that catches light like the upper edge of a piece
+   * of frosted glass. */
+  background: linear-gradient(180deg, var(--bg-elev) 0%, var(--bg-deep) 100%);
   border: none;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
   margin: 0;
-  padding: 4px 8px;
+  padding: 5px 10px;
   display: flex;
   flex-wrap: wrap;
   gap: 0.2rem;
   align-items: center;
   font-size: 0.78rem;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.06);
-  backdrop-filter: saturate(140%);
+  box-shadow:
+    var(--shadow-1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: var(--blur-chrome);
+  -webkit-backdrop-filter: var(--blur-chrome);
   width: 100%;
 }
 .cortex-editor-toolbar.density-compact {
-  padding: 2px;
+  padding: 3px 6px;
   gap: 0.1rem;
   font-size: 0.72rem;
 }
 .cortex-editor-toolbar.density-spacious {
-  padding: 6px;
+  padding: 7px 12px;
   gap: 0.35rem;
   font-size: 0.85rem;
 }
@@ -1434,7 +1729,7 @@ body.cortex-mod-pressed .cortex-image:hover {
   display: flex;
   align-items: center;
   gap: 0.15rem;
-  padding: 0 0.3rem;
+  padding: 0 0.35rem;
   border-right: 1px solid var(--border);
 }
 .cortex-editor-toolbar-group:last-child {
@@ -1447,8 +1742,8 @@ body.cortex-mod-pressed .cortex-image:hover {
   background: transparent;
   color: var(--text);
   border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 3px 6px;
+  border-radius: var(--radius-1);
+  padding: 3px 8px;
   font-size: inherit;
   cursor: pointer;
   min-width: 26px;
@@ -1456,14 +1751,44 @@ body.cortex-mod-pressed .cortex-image:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease);
 }
 .cortex-tb-btn:hover {
-  background: var(--bg-elev);
+  /* Cluster 26 final pass — full accent-gradient hover so the chrome
+   * actually reads at glance distance. The .active state below stays
+   * distinguishable because it adds a 4 px outer halo + drop shadow
+   * while hover is gradient-only. */
+  background: var(--accent-gradient);
+  border-color: transparent;
+  color: white;
+  box-shadow:
+    0 2px 8px color-mix(in oklab, var(--accent) 25%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+.cortex-tb-btn:active {
+  transform: translateY(1px);
 }
 .cortex-tb-btn.active {
-  background: var(--accent);
+  background: var(--accent-gradient);
   color: white;
-  border-color: var(--accent);
+  border-color: transparent;
+  /* Cluster 26 design-system refinement: 4 px outer halo at very low
+   * alpha so the active button reads at glance distance even in a
+   * dense toolbar row. Layered with the existing inner highlight +
+   * accent drop shadow. */
+  box-shadow:
+    0 0 0 4px var(--accent-bg),
+    0 2px 8px color-mix(in oklab, var(--accent) 35%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+.cortex-tb-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
 }
 .cortex-tb-btn:disabled {
   opacity: 0.45;
@@ -1501,14 +1826,93 @@ body.cortex-mod-pressed .cortex-image:hover {
   display: inline-block;
 }
 .cortex-tb-popover {
+  /* `position` is now set inline as `fixed` by the TbPopover React
+   * component (which portals the panel to document.body so it
+   * escapes the toolbar's backdrop-filter containing block).
+   * Keep `position: absolute` here as a fallback for any older
+   * call site that hasn't been migrated. */
   position: absolute;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-2);
   padding: 8px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
-  z-index: 200;
+  box-shadow: var(--shadow-3);
+  backdrop-filter: var(--blur-modal);
+  -webkit-backdrop-filter: var(--blur-modal);
+  /* Cortex v1.0 — the popover is portaled to document.body, sitting
+   * over the whole app. Bump z-index well above the topbar's 50 and
+   * the splash's 1 but below modal scrims (1000) so an open popover
+   * doesn't fight with a modal that opens behind it. */
+  z-index: 250;
   min-width: 220px;
+  /* Cap the height so a tall popover (e.g., font picker) on a small
+   * window doesn't grow off-screen — the portal-side clamp will keep
+   * the panel inside the viewport, but a scroll fallback is needed
+   * for very tall content. */
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  animation: cortex-popover-in var(--motion-medium) var(--ease);
+}
+
+/* ---------- Gradient hover for popover items + dropdown options ----------
+ * Every clickable child inside a popover lights up with the accent
+ * gradient on hover, matching the rest of the chrome. Targets:
+ *   - <button> elements (most popover items)
+ *   - <li> elements (some legacy popovers use lists)
+ *   - inline <option> elements inside a <select> (browser-limited
+ *     but at least colorable)
+ *
+ * !important is necessary on background/color because most popover
+ * items inline-style their own background (e.g., the color picker
+ * swatches show their target color as the background) — those need
+ * to keep their own inline color, so we scope the hover override to
+ * non-swatch elements via :not(.cortex-tb-swatch). */
+.cortex-tb-popover button:not(.cortex-tb-swatch):hover {
+  background: var(--accent-gradient) !important;
+  color: white !important;
+  border-color: transparent !important;
+  box-shadow:
+    0 2px 8px color-mix(in oklab, var(--accent) 25%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+.cortex-tb-popover button.cortex-tb-swatch:hover {
+  /* Swatches keep their inline color (that IS what they're showing)
+   * but get a brighter accent-tinted ring on hover. */
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 8px color-mix(in oklab, var(--accent) 50%, transparent) !important;
+  transform: scale(1.08);
+}
+.cortex-tb-popover button {
+  /* Default state: soft transition so the hover lands smoothly. */
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease);
+}
+.cortex-tb-popover li:hover {
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+/* Native <select> dropdown — the options panel renders OS-native so
+ * styling is limited, but Chromium honors background-color and color
+ * on <option> elements. The toolbar's font picker + lang select get
+ * an accent-tinted hover via option:hover. */
+.cortex-editor-toolbar select option,
+.cortex-tb-popover select option {
+  background: var(--bg-card);
+  color: var(--text);
+  padding: 4px 8px;
+}
+.cortex-editor-toolbar select option:hover,
+.cortex-editor-toolbar select option:checked,
+.cortex-tb-popover select option:hover,
+.cortex-tb-popover select option:checked {
+  background: var(--accent-bg);
+  color: var(--text);
 }
 .cortex-tb-grid-6 {
   display: grid;
@@ -2170,12 +2574,105 @@ body.cortex-anim-paused .cortex-underline-marching {
   color: var(--text);
 }
 
-/* Page break */
+/* Page break — Cluster 26: point-source glare with radiating rays.
+ *
+ * The hr itself paints just the dashed line. A ::before pseudo-element
+ * floats above it at center, painted with a layered gradient stack:
+ *
+ *   1. A tight bright core radial gradient (~6 px) — white at the
+ *      very center fading to accent. This is the point-source.
+ *   2. A soft tighter halo (~24 px) — accent fading to accent-2 to
+ *      transparent. The "diamond ring" around the eclipse.
+ *   3. Eight radial rays via a single conic-gradient with narrow
+ *      bright slices (alternating accent / accent-2) at 0°, 45°, 90°,
+ *      135°, 180°, 225°, 270°, 315°. Each ray is ~3° wide with soft
+ *      edges from the linear interpolation between transparent and
+ *      the bright accent color stop.
+ *   4. A radial mask fades the whole thing from fully visible at
+ *      center to transparent at ~70% radius, so the rays taper at
+ *      their tips like real lens-flare rays. */
 hr.cortex-page-break {
+  /* Cluster 26 — the glare IS the line.
+   *
+   * Previously the hr painted a repeating-linear-gradient dashed line
+   * and the ::before pseudo layered an accent-gradient flare on top.
+   * Now we drop the dashed line entirely: the hr is just a
+   * positioning container; the ::before's lens-flare beam is the
+   * only visible line. The hr's `height: 32px` reserves vertical
+   * space for the caption below the line. */
   border: none;
-  border-top: 2px dashed var(--border);
+  height: 32px;
   margin: 2em 0;
   page-break-after: always;
+  position: relative;
+  background: transparent;
+}
+hr.cortex-page-break::before {
+  /* Horizontal lens-flare with TAPERING thickness.
+   *
+   * Three concentric elliptical layers of decreasing height create
+   * the "thicker in middle, thinner at edges" effect:
+   *
+   *   1. Wide thin BEAM — 360 × 1 px, the long thin streak that
+   *      extends to the lateral tips. Brightness peaks at center
+   *      and fades laterally. This is the only layer that reaches
+   *      the far edges, so the edges look pointy and thin.
+   *   2. Medium BLOOM — 80 × 4 px, sits only near the center.
+   *      Adds the visible vertical thickness ONLY in the center
+   *      region, so the streak appears to thicken approaching
+   *      center.
+   *   3. Bright CORE — 4 px circle at center. The white-hot focal
+   *      point.
+   *
+   * Pseudo height: 4 px (= 2× the line thickness it replaces).
+   * Pseudo width: 360 px. The beam spans the full pseudo width;
+   * the bloom is confined to the center 80 px; the core is a
+   * single bright pixel. */
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 360px;
+  height: 4px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  background:
+    /* 1) White-hot core. Terminal stop MUST be `transparent 100%`,
+     *    not `var(--accent) 100%` — beyond the gradient's defined
+     *    radius the LAST stop is the fill color, and if that's a
+     *    solid color the entire background-image area paints with
+     *    it, drowning the bloom + beam layers underneath. The
+     *    `transparent 100%` ensures the core fades cleanly and the
+     *    underlying layers show through. */
+    radial-gradient(
+      circle 2.5px at 50% 50%,
+      #ffffff 0%,
+      color-mix(in oklab, var(--accent) 85%, white) 50%,
+      var(--accent) 85%,
+      transparent 100%
+    ),
+    /* 2) Medium bloom — uses the full 4 px box height at center,
+     *    confined to the inner 80 px so it tapers OFF naturally
+     *    as you move outward. This is where the lens-shape
+     *    thickness change comes from. */
+    radial-gradient(
+        ellipse 80px 4px at 50% 50%,
+        color-mix(in oklab, var(--accent) 90%, transparent) 0%,
+        color-mix(in oklab, var(--accent) 65%, transparent) 35%,
+        color-mix(in oklab, var(--accent-2) 35%, transparent) 70%,
+        transparent 100%
+      ),
+    /* 3) Thin tapering beam — 1 px tall, extends to the full
+     *    360 px width. The lateral edges of the flare are this
+     *    beam alone, which is why the edges look thin/pointy. */
+    radial-gradient(
+        ellipse 360px 1px at 50% 50%,
+        color-mix(in oklab, var(--accent) 90%, transparent) 0%,
+        color-mix(in oklab, var(--accent) 60%, transparent) 25%,
+        color-mix(in oklab, var(--accent-2) 35%, transparent) 55%,
+        color-mix(in oklab, var(--accent) 15%, transparent) 80%,
+        transparent 100%
+      );
 }
 hr.cortex-page-break::after {
   content: "page break";
@@ -2183,23 +2680,99 @@ hr.cortex-page-break::after {
   text-align: center;
   font-size: 0.7em;
   color: var(--text-muted);
-  margin-top: 0.4em;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1.2em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-/* Decorative separator */
+/* Decorative separator — Cluster 26: the glare IS the line.
+ *
+ * The line segments that previously flanked the glyph are gone. The
+ * parent's background-image carries a horizontal lens-flare that
+ * spans the full row width, brightest at the glyph's center. The
+ * ::before / ::after pseudos are now invisible flex spacers — they
+ * exist only to push the glyph to the center via `flex: 1`. The
+ * glyph itself sits on the brightest point of the flare with its
+ * own text-shadow corona painting one extra octave of glow. */
 .cortex-deco-separator {
   display: flex;
   align-items: center;
   gap: 0.8em;
-  margin: 1em 0;
-  color: var(--text-muted);
+  margin: 1.2em 0;
+  color: var(--accent);
+  /* Same lens-shape recipe as the page break, scaled smaller:
+   *
+   *   1. Wide thin BEAM — 75 % parent width × 1 px tall. Spans
+   *      the row laterally; brightest at center fading at tips.
+   *   2. Medium BLOOM — 50 × 2 px confined to the center region,
+   *      gives the streak its thicker middle.
+   *   3. Bright CORE — 2 px circle at exact center.
+   *
+   * All three layers fit inside a 2 px band (the parent's
+   * background-size for the beam clamps the max height to 2 px;
+   * the bloom's own height is 2 px; the core is 2 px diameter). */
+  background-image:
+    /* White-hot core. Terminal stop MUST be `transparent 100%` —
+     * see the page-break version above for why (otherwise the
+     * parent fills with solid accent and becomes a giant
+     * rectangle instead of a thin streak). */
+    radial-gradient(
+      circle 2px at 50% 50%,
+      #ffffff 0%,
+      color-mix(in oklab, var(--accent) 85%, white) 50%,
+      var(--accent) 85%,
+      transparent 100%
+    ),
+    /* Medium bloom — sits in the center, gives the thicker middle */
+    radial-gradient(
+        ellipse 50px 2px at 50% 50%,
+        color-mix(in oklab, var(--accent) 85%, transparent) 0%,
+        color-mix(in oklab, var(--accent) 60%, transparent) 35%,
+        color-mix(in oklab, var(--accent-2) 30%, transparent) 70%,
+        transparent 100%
+      ),
+    /* Thin tapering beam — extends to the row tips */
+    radial-gradient(
+        ellipse 75% 1px at 50% 50%,
+        color-mix(in oklab, var(--accent) 88%, transparent) 0%,
+        color-mix(in oklab, var(--accent) 60%, transparent) 25%,
+        color-mix(in oklab, var(--accent-2) 40%, transparent) 55%,
+        color-mix(in oklab, var(--accent) 15%, transparent) 80%,
+        transparent 100%
+      );
+  background-size:
+    auto auto,
+    auto auto,
+    100% 2px;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 .cortex-deco-separator::before,
 .cortex-deco-separator::after {
+  /* Empty flex spacers — push the glyph to the center. The flare on
+   * the parent's background is visible through them (they have no
+   * fill of their own). */
   content: "";
   flex: 1;
-  height: 1px;
-  background: var(--border);
+  height: 0;
+}
+.cortex-deco-separator > span {
+  position: relative;
+  display: inline-block;
+  padding: 0 0.2em;
+  color: var(--accent);
+  font-size: 1.1em;
+  /* Glyph corona — second octave of glow on top of the parent's
+   * flare. text-shadow is rendered in-line with the text so it sits
+   * exactly behind the glyph character. */
+  text-shadow:
+    0 0 6px color-mix(in oklab, var(--accent) 70%, transparent),
+    0 0 14px color-mix(in oklab, var(--accent-2) 55%, transparent),
+    0 0 24px color-mix(in oklab, var(--accent) 30%, transparent);
+  z-index: 1;
 }
 
 /* Callout container */
@@ -2253,32 +2826,80 @@ hr.cortex-page-break::after {
   background: var(--border);
 }
 
-/* Tabs (simple, no JS — uses :checked + radios; kept basic for v1.0) */
+/* Tabs — Cluster 26 design-system refresh.
+ *
+ * The block reads as a small panel: glass body with rounded top
+ * corners on the active tab title, an accent-gradient seam between
+ * the title strip and the body, and the active tab painted in the
+ * brand gradient. Hover lights idle tabs with an accent-bg tint.
+ * The whole block matches the typed-block visual family. */
 .cortex-tabs {
-  margin: 0.6em 0;
+  margin: 0.7em 0;
+  border-radius: var(--radius-2);
+  overflow: hidden;
+  background: color-mix(
+    in oklab,
+    var(--bg-elev-solid, var(--bg-elev)) 50%,
+    transparent
+  );
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border-2);
+  box-shadow: var(--shadow-1);
 }
 .cortex-tabs-titles {
   display: flex;
   gap: 4px;
-  border-bottom: 1px solid var(--border);
+  padding: 4px 4px 0;
+  /* Accent-gradient seam under the title strip — the same gradient
+   * used by the typed-block end strip and the table outer ring. */
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in oklab, var(--accent) 8%, transparent) 100%
+  );
+  border-bottom: 1px solid transparent;
+  border-image-source: linear-gradient(
+    90deg,
+    var(--accent) 0%,
+    var(--accent-2) 100%
+  );
+  border-image-slice: 0 0 1 0;
+  border-image-repeat: stretch;
 }
 .cortex-tab-title {
-  padding: 4px 10px;
+  padding: 6px 12px;
   cursor: pointer;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 4px 4px 0 0;
-  background: var(--bg-elev);
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: var(--radius-1) var(--radius-1) 0 0;
+  background: transparent;
+  color: var(--text-2);
   font-size: 0.85rem;
+  font-weight: 500;
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease);
+}
+.cortex-tab-title:hover:not(.active) {
+  background: var(--accent-bg);
+  color: var(--text);
+  border-color: var(--accent-bg-2);
 }
 .cortex-tab-title.active {
-  background: var(--bg-card);
+  background: var(--accent-gradient);
+  color: white;
+  border-color: transparent;
   font-weight: 600;
+  box-shadow:
+    0 -2px 8px color-mix(in oklab, var(--accent) 25%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
 .cortex-tab-body {
-  border: 1px solid var(--border);
-  border-top: none;
-  padding: 0.6em 0.9em;
+  border: 0;
+  padding: 0.8em 1em;
 }
 
 /* Margin note (floats right of the main column) */
@@ -2295,9 +2916,15 @@ hr.cortex-page-break::after {
   line-height: 1.35;
 }
 
-/* Frame (decorative box around section) */
+/* Frame (decorative box around section).
+ * Cluster 21 v1.2 — border color is driven by `--cortex-frame-color`,
+ * which the node's renderHTML sets as an inline style when the user
+ * has chosen a custom color via the toolbar's Frame-color picker.
+ * Falls back to var(--accent) for frames inserted before the color
+ * attr existed (and for fresh frames where the user accepts the
+ * default). */
 .cortex-frame {
-  border: 2px solid var(--accent);
+  border: 2px solid var(--cortex-frame-color, var(--accent));
   border-radius: 8px;
   padding: 1em 1.2em;
   margin: 0.8em 0;
@@ -2831,18 +3458,17 @@ body.cortex-theme-dark .hljs-tag {
   align-items: center;
   gap: 4px;
   user-select: none;
-  transition: background 100ms ease;
-}
-.cortex-tabs.cortex-tabs-nodeview .cortex-tab-title:hover:not(.active) {
-  background: var(--bg-hover, #eee);
+  /* Base + hover + active are all in the design-system rule block
+   * above; the nodeview override only needs the layout tweaks here. */
 }
 .cortex-tab-title-text {
   cursor: pointer;
   user-select: none;
 }
 .cortex-tab-title-text:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: 3px;
 }
 .cortex-tab-rename-input {
   font: inherit;
@@ -2851,10 +3477,11 @@ body.cortex-theme-dark .hljs-tag {
   background: var(--bg-card);
   color: var(--text);
   border: 1px solid var(--accent);
-  border-radius: 3px;
+  border-radius: var(--radius-1);
   padding: 1px 6px;
   min-width: 80px;
   outline: none;
+  box-shadow: 0 0 0 2px var(--accent-bg);
 }
 .cortex-tab-remove,
 .cortex-tab-add {
@@ -2866,24 +3493,43 @@ body.cortex-theme-dark .hljs-tag {
   line-height: 1;
   padding: 0 4px;
   cursor: pointer;
-  border-radius: 3px;
+  border-radius: var(--radius-1);
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease);
 }
 .cortex-tab-remove:hover {
-  background: var(--bg-hover, #eee);
-  color: var(--danger, #c00);
+  background: color-mix(in oklab, var(--danger) 18%, transparent);
+  color: var(--danger);
+}
+/* The remove button sits inside an .active tab (which is gradient bg
+ * + white text). When the tab is active, the × needs to read against
+ * the gradient — switch to white + slightly stronger hover. */
+.cortex-tab-title.active .cortex-tab-remove {
+  color: rgba(255, 255, 255, 0.75);
+}
+.cortex-tab-title.active .cortex-tab-remove:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: white;
 }
 .cortex-tab-add {
   margin-left: 4px;
-  padding: 4px 8px;
-  border: 1px dashed var(--border);
+  padding: 4px 10px;
+  border: 1px dashed var(--border-2);
   border-bottom: none;
-  border-radius: 4px 4px 0 0;
+  border-radius: var(--radius-1) var(--radius-1) 0 0;
   background: transparent;
+  color: var(--text-muted);
   font-size: 0.85rem;
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease);
 }
 .cortex-tab-add:hover {
-  background: var(--bg-elev);
-  color: var(--text);
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-color: var(--accent-bg-2);
 }
 
 /* Active panel selection — driven from the wrapper's data-active-tab
@@ -2929,13 +3575,33 @@ body.cortex-theme-dark .hljs-tag {
   font-size: 0.85rem;
 }
 
-/* ---------- Collapsible NodeView (interactive in v1.1) ---------------- */
+/* ---------- Collapsible NodeView — Cluster 26 design-system refresh ----------
+ *
+ * Glass-frosted container, soft accent tint on the summary on hover,
+ * accent-colored chevron that rotates from -90° (closed) to 0° (open).
+ * Open state gets a subtle accent gradient seam along the bottom of
+ * the summary row to delineate from the body. Matches the typed-block
+ * + tabs visual family. */
 
 .cortex-toggle.cortex-toggle-nodeview {
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.3em 0.6em;
-  margin: 0.5em 0;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-2);
+  padding: 0.45em 0.7em;
+  margin: 0.7em 0;
+  background: color-mix(
+    in oklab,
+    var(--bg-elev-solid, var(--bg-elev)) 50%,
+    transparent
+  );
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-1);
+  transition:
+    border-color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-medium) var(--ease);
+}
+.cortex-toggle.cortex-toggle-nodeview:hover {
+  border-color: var(--accent-bg-2);
 }
 .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-summary {
   display: flex;
@@ -2943,11 +3609,20 @@ body.cortex-theme-dark .hljs-tag {
   gap: 8px;
   cursor: pointer;
   user-select: none;
+  padding: 0.1em 0.2em;
+  margin: -0.1em -0.2em;
+  border-radius: var(--radius-1);
+  transition: background var(--motion-fast) var(--ease);
+}
+.cortex-toggle.cortex-toggle-nodeview .cortex-toggle-summary:hover {
+  background: var(--accent-bg);
 }
 .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-summary-text {
   font-weight: 600;
   cursor: pointer;
   flex: 1;
+  color: var(--accent);
+  letter-spacing: 0.01em;
 }
 .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-summary-input {
   flex: 1;
@@ -2957,8 +3632,10 @@ body.cortex-theme-dark .hljs-tag {
   background: var(--bg-card);
   color: var(--text);
   border: 1px solid var(--accent);
-  border-radius: 3px;
+  border-radius: var(--radius-1);
   padding: 2px 6px;
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-bg);
 }
 .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-chevron {
   background: none;
@@ -2966,21 +3643,39 @@ body.cortex-theme-dark .hljs-tag {
   padding: 2px;
   margin: 0;
   cursor: pointer;
-  color: var(--text-muted);
+  color: var(--accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: transform 120ms ease;
+  transition:
+    transform var(--motion-medium) var(--ease),
+    color var(--motion-fast) var(--ease),
+    filter var(--motion-fast) var(--ease);
   transform: rotate(-90deg);
 }
 .cortex-toggle.cortex-toggle-nodeview.open .cortex-toggle-chevron {
   transform: rotate(0deg);
+  filter: drop-shadow(
+    0 0 4px color-mix(in oklab, var(--accent) 50%, transparent)
+  );
 }
 .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-chevron:hover {
-  color: var(--text);
+  color: var(--accent-2);
 }
 .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-body {
-  margin-top: 0.4em;
+  margin-top: 0.6em;
+  padding-top: 0.5em;
+  /* When open, paint a 1 px accent gradient hairline above the body
+   * to delineate it from the summary row. Same color family as the
+   * tabs' bottom seam and the typed-block's end strip. */
+  border-top: 1px solid transparent;
+  border-image-source: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--accent) 45%, transparent) 0%,
+    color-mix(in oklab, var(--accent-2) 45%, transparent) 100%
+  );
+  border-image-slice: 1;
+  border-image-repeat: stretch;
 }
 .cortex-toggle.cortex-toggle-nodeview:not(.open) .cortex-toggle-body {
   display: none;
@@ -3004,4 +3699,1267 @@ body.cortex-theme-dark .hljs-tag {
 .cortex-tb-lang-select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* ===========================================================================
+ * Cluster 26 — Animation primitives
+ *
+ * Reusable keyframes for popover / modal / scrim entrance. The
+ * .cortex-filetree-ctxmenu rule above references cortex-popover-in,
+ * and the upcoming Cerebrum splash uses the same family. Kept as the
+ * only artefact from the earlier Cluster 25 chrome-refresh appendix
+ * because the appendix conflicted with the Claude Design system spec
+ * and was rolled back.
+ * --------------------------------------------------------------------------- */
+@keyframes cortex-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes cortex-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes cortex-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ===========================================================================
+ * Cluster 26 — Cerebrum splash
+ *
+ * Pure-CSS-3D startup composition. Renders behind the welcome card and
+ * fades to nothing once a vault is selected. Recipe adopted from the
+ * Claude Design system at
+ * design-system/ui_kits/cortex-app/overlays.jsx (the simpler one-orbit
+ * fallback in design-system/ui_kits/cortex-app/cortex-app.css is NOT
+ * what this matches — we back the JSX recipe's 7 tilted orbital planes).
+ *
+ * Driven by src/components/CerebrumSplash.tsx. Each orbit reads its own
+ * --rx / --ry / --rz / --dur / --delay custom properties from the
+ * inline style on the corresponding .splash-orbit div, so all seven
+ * share the same animation but tilt and phase differently.
+ *
+ * GPU compositing: every animated transform is on a positioned element
+ * with transform-style: preserve-3d so the browser keeps these on the
+ * compositor layer instead of repainting. No will-change on the
+ * .ProseMirror surface (would break selection math).
+ * --------------------------------------------------------------------------- */
+
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  user-select: none;
+  perspective: 1200px;
+  /* Subtle vignette over the body's aurora wash so the brain reads as
+   * a luminous focal point. Body's --aurora-base + 5-gradient stack
+   * shows through the transparent edges. */
+  background: radial-gradient(
+    ellipse at 50% 45%,
+    transparent 0%,
+    color-mix(in oklab, var(--aurora-base) 50%, transparent) 60%,
+    color-mix(in oklab, var(--aurora-base) 80%, transparent) 100%
+  );
+  /* Fade transition controlled by .splash--out via React. */
+  opacity: 1;
+  transition: opacity 480ms var(--ease);
+}
+.splash.splash--out {
+  opacity: 0;
+  pointer-events: none;
+}
+.splash-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 130% 90% at 50% 50%,
+    transparent 45%,
+    rgba(7, 10, 18, 0.55) 100%
+  );
+  pointer-events: none;
+}
+
+/* The 3D stage. preserve-3d on stage + each orbit so the browser does
+ * real 3D occlusion (rays correctly pass behind the brain core). */
+.splash-scene {
+  position: relative;
+  width: clamp(320px, 48vmin, 560px);
+  height: clamp(320px, 48vmin, 560px);
+  transform-style: preserve-3d;
+}
+.splash-stage {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  /* Slow ambient wobble — "this is alive, not a CAD model". */
+  animation: splash-wobble 7s ease-in-out infinite;
+}
+@keyframes splash-wobble {
+  0%,
+  100% {
+    transform: rotateY(-2deg) rotateX(1deg);
+  }
+  50% {
+    transform: rotateY(2deg) rotateX(-1deg);
+  }
+}
+
+/* Each orbit is a tilted plane that spins on its local Y axis. Composing
+ * rotateX(rx) → rotateZ(rz) → rotateY(ry+t) keeps the tilt locked while
+ * the ray sweeps the plane. Inline style sets --rx / --ry / --rz / --dur
+ * / --delay so all seven orbits share the same keyframes. */
+.splash-orbit {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  animation: splash-orbit-spin var(--dur) linear infinite;
+  animation-delay: var(--delay);
+}
+@keyframes splash-orbit-spin {
+  from {
+    transform: rotateX(var(--rx)) rotateZ(var(--rz)) rotateY(var(--ry));
+  }
+  to {
+    transform: rotateX(var(--rx)) rotateZ(var(--rz))
+      rotateY(calc(var(--ry) + 360deg));
+  }
+}
+
+/* The ray itself: a glowing arc segment that fades from tail to head.
+ * Sits horizontally across the orbit plane; the orbit's rotation sweeps
+ * it across the brain. */
+.splash-ray {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--len);
+  height: var(--thick);
+  margin-top: calc(var(--thick) * -0.5);
+  margin-left: calc(var(--len) * -0.5);
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in oklab, var(--ray-color) 25%, transparent) 50%,
+    color-mix(in oklab, var(--ray-color) 90%, transparent) 92%,
+    color-mix(in oklab, var(--ray-color) 100%, transparent) 100%
+  );
+  filter: blur(0.6px);
+  box-shadow:
+    0 0 10px var(--ray-color),
+    0 0 22px color-mix(in oklab, var(--ray-color) 50%, transparent),
+    0 0 44px color-mix(in oklab, var(--ray-color) 25%, transparent);
+}
+.splash-orbit.hue-blue {
+  --ray-color: #7aa2ff;
+}
+.splash-orbit.hue-violet {
+  --ray-color: #a98bff;
+}
+.splash-orbit.hue-teal {
+  --ray-color: #4adcb8;
+}
+
+/* The core: brain mark + halo + ring. Slight Z-bob so the brain feels
+ * forward of the orbital planes. Orbit rays passing behind the core
+ * are correctly occluded by preserve-3d on the stage + this element's
+ * higher Z. */
+.splash-core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 38%;
+  aspect-ratio: 1 / 1;
+  transform: translate(-50%, -50%) translateZ(40px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: splash-core-float 6.4s ease-in-out infinite;
+}
+@keyframes splash-core-float {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) translateZ(40px);
+  }
+  50% {
+    transform: translate(-50%, -53%) translateZ(58px);
+  }
+}
+/* Cluster 26 — splash core glow REMOVED. The radial halo previously
+ * painted here was an "ellipse gradient centered around the brain
+ * mark" that competed with the brand identity. The brain mark's own
+ * drop-shadow filter (on .splash-core img) still paints the soft
+ * accent glow directly from the mark itself — that's the "brain dot
+ * gradient" the user wanted to keep. The DOM element still renders
+ * for layout stability (it carries some intrinsic spacing the splash
+ * composition relies on) but its visual is suppressed. */
+.splash-core-glow {
+  display: none;
+}
+.splash-core-ring {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(168, 192, 240, 0.16);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.splash-core img {
+  position: relative;
+  width: 78%;
+  height: 78%;
+  object-fit: contain;
+  filter: drop-shadow(
+      0 0 10px color-mix(in oklab, var(--accent) 35%, transparent)
+    )
+    drop-shadow(0 0 30px color-mix(in oklab, var(--accent-2) 25%, transparent));
+}
+
+/* Caption — fades in after the orbits are already spinning. */
+.splash-word {
+  margin-top: 32px;
+  font:
+    500 clamp(2rem, 4vw, 3rem) / 1 "Inter",
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  letter-spacing: 0.04em;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  opacity: 0;
+  animation: splash-cap-in 600ms var(--ease) 600ms forwards;
+}
+.splash-tag {
+  margin-top: 10px;
+  font:
+    500 12px / 1 "JetBrains Mono",
+    "Fira Code",
+    ui-monospace,
+    "Cascadia Code",
+    Consolas,
+    monospace;
+  color: var(--text-muted);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  opacity: 0;
+  animation: splash-cap-in 600ms var(--ease) 850ms forwards;
+}
+@keyframes splash-cap-in {
+  to {
+    opacity: 1;
+  }
+}
+
+/* Reduced-motion fallback. Snap orbits to their initial tilt (no Y
+ * rotation), kill core/glow/wobble, show captions instantly. The
+ * composition still reads correctly because the orbital tilts alone
+ * make a beautiful static tableau. */
+@media (prefers-reduced-motion: reduce) {
+  .splash-stage,
+  .splash-orbit,
+  .splash-core,
+  .splash-core-glow {
+    animation: none !important;
+  }
+  .splash-orbit {
+    transform: rotateX(var(--rx)) rotateZ(var(--rz)) rotateY(var(--ry));
+  }
+  .splash-core {
+    transform: translate(-50%, -50%) translateZ(40px);
+  }
+  .splash-word,
+  .splash-tag {
+    animation: none !important;
+    opacity: 1;
+  }
+}
+
+/* ===========================================================================
+ * Cluster 26 — Chrome theme pass
+ *
+ * Live-app translation of the Claude Design system specimens at
+ * design-system/preview/*.html and design-system/ui_kits/cortex-app/.
+ *
+ * KEY DIFFERENCE from the rolled-back Cluster 25 attempt: every rule
+ * here targets a CLASS HOOK explicitly added to the live components,
+ * never an element selector with !important. App.tsx and FileTree.tsx
+ * carry the new className= props (cortex-sidebar, cortex-sb-head,
+ * cortex-sb-actions, cortex-sb-body, cortex-sb-foot, cortex-main-col,
+ * cortex-main-topbar, cortex-app-shell, cortex-filetree-row,
+ * cortex-filetree-row--file, cortex-filetree-row--folder,
+ * cortex-filetree-row--selected). This means the inline styles set
+ * structural properties (width, flex, padding, position) and the CSS
+ * adds visual ones (background, blur, border, shadow, hover) without
+ * fighting the cascade.
+ * --------------------------------------------------------------------------- */
+
+/* ---------- Sidebar (cortex-sidebar) ---------- */
+.cortex-sidebar {
+  /* Glass: translucent background + backdrop-filter so the body's
+   * aurora wash bleeds through. Backdrop-filter on a flex parent works
+   * fine in Chromium / Tauri WebView2. */
+  background: var(--bg-elev) !important;
+  backdrop-filter: var(--blur-chrome);
+  -webkit-backdrop-filter: var(--blur-chrome);
+  /* Subtle accent-tinted hairline on the right edge. Picks up the body's
+   * aurora glow and reads as the "edge of the panel". */
+  border-right: 1px solid var(--border) !important;
+  position: relative;
+}
+/* ---------- Sidebar resize handle ----------
+ * Cluster 26 — 8 px-wide hit area on the sidebar's right edge that
+ * captures pointer-down for the resize drag. The visible affordance
+ * is a 1 px vertical line painted via ::after that brightens on
+ * hover so the user knows the edge is interactive. position: absolute
+ * inside the sidebar's flex container; positioned via right: 0 so
+ * the cell-resize cursor activates anywhere along the right edge. */
+.cortex-sidebar-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 5;
+  background: transparent;
+  transition: background var(--motion-fast) var(--ease);
+}
+.cortex-sidebar-resize::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  right: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--border-2);
+  transition: background var(--motion-fast) var(--ease);
+}
+.cortex-sidebar-resize:hover::after,
+.cortex-sidebar-resize:active::after {
+  background: var(--accent-gradient);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--accent) 50%, transparent);
+}
+
+/* Faint vertical accent gradient down the right edge of the sidebar so
+ * it reads as a glassy panel edge, not a flat strip. Pseudo-element so
+ * pointer events pass through. */
+.cortex-sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    color-mix(in oklab, var(--accent) 28%, transparent) 30%,
+    color-mix(in oklab, var(--accent-2) 28%, transparent) 70%,
+    transparent 100%
+  );
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.cortex-sb-head {
+  /* Slight darker tint at the very top so the title row sits on a small
+   * shelf above the actions cluster. */
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--bg-deep) 50%, transparent) 0%,
+    transparent 100%
+  );
+}
+.cortex-sb-title-row {
+  /* Same vertical rhythm as design-system/preview/welcome-card spacing. */
+}
+.cortex-sb-actions {
+  /* The action cluster wraps; CSS just adds smooth transitions on the
+   * buttons themselves. */
+}
+/* Sidebar buttons: changeBtn / iconBtn — already have inline styles for
+ * radius, padding, border. We only ADD: hover state, focus ring, smooth
+ * transition. Class scope is `.cortex-sidebar button` to avoid touching
+ * non-sidebar buttons. */
+.cortex-sidebar button {
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease);
+}
+/* !important is necessary on the hover-state visual properties because
+ * the buttons carry inline `style={baseStyles.changeBtn}` which sets
+ * background: transparent / border-color / color directly on the
+ * element. Inline styles always beat CSS class selectors regardless of
+ * specificity, so without !important the hover state never paints.
+ * Scope is class-based (.cortex-sidebar button:hover) so we still don't
+ * affect any other buttons in the app.
+ *
+ * Cluster 26 final pass — gradient hover (was a faint accent-bg tint).
+ * White text + a subtle drop shadow + inset top edge highlight read as
+ * "this button is alive". */
+.cortex-sidebar button:hover:not(:disabled) {
+  background: var(--accent-gradient) !important;
+  border-color: transparent !important;
+  color: white !important;
+  box-shadow:
+    0 2px 8px color-mix(in oklab, var(--accent) 25%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+.cortex-sidebar button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.cortex-sidebar button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.cortex-sb-foot {
+  /* Footer holds the help button + theme toggle. Slight lift via a faint
+   * top-edge hairline. */
+  background: linear-gradient(
+    0deg,
+    color-mix(in oklab, var(--bg-deep) 40%, transparent) 0%,
+    transparent 100%
+  );
+}
+/* Theme toggle pills (segmented Auto / Light / Dark inside the footer). */
+.cortex-sb-foot button {
+  border-radius: var(--radius-pill);
+}
+
+/* ---------- Sidebar brand badge ----------
+ * Cluster 26 — large animated brain mark + wordmark sit at the top of
+ * the sidebar as a "brand badge". Sized to fill the sidebar's
+ * horizontal space (300 px wide minus padding ≈ 270 px). The brain
+ * pulses on a slow 4 s cycle matching the bell's animation family. */
+.cortex-sb-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0 10px;
+  position: relative;
+}
+.cortex-sb-collapse {
+  /* Collapse button is now smaller and tucked left so the badge can
+   * dominate the horizontal space. */
+  flex-shrink: 0;
+}
+/* Sidebar brand mark — just the brain.
+ *
+ * No frame, no aurora window, no drop-shadow halo. The white brain
+ * sits directly on the sidebar's translucent glass. Pulse animation
+ * is transform-only (scale + slight rotate); no filter changes, so
+ * there are no animated gradient halos.
+ *
+ * The earlier `.cortex-sb-brand-frame` wrapper div was removed from
+ * App.tsx, so the rule for it is dropped here too. */
+.cortex-sb-brand-mark {
+  width: 62px;
+  height: 62px;
+  object-fit: contain;
+  flex-shrink: 0;
+  animation: cortex-sb-brand-pulse 4s ease-in-out infinite;
+  transform-origin: center;
+}
+@keyframes cortex-sb-brand-pulse {
+  0%,
+  100% {
+    transform: scale(1) rotate(-1.5deg);
+  }
+  50% {
+    transform: scale(1.04) rotate(1.5deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cortex-sb-brand-mark {
+    animation: none;
+  }
+}
+.cortex-sb-wordmark {
+  /* Now sized to fill the remaining horizontal space alongside the
+   * brand mark. SVG viewBox is 320×64 (5:1 ratio). At ~190 px wide it
+   * renders at ~38 px tall — well-paired with the 62 px brand mark
+   * (vertical center alignment is via flex on the container). */
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  max-height: 46px;
+  width: auto;
+  max-width: 200px;
+  object-fit: contain;
+  filter: drop-shadow(
+    0 0 10px color-mix(in oklab, var(--accent) 30%, transparent)
+  );
+}
+
+/* ---------- Headers across chrome surfaces inherit the wordmark style ----------
+ * .prose headings are already covered by the rule earlier in this file
+ * (Cluster 26 update). Chrome surfaces (welcome card, modals,
+ * notification dropdown header) inline-style their <h1>/<h2>/<h3> with
+ * fontSize/fontWeight, but those inline rules don't set color or
+ * background — so the chrome heading rules below win without
+ * !important. font-weight DOES come inline though, so we use
+ * !important on it to ensure the wordmark's 500 sticks. */
+.cortex-welcome-card h1,
+.cortex-welcome-card h2,
+.cortex-welcome-card h3,
+[data-cortex-modal] h1,
+[data-cortex-modal] h2,
+[data-cortex-modal] h3,
+[data-cortex-modal] .cortex-modal-head .title {
+  font-family:
+    "Inter",
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  font-weight: 500 !important;
+  letter-spacing: 0.04em;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent !important;
+}
+
+/* ---------- Main top bar (cortex-main-topbar) ---------- */
+.cortex-main-topbar {
+  /* Soft vertical gradient seam; matches the editor toolbar's gradient
+   * so the chrome feels continuous.
+   *
+   * IMPORTANT: position: relative + z-index: 50 lifts the topbar's
+   * stacking context above the splash (z-1) and any other chrome
+   * stacking contexts. Without this, popovers spawned from the
+   * NotificationBell and LayoutPicker (absolute-positioned at z-1100
+   * / z-100 within the topbar's stacking context) end up painting
+   * UNDER the splash because the topbar's own stacking context
+   * defaulted to z-auto when backdrop-filter created one. The
+   * z-index: 50 here is enough to beat the splash + sibling chrome
+   * without competing with modal stacking contexts (which sit at
+   * 1000+). */
+  position: relative;
+  z-index: 50;
+  background: linear-gradient(180deg, var(--bg-elev) 0%, var(--bg-deep) 100%);
+  backdrop-filter: var(--blur-chrome);
+  -webkit-backdrop-filter: var(--blur-chrome);
+  box-shadow:
+    var(--shadow-1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  /* Explicit overflow: visible so popovers are not clipped. The
+   * default IS visible but stating it here defends against any
+   * future change at a parent level. */
+  overflow: visible;
+}
+
+/* ---------- File tree rows ---------- */
+.cortex-filetree-row {
+  position: relative;
+  border-radius: var(--radius-1);
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease);
+}
+/* !important needed because FileTree.tsx sets `style={{ background: ... }}`
+ * inline on each row (transparent or var(--accent-bg-2) for selected).
+ * Without !important the inline style wins and hover never paints. */
+.cortex-filetree-row:hover {
+  background: var(--accent-bg) !important;
+}
+.cortex-filetree-row.cortex-filetree-row--selected:hover {
+  background: var(--accent-bg-2) !important;
+}
+.cortex-filetree-row--selected {
+  /* Selected file gets a 2px accent bar on the left edge so it reads
+   * at glance distance, even when the row's background is already a
+   * tint of accent. */
+}
+.cortex-filetree-row--selected::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent-gradient);
+  pointer-events: none;
+}
+.cortex-filetree-row--folder:hover {
+  background: color-mix(in oklab, var(--accent) 8%, transparent) !important;
+}
+
+/* ---------- File-tree dirty indicator ----------
+ * The design-system file-tree-row.html spec showed a yellow dot
+ * (color #f5c365) for the dirty/unsaved state. The user requested the
+ * gradient accent instead. The span lives at the right edge of the
+ * row, sized 7×7 px, with a subtle pulse so it reads as "active state",
+ * not just a static glyph.
+ *
+ * margin-left: auto pushes it to the right edge inside the row's flex
+ * container (.cortex-filetree-row's inline `display: flex` from the
+ * FileTree styles object). */
+.cortex-filetree-dirty-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-gradient);
+  margin-left: auto;
+  flex-shrink: 0;
+  box-shadow:
+    0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent),
+    0 0 8px color-mix(in oklab, var(--accent) 50%, transparent);
+  animation: cortex-filetree-dirty-pulse 2.4s ease-in-out infinite;
+}
+@keyframes cortex-filetree-dirty-pulse {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cortex-filetree-dirty-dot {
+    animation: none;
+  }
+}
+
+/* ---------- Welcome card — design-system spec ----------
+ * preview/welcome-card.html. Inline baseStyles already gives radius-3
+ * + shadow-3 + blur-modal + bg-card. The added rules below handle the
+ * brand badge above the heading, the entrance animation, the shortcut
+ * hint footer, and a soft accent halo behind the card so it sits in
+ * the cosmos. */
+.cortex-welcome-card {
+  position: relative;
+  animation: cortex-modal-in var(--motion-medium) var(--ease);
+}
+/* Soft accent halo behind the card. Pseudo-element so pointer events
+ * pass through; positioned at -25% inset so it spills out beyond the
+ * card edges. */
+.cortex-welcome-card::before {
+  content: "";
+  position: absolute;
+  inset: -25%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in oklab, var(--accent) 14%, transparent) 0%,
+    transparent 60%
+  );
+  filter: blur(20px);
+  pointer-events: none;
+  z-index: -1;
+}
+.cortex-welcome-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.cortex-welcome-mark {
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+  filter: drop-shadow(
+      0 0 12px color-mix(in oklab, var(--accent) 35%, transparent)
+    )
+    drop-shadow(0 0 28px color-mix(in oklab, var(--accent-2) 25%, transparent));
+}
+.cortex-welcome-wordmark {
+  width: 180px;
+  height: auto;
+}
+.cortex-welcome-shortcuts {
+  margin-top: 14px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-family:
+    "JetBrains Mono", "Fira Code", ui-monospace, "Cascadia Code", Consolas,
+    monospace;
+  letter-spacing: 0.06em;
+}
+
+/* ---------- Generic modal panel polish via [data-cortex-modal] ----------
+ * Modals across Cortex inline-style their panels via per-component
+ * `styles` objects. To upgrade them all at once we expose a single
+ * attribute hook: any modal panel that adds `data-cortex-modal` picks
+ * up the design-system radius + shadow + blur + entrance animation.
+ *
+ * !important on the visual properties because every modal has inline
+ * styles that set background / border-radius / box-shadow themselves.
+ * Per-component override is too noisy; centralizing the design-system
+ * visual treatment here is the whole point of the attribute. */
+[data-cortex-modal] {
+  border-radius: var(--radius-3) !important;
+  box-shadow: var(--shadow-3) !important;
+  backdrop-filter: var(--blur-modal);
+  -webkit-backdrop-filter: var(--blur-modal);
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-2) !important;
+  animation: cortex-modal-in var(--motion-medium) var(--ease);
+  overflow: hidden;
+}
+/* Optional sub-structure: modal panels that follow the design-system
+ * .head / .body / .footer pattern can add these classes for a refined
+ * three-band look. Modals that don't add them stay clean (the rules
+ * above still apply). */
+[data-cortex-modal] .cortex-modal-head {
+  padding: 14px 18px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--accent) 6%, transparent),
+    transparent
+  );
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 600;
+}
+[data-cortex-modal] .cortex-modal-body {
+  padding: 18px;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+[data-cortex-modal] .cortex-modal-footer {
+  padding: 12px 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+[data-cortex-scrim] {
+  backdrop-filter: var(--blur-modal);
+  -webkit-backdrop-filter: var(--blur-modal);
+  animation: cortex-scrim-in var(--motion-medium) var(--ease);
+}
+
+/* ---------- Structural blocks (Frame / Callout / Collapsible / Tabs) ----------
+ * These have stable Cortex-prefixed classes from prior clusters; we just
+ * layer radii + shadow tokens. No !important; nothing inline overrides
+ * them, so plain class specificity wins. */
+.cortex-frame {
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-1);
+}
+.cortex-callout {
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-1);
+}
+
+/* ---------- Typed block (Cluster 17) — design-system spec ----------
+ * The TipTap typedBlock NodeView renders a header (.cortex-typed-block-
+ * title) + a body (.cortex-typed-block-body). We don't change the DOM
+ * structure or data attributes — only the visual treatment.
+ *
+ * Maps to design-system preview/typed-block.html: rgba(30,36,54,0.4)
+ * glassed body, rgba(122,162,255,0.12) accent-tinted header, accent
+ * color title text, and a 6 px end-strip glowing footer. The "▸" glyph
+ * is already part of the existing .cortex-typed-block-glyph rule, so
+ * we just style the surrounding chrome. */
+.prose .cortex-typed-block {
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-2);
+  overflow: hidden;
+  background: color-mix(
+    in oklab,
+    var(--bg-elev-solid, var(--bg-elev)) 50%,
+    transparent
+  );
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-1);
+  margin: 0.7em 0;
+}
+.prose .cortex-typed-block-title {
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-bottom: 1px solid color-mix(in oklab, var(--accent) 18%, transparent);
+}
+.prose .cortex-typed-block-body {
+  padding: 8px 14px;
+  color: var(--text-2);
+  line-height: 1.55;
+}
+/* End strip — a 6 px accent-tinted glow at the bottom of the block,
+ * mirrored from the preview's .foot. Pseudo-element so it doesn't
+ * interact with the body's content. */
+.prose .cortex-typed-block::after {
+  content: "";
+  display: block;
+  height: 6px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--accent) 18%, transparent) 0%,
+    color-mix(in oklab, var(--accent-2) 18%, transparent) 100%
+  );
+}
+/* The earlier base block (in the Collapsible NodeView section) sets
+ * radius / background / transitions / hover. This rule only adds the
+ * focus-within elevation as a separate visual cue when the user is
+ * actively editing inside the body. */
+.cortex-toggle.cortex-toggle-nodeview:focus-within {
+  box-shadow: var(--shadow-2);
+  border-color: var(--accent-bg-2);
+}
+
+/* ---------- Code blocks + inline code (in prose) ----------
+ * Cortex-prefixed `.prose pre` rule already exists upstream; we extend
+ * it with the new shadow tier. */
+.prose pre {
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-1);
+}
+.prose pre:focus-within {
+  box-shadow:
+    var(--shadow-2),
+    inset 0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent);
+}
+.prose code {
+  border-radius: var(--radius-1);
+  border: 1px solid var(--border);
+}
+.prose pre code {
+  border: none;
+}
+
+/* ---------- Tables (block-level) ----------
+ * Cluster 26 — gradient-behind-table technique (the user's suggestion).
+ *
+ * Chromium's `border-image` on `<td>` with `border-collapse: collapse`
+ * silently failed to render — a known Blink quirk where merged cell
+ * borders compete with the per-cell border-image paint context. The
+ * cell borders simply disappeared.
+ *
+ * The replacement is cleaner: the TABLE element gets a real accent
+ * gradient painted as its `background`. Cells use `border-collapse:
+ * separate` + `border-spacing: 1 px` to leave a 1 px gap on every
+ * side. Each cell has an opaque `var(--bg-elev-solid)` background
+ * that HIDES the table-level gradient. The 1 px gaps between cells
+ * and around the outer edge are where the gradient shows through.
+ * Result: continuous accent gradient grid lines + a full outer ring,
+ * no gaps anywhere, no per-cell paint magic.
+ *
+ * Cluster 18's frozen-row / frozen-col logic: those rules inline-set
+ * `position: sticky; background-color: var(--bg-elev-solid)` on
+ * frozen cells. Our base rule already sets `background-color: var(
+ * --bg-elev-solid)`, so frozen cells composite identically. */
+.prose table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 1px;
+  border-radius: var(--radius-2);
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+  /* Solid gradient painted across the entire table area. Cells with
+   * opaque bg hide the gradient EXCEPT at the 1 px gaps
+   * (border-spacing) — those gaps reveal the gradient as continuous
+   * row + column divider lines + outer ring.
+   *
+   * Cluster 26 — softened from full-saturation accent → accent-2 to
+   * 55% mix with the elevated chrome color, so the divider lines
+   * read as accent-tinted seams rather than bright bars against the
+   * cell backgrounds. */
+  background: linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--accent) 55%, var(--bg-elev-solid)) 0%,
+    color-mix(in oklab, var(--accent-2) 55%, var(--bg-elev-solid)) 100%
+  );
+  padding: 0;
+}
+.prose table th,
+.prose table td {
+  border: 0;
+  background-color: var(--bg-elev-solid);
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.prose table th {
+  /* Header row: starts with a tinted overlay on the opaque base so
+   * the head reads as elevated above the body. background-image is
+   * a separate sub-property from background-color and composites
+   * correctly — the gradient sits over the bg-elev-solid base. */
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--accent) 14%, transparent),
+    transparent
+  );
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+/* Hover row tint via background-color — replaces the opaque base
+ * with an accent-mixed-into-bg-elev-solid colour. Still opaque so
+ * the table-level gradient stays hidden under the cell. */
+.prose table tbody tr:hover td {
+  background-color: color-mix(
+    in oklab,
+    var(--bg-elev-solid) 88%,
+    var(--accent)
+  );
+}
+
+/* ---------- Tight nested-container paragraph spacing ----------
+ * Tailwind's @tailwindcss/typography plugin sets margin-top:1.25em +
+ * margin-bottom:1.25em on every <p> in .prose. That's correct for
+ * top-level prose paragraphs but produces wide vertical gaps inside
+ * tight containers — pressing Enter in a table cell, tab panel,
+ * collapsible body, typed-block body, frame, or callout creates a
+ * second paragraph with the full 1.25em gap above and below it.
+ *
+ * This rule scopes a tighter spacing for the direct-child block
+ * elements (paragraphs, headings, lists) inside those containers.
+ * The `> *` direct-child selector keeps the override local — nested
+ * lists / nested blocks past the first level still inherit their
+ * normal flow margins. First/last-child rules zero the outer
+ * margins so content hugs the container's top/bottom edges. */
+.prose table th > *,
+.prose table td > *,
+.prose .cortex-tab-panel > *,
+.prose .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-body > *,
+.prose .cortex-typed-block-body > *,
+.prose .cortex-frame > *,
+.prose .cortex-callout > * {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+.prose table th > *:first-child,
+.prose table td > *:first-child,
+.prose .cortex-tab-panel > *:first-child,
+.prose
+  .cortex-toggle.cortex-toggle-nodeview
+  .cortex-toggle-body
+  > *:first-child,
+.prose .cortex-typed-block-body > *:first-child,
+.prose .cortex-frame > *:first-child,
+.prose .cortex-callout > *:first-child {
+  margin-top: 0;
+}
+.prose table th > *:last-child,
+.prose table td > *:last-child,
+.prose .cortex-tab-panel > *:last-child,
+.prose .cortex-toggle.cortex-toggle-nodeview .cortex-toggle-body > *:last-child,
+.prose .cortex-typed-block-body > *:last-child,
+.prose .cortex-frame > *:last-child,
+.prose .cortex-callout > *:last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- Image affordances (Cluster 19) ---------- */
+.cortex-image-handle {
+  box-shadow: var(--shadow-2);
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease);
+}
+.cortex-image-handle:hover {
+  transform: scale(1.08);
+}
+.cortex-image-bubble {
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-3);
+  backdrop-filter: var(--blur-modal);
+  -webkit-backdrop-filter: var(--blur-modal);
+}
+
+/* ---------- Calendar + TimeTracking views — Aurora palette ----------
+ * Both views inline-style their controls. The token retune in
+ * :root.dark / :root.light already updates --accent / --bg-elev /
+ * --border for them automatically, but two specific surfaces need
+ * the gradient treatment to feel current with the rest of the
+ * chrome:
+ *   1. The view header's segmented toggle (e.g., Day / Week / Month
+ *      in Calendar; Table / Pie / Trends in TimeTracking) — the
+ *      active segment paints in solid var(--accent), which now reads
+ *      as flat compared to the gradient-everywhere-else chrome.
+ *   2. Buttons inside these views — they should match the toolbar /
+ *      sidebar gradient hover treatment.
+ *
+ * Class scope: .cortex-view + .cortex-view-calendar /
+ * .cortex-view-tt are added on the root wrap of each view so we
+ * don't bleed onto unrelated buttons. */
+.cortex-view button {
+  transition:
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease);
+}
+.cortex-view button:hover:not(:disabled):not(.cortex-view-skip-hover) {
+  background: var(--accent-gradient) !important;
+  color: white !important;
+  border-color: transparent !important;
+  box-shadow:
+    0 2px 8px color-mix(in oklab, var(--accent) 25%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+.cortex-view button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring) !important;
+}
+/* Active "toggleOn" state in Calendar's view toggle: the inline
+ * `background: var(--accent)` is solid blue. Upgrade it to the
+ * gradient + a soft halo via class-scoped selector. The CSS targets
+ * any button with style='background: var(--accent)' inside the
+ * calendar's view header — the segmented control. We can't reach
+ * those reliably without a class hook, so we apply the gradient via
+ * a more general "any button with white text inside cortex-view"
+ * selector. The matching is `[style*="rgb(255, 255, 255)"]` /
+ * `[style*="white"]` — fragile in theory, in practice the only
+ * inline white-text buttons in these views are the active toggles. */
+.cortex-view-calendar button[style*="white"]:not(:hover) {
+  background: var(--accent-gradient) !important;
+  border-color: transparent !important;
+  box-shadow:
+    0 0 0 3px var(--accent-bg),
+    0 2px 8px color-mix(in oklab, var(--accent) 30%, transparent) !important;
+}
+/* The view's outer wrap inherits the body's aurora wash through any
+ * transparent / translucent inline backgrounds the components have.
+ * No additional rules needed for the bg surfaces themselves. */
+
+/* ---------- Notification bell pill ---------- */
+.cortex-main-topbar button[aria-label*="notif" i],
+.cortex-main-topbar button[title*="notif" i] {
+  border-radius: var(--radius-pill);
+}
+
+/* ---------- Brand-mark notification "bell" ----------
+ * Cluster 26 — bell emoji replaced with the brain brand mark.
+ *
+ * Layout: 36×36 perfect circle, brain centered at 30×30 (83% of the
+ * wrapper), badge absolute-positioned to the top-right corner so it
+ * doesn't break the centering when count > 0.
+ *
+ * !important on width / height / min-width / min-height because the
+ * NotificationBell inline style sets gap, padding 4px 8px, and
+ * min-height 28px. Without overriding those, the wrapper stretches
+ * horizontally to fit the badge and breaks the circle. */
+.cortex-brand-bell {
+  position: relative;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
+  min-height: 36px !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  border-radius: var(--radius-pill) !important;
+  background: transparent !important;
+  border: 1px solid var(--border-2) !important;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-medium) var(--ease),
+    transform var(--motion-fast) var(--ease);
+}
+.cortex-brand-bell-mark {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+  display: block;
+  /* The PNG is white-on-transparent — already pronounced. The
+   * drop-shadow halo intensifies on hover and becomes the pulse
+   * source on unread/urgent. */
+  filter: drop-shadow(
+      0 0 4px color-mix(in oklab, var(--accent) 35%, transparent)
+    )
+    drop-shadow(0 0 1px rgba(255, 255, 255, 0.25));
+  transition: filter var(--motion-medium) var(--ease);
+}
+/* Badge — absolute-positioned in the top-right corner so the bell
+ * wrapper stays a perfect 36×36 circle regardless of count. */
+.cortex-brand-bell-badge {
+  position: absolute !important;
+  top: -2px !important;
+  right: -2px !important;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px !important;
+  border-radius: var(--radius-pill);
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  line-height: 16px !important;
+  color: white !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg-deep);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--accent) 50%, transparent);
+}
+/* Default (no unread) — just hover behavior, no animation. */
+.cortex-brand-bell:hover {
+  background: var(--accent-bg) !important;
+  border-color: var(--accent-bg-2) !important;
+}
+.cortex-brand-bell:hover .cortex-brand-bell-mark {
+  filter: drop-shadow(
+    0 0 8px color-mix(in oklab, var(--accent) 50%, transparent)
+  );
+}
+.cortex-brand-bell:focus-visible {
+  outline: none;
+  box-shadow: var(--ring) !important;
+}
+/* Unread state — gentle accent-glow pulse on the brain mark itself.
+ * 2.4s cycle, slow enough to feel ambient. The mark grows ~6% at the
+ * peak of the pulse so it reads as "alive" not just "blinking". */
+.cortex-brand-bell--unread {
+  border-color: color-mix(
+    in oklab,
+    var(--accent) 50%,
+    var(--border-2)
+  ) !important;
+}
+.cortex-brand-bell--unread .cortex-brand-bell-mark {
+  animation: cortex-brand-bell-pulse 2.4s ease-in-out infinite;
+}
+@keyframes cortex-brand-bell-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(
+      0 0 6px color-mix(in oklab, var(--accent) 40%, transparent)
+    );
+  }
+  50% {
+    transform: scale(1.06);
+    filter: drop-shadow(
+      0 0 14px color-mix(in oklab, var(--accent) 75%, transparent)
+    );
+  }
+}
+/* Urgent state — past-due reminders. Switches the glow to --danger and
+ * pulses faster so it reads as more important than just "unread". */
+.cortex-brand-bell--urgent {
+  border-color: color-mix(
+    in oklab,
+    var(--danger) 60%,
+    var(--border-2)
+  ) !important;
+}
+.cortex-brand-bell--urgent .cortex-brand-bell-mark {
+  animation: cortex-brand-bell-pulse-urgent 1.4s ease-in-out infinite;
+}
+@keyframes cortex-brand-bell-pulse-urgent {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(
+      0 0 8px color-mix(in oklab, var(--danger) 55%, transparent)
+    );
+  }
+  50% {
+    transform: scale(1.1);
+    filter: drop-shadow(
+      0 0 18px color-mix(in oklab, var(--danger) 90%, transparent)
+    );
+  }
+}
+/* Reduced-motion: kill the pulse, keep the static glow so the user can
+ * still tell the bell has unread items at a glance. */
+@media (prefers-reduced-motion: reduce) {
+  .cortex-brand-bell--unread .cortex-brand-bell-mark,
+  .cortex-brand-bell--urgent .cortex-brand-bell-mark {
+    animation: none;
+  }
+}
+
+/* ---------- Universal chrome button hover ----------
+ * Any non-toolbar, non-sidebar button that lives inside the chrome
+ * (notification bell, layout picker tiles, theme toggle pills, status
+ * bar buttons) lights up with the accent gradient on hover. Scoped to
+ * `.cortex-main-topbar` and `.cortex-sb-foot` so we don't bleed into
+ * arbitrary buttons inside modals or the editor body.
+ *
+ * !important on visual-change properties because the underlying
+ * components inline-style their buttons (background: transparent etc.)
+ * — the cascade reasoning matches the .cortex-sidebar button:hover
+ * rule above. */
+.cortex-main-topbar button:hover:not(:disabled),
+.cortex-sb-foot button:hover:not(:disabled) {
+  background: var(--accent-gradient) !important;
+  border-color: transparent !important;
+  color: white !important;
+  box-shadow:
+    0 2px 8px color-mix(in oklab, var(--accent) 25%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+.cortex-main-topbar button:focus-visible,
+.cortex-sb-foot button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring) !important;
+}
+
+/* The theme toggle's currently-selected segment is inline-styled with
+ * its own accent-bg + accent-color treatment in ThemeToggle.tsx.
+ * Hover over the OTHER segments lights them up with the gradient
+ * preview so the user can see what the click will do. The selected
+ * segment is unaffected because its inline style wins for properties
+ * we don't override here. */
+
+/* ---------- Print mode (preserved) ---------- */
+@media print {
+  body {
+    background-image: none;
+    background-color: white;
+  }
+  .cortex-editor-toolbar {
+    display: none;
+  }
+  aside,
+  .cortex-sidebar {
+    display: none;
+  }
+  .splash {
+    display: none;
+  }
 }

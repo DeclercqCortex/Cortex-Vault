@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export type DestinationChoice =
   | { kind: "queue"; queueKind: "yellow" | "green" }
@@ -24,18 +25,50 @@ interface ReviewsMenuProps {
  */
 export function ReviewsMenu({ onPick }: ReviewsMenuProps) {
   const [open, setOpen] = useState(false);
+  // Cluster 26 — the dropdown is portaled to document.body so it
+  // escapes the sidebar's clipping (the sidebar has backdrop-filter,
+  // which creates a containing block for fixed-position descendants;
+  // any position: absolute/fixed dropdown inside the sidebar would
+  // otherwise get clipped at its 300 px boundary). We compute the
+  // dropdown's screen-space position from the button's
+  // getBoundingClientRect() each time the dropdown opens.
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
 
-  // Click-outside dismissal.
+  // Click-outside dismissal — must check BOTH the trigger ref (in the
+  // sidebar) and the portaled menu ref (in document.body) because the
+  // two are no longer DOM-connected.
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const t = e.target as Node;
+      if (ref.current?.contains(t)) return;
+      if (menuRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  // Recompute the dropdown position whenever it opens or the window
+  // resizes / scrolls. Anchors to the button's bottom-left.
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const btn = btnRef.current;
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      setPos({ top: r.bottom + 4, left: r.left });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
   }, [open]);
 
   const select = (choice: DestinationChoice) => {
@@ -43,105 +76,121 @@ export function ReviewsMenu({ onPick }: ReviewsMenuProps) {
     onPick(choice);
   };
 
+  const menu =
+    open && pos ? (
+      <div
+        ref={menuRef}
+        style={{
+          ...styles.menu,
+          position: "fixed",
+          top: pos.top,
+          left: pos.left,
+        }}
+        role="menu"
+      >
+        <div style={styles.section}>
+          <div style={styles.sectionLabel}>Queues</div>
+          <button
+            style={styles.item}
+            onClick={() => select({ kind: "queue", queueKind: "yellow" })}
+          >
+            <span
+              style={{
+                ...styles.swatch,
+                background: "rgba(220, 180, 60, 0.6)",
+              }}
+            />
+            Weekly review
+          </button>
+          <button
+            style={styles.item}
+            onClick={() => select({ kind: "queue", queueKind: "green" })}
+          >
+            <span
+              style={{
+                ...styles.swatch,
+                background: "rgba(90, 180, 110, 0.6)",
+              }}
+            />
+            Monthly review
+          </button>
+        </div>
+        <div style={styles.section}>
+          <div style={styles.sectionLabel}>Persistent files</div>
+          <button
+            style={styles.item}
+            onClick={() =>
+              select({ kind: "persistent", persistentKind: "bottlenecks" })
+            }
+          >
+            <span
+              style={{
+                ...styles.swatch,
+                background: "rgba(220, 90, 90, 0.6)",
+              }}
+            />
+            Bottlenecks
+          </button>
+          <button
+            style={styles.item}
+            onClick={() =>
+              select({ kind: "persistent", persistentKind: "antihype" })
+            }
+          >
+            <span
+              style={{
+                ...styles.swatch,
+                background: "rgba(230, 140, 60, 0.6)",
+              }}
+            />
+            Anti-Hype
+          </button>
+          <button
+            style={styles.item}
+            onClick={() =>
+              select({ kind: "persistent", persistentKind: "citations" })
+            }
+          >
+            <span
+              style={{
+                ...styles.swatch,
+                background: "rgba(150, 110, 220, 0.6)",
+              }}
+            />
+            Citations to use
+          </button>
+          <button
+            style={styles.item}
+            onClick={() =>
+              select({ kind: "persistent", persistentKind: "concepts" })
+            }
+          >
+            <span
+              style={{
+                ...styles.swatch,
+                background: "rgba(90, 150, 230, 0.6)",
+              }}
+            />
+            Concept Inbox
+          </button>
+        </div>
+      </div>
+    ) : null;
+
   return (
     <div ref={ref} style={styles.wrap}>
       <button
+        ref={btnRef}
         onClick={() => setOpen((o) => !o)}
         style={styles.btn}
         title="Mark System destinations"
       >
         Reviews ▾
       </button>
-      {open && (
-        <div style={styles.menu} role="menu">
-          <div style={styles.section}>
-            <div style={styles.sectionLabel}>Queues</div>
-            <button
-              style={styles.item}
-              onClick={() => select({ kind: "queue", queueKind: "yellow" })}
-            >
-              <span
-                style={{
-                  ...styles.swatch,
-                  background: "rgba(220, 180, 60, 0.6)",
-                }}
-              />
-              Weekly review
-            </button>
-            <button
-              style={styles.item}
-              onClick={() => select({ kind: "queue", queueKind: "green" })}
-            >
-              <span
-                style={{
-                  ...styles.swatch,
-                  background: "rgba(90, 180, 110, 0.6)",
-                }}
-              />
-              Monthly review
-            </button>
-          </div>
-          <div style={styles.section}>
-            <div style={styles.sectionLabel}>Persistent files</div>
-            <button
-              style={styles.item}
-              onClick={() =>
-                select({ kind: "persistent", persistentKind: "bottlenecks" })
-              }
-            >
-              <span
-                style={{
-                  ...styles.swatch,
-                  background: "rgba(220, 90, 90, 0.6)",
-                }}
-              />
-              Bottlenecks
-            </button>
-            <button
-              style={styles.item}
-              onClick={() =>
-                select({ kind: "persistent", persistentKind: "antihype" })
-              }
-            >
-              <span
-                style={{
-                  ...styles.swatch,
-                  background: "rgba(230, 140, 60, 0.6)",
-                }}
-              />
-              Anti-Hype
-            </button>
-            <button
-              style={styles.item}
-              onClick={() =>
-                select({ kind: "persistent", persistentKind: "citations" })
-              }
-            >
-              <span
-                style={{
-                  ...styles.swatch,
-                  background: "rgba(150, 110, 220, 0.6)",
-                }}
-              />
-              Citations to use
-            </button>
-            <button
-              style={styles.item}
-              onClick={() =>
-                select({ kind: "persistent", persistentKind: "concepts" })
-              }
-            >
-              <span
-                style={{
-                  ...styles.swatch,
-                  background: "rgba(90, 150, 230, 0.6)",
-                }}
-              />
-              Concept Inbox
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Portal the dropdown to document.body so it escapes the
+       *  sidebar's clipping (sidebar has backdrop-filter, which makes
+       *  it a containing block for fixed-position descendants). */}
+      {createPortal(menu, document.body)}
     </div>
   );
 }

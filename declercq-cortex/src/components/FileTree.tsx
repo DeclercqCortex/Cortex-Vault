@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 // Mirrors the Rust `FileNode` enum exactly. The tagged union via the `type`
@@ -13,6 +13,23 @@ export type FileNode =
  */
 export type SelectFileOpts = { ctrlClick?: boolean };
 
+/** Cluster 24 v1.0 — describes a row that's currently in inline edit mode.
+ *  - `rename`: the existing row's text is replaced with an `<input>` seeded
+ *    with the current name. Enter calls rename_path; Esc cancels.
+ *  - `new-file` / `new-folder`: a phantom row appears under the target
+ *    folder with an empty `<input>`. Enter calls create_file_in_folder /
+ *    create_folder_in_folder. Esc cancels and removes the phantom row.
+ */
+export type PendingEdit =
+  | {
+      kind: "rename";
+      targetPath: string;
+      nodeType: "file" | "folder";
+      draft: string;
+    }
+  | { kind: "new-file"; parentPath: string; draft: string }
+  | { kind: "new-folder"; parentPath: string; draft: string };
+
 interface FileTreeProps {
   vaultPath: string;
   onSelectFile: (path: string, opts?: SelectFileOpts) => void;
@@ -22,6 +39,19 @@ interface FileTreeProps {
    * Used by the manual refresh button, and in Day 4 by the filesystem watcher.
    */
   refreshKey?: number;
+  /** Cluster 24 v1.0 — right-click on a row opens the context menu via App.tsx. */
+  onContextMenu?: (e: React.MouseEvent, node: FileNode) => void;
+  /** Cluster 24 v1.0 — inline edit state. Owned by App.tsx so the menu
+   *  can dispatch into it. */
+  pendingEdit?: PendingEdit | null;
+  onPendingEditChange?: (next: PendingEdit | null) => void;
+  /** Called when the user commits an edit. App.tsx routes to the
+   *  appropriate Tauri command, then refreshes the tree. */
+  onCommitEdit?: (edit: PendingEdit) => void | Promise<void>;
+  /** Cluster 26 — set of file paths that are currently dirty (open in
+   *  any pane and have unsaved changes). FileTree renders a small
+   *  accent-gradient dot on each dirty row's right edge. */
+  dirtyPaths?: ReadonlySet<string>;
 }
 
 export function FileTree({
@@ -29,6 +59,11 @@ export function FileTree({
   onSelectFile,
   selectedPath,
   refreshKey = 0,
+  onContextMenu,
+  pendingEdit,
+  onPendingEditChange,
+  onCommitEdit,
+  dirtyPaths,
 }: FileTreeProps) {
   const [tree, setTree] = useState<FileNode[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +108,11 @@ export function FileTree({
           depth={0}
           onSelectFile={onSelectFile}
           selectedPath={selectedPath}
+          onContextMenu={onContextMenu}
+          pendingEdit={pendingEdit ?? null}
+          onPendingEditChange={onPendingEditChange}
+          onCommitEdit={onCommitEdit}
+          dirtyPaths={dirtyPaths}
         />
       ))}
     </div>
@@ -84,9 +124,24 @@ interface TreeNodeProps {
   depth: number;
   onSelectFile: (path: string, opts?: SelectFileOpts) => void;
   selectedPath: string | null;
+  onContextMenu?: (e: React.MouseEvent, node: FileNode) => void;
+  pendingEdit: PendingEdit | null;
+  onPendingEditChange?: (next: PendingEdit | null) => void;
+  onCommitEdit?: (edit: PendingEdit) => void | Promise<void>;
+  dirtyPaths?: ReadonlySet<string>;
 }
 
-function TreeNode({ node, depth, onSelectFile, selectedPath }: TreeNodeProps) {
+function TreeNode({
+  node,
+  depth,
+  onSelectFile,
+  selectedPath,
+  onContextMenu,
+  pendingEdit,
+  onPendingEditChange,
+  onCommitEdit,
+  dirtyPaths,
+}: TreeNodeProps) {
   // Expansion state is persisted per-path in localStorage.
   //   - Key includes the absolute path, so two vaults never collide.
   //   - File rows have no expansion, but we still compute the key for
@@ -116,18 +171,49 @@ function TreeNode({ node, depth, onSelectFile, selectedPath }: TreeNodeProps) {
     }
   }, [expanded, storageKey]);
 
+  // Cluster 24 v1.0 — when a new-file/new-folder is targeted at this folder
+  // node, auto-expand so the inline phantom row is visible. We only force
+  // expansion ON; the user's manual collapse later isn't fought.
+  useEffect(() => {
+    if (node.type !== "folder") return;
+    if (!pendingEdit) return;
+    if (
+      (pendingEdit.kind === "new-file" || pendingEdit.kind === "new-folder") &&
+      pendingEdit.parentPath === node.path &&
+      !expanded
+    ) {
+      setExpanded(true);
+    }
+  }, [pendingEdit, node, expanded]);
+
   const indent: React.CSSProperties = { paddingLeft: `${depth * 14 + 8}px` };
+
+  // Inline rename UI replaces this row's text with an input.
+  const renaming =
+    pendingEdit?.kind === "rename" && pendingEdit.targetPath === node.path;
 
   if (node.type === "file") {
     const isSelected = selectedPath === node.path;
+    const isDirty = dirtyPaths?.has(node.path) ?? false;
     return (
       <div
-        onClick={(e) =>
+        // Cluster 26 — class hooks let CSS layer hover / selected-bar /
+        // dirty-dot affordances on top of the inline-style row layout.
+        className={`cortex-filetree-row cortex-filetree-row--file${
+          isSelected ? " cortex-filetree-row--selected" : ""
+        }${isDirty ? " cortex-filetree-row--dirty" : ""}`}
+        onClick={(e) => {
+          if (renaming) return;
           // Cluster 6 v1.5: forward ctrl-click so the multi-tab layout
           // can route to slot 2 in the dual layout. Meta is treated the
           // same so macOS works.
-          onSelectFile(node.path, { ctrlClick: e.ctrlKey || e.metaKey })
-        }
+          onSelectFile(node.path, { ctrlClick: e.ctrlKey || e.metaKey });
+        }}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          onContextMenu(e, node);
+        }}
         // Drag-and-drop: tri/quad layouts use this as the primary way
         // to drop a file into a non-active slot. The data type is
         // namespaced so we don't collide with anything else the
@@ -138,7 +224,7 @@ function TreeNode({ node, depth, onSelectFile, selectedPath }: TreeNodeProps) {
         // string if our capture-phase intercept ever misses. With
         // only `text/cortex-path` set, ProseMirror has nothing to
         // consume and silently no-ops.
-        draggable
+        draggable={!renaming}
         onDragStart={(e) => {
           e.dataTransfer.setData("text/cortex-path", node.path);
           e.dataTransfer.effectAllowed = "copy";
@@ -151,33 +237,205 @@ function TreeNode({ node, depth, onSelectFile, selectedPath }: TreeNodeProps) {
         title={node.path}
       >
         <span style={styles.icon}>📄</span>
-        <span style={styles.label}>{node.name}</span>
+        {renaming ? (
+          <InlineEditInput
+            initialValue={
+              pendingEdit!.kind === "rename" ? pendingEdit!.draft : ""
+            }
+            onChange={(v) => {
+              if (pendingEdit?.kind === "rename") {
+                onPendingEditChange?.({ ...pendingEdit, draft: v });
+              }
+            }}
+            onCommit={() => {
+              if (pendingEdit) onCommitEdit?.(pendingEdit);
+            }}
+            onCancel={() => onPendingEditChange?.(null)}
+          />
+        ) : (
+          <span style={styles.label}>{node.name}</span>
+        )}
+        {/* Cluster 26 — dirty indicator. The design-system spec called
+         *  for a yellow `f5c365` dot; the user requested the gradient
+         *  accent instead. CSS .cortex-filetree-row--dirty paints a
+         *  small accent-gradient circle on the right edge, only when
+         *  the row's path is in dirtyPaths. */}
+        {isDirty && !renaming && (
+          <span className="cortex-filetree-dirty-dot" aria-label="unsaved" />
+        )}
       </div>
     );
   }
 
+  // Folder rendering. The phantom child rows for new-file / new-folder
+  // pendingEdits appear at the bottom of the children list.
+  const showPhantomNewFile =
+    pendingEdit?.kind === "new-file" && pendingEdit.parentPath === node.path;
+  const showPhantomNewFolder =
+    pendingEdit?.kind === "new-folder" && pendingEdit.parentPath === node.path;
+
   return (
     <div>
       <div
-        onClick={() => setExpanded((e) => !e)}
+        className="cortex-filetree-row cortex-filetree-row--folder"
+        onClick={() => {
+          if (!renaming) setExpanded((e) => !e);
+        }}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          onContextMenu(e, node);
+        }}
         style={{ ...styles.row, ...indent, opacity: 0.92 }}
         title={node.path}
       >
         <span style={styles.caret}>{expanded ? "▾" : "▸"}</span>
         <span style={styles.icon}>📁</span>
-        <span style={styles.label}>{node.name}</span>
-      </div>
-      {expanded &&
-        node.children.map((child) => (
-          <TreeNode
-            key={child.path}
-            node={child}
-            depth={depth + 1}
-            onSelectFile={onSelectFile}
-            selectedPath={selectedPath}
+        {renaming ? (
+          <InlineEditInput
+            initialValue={
+              pendingEdit!.kind === "rename" ? pendingEdit!.draft : ""
+            }
+            onChange={(v) => {
+              if (pendingEdit?.kind === "rename") {
+                onPendingEditChange?.({ ...pendingEdit, draft: v });
+              }
+            }}
+            onCommit={() => {
+              if (pendingEdit) onCommitEdit?.(pendingEdit);
+            }}
+            onCancel={() => onPendingEditChange?.(null)}
           />
-        ))}
+        ) : (
+          <span style={styles.label}>{node.name}</span>
+        )}
+      </div>
+      {expanded && (
+        <>
+          {node.children.map((child) => (
+            <TreeNode
+              key={child.path}
+              node={child}
+              depth={depth + 1}
+              onSelectFile={onSelectFile}
+              selectedPath={selectedPath}
+              onContextMenu={onContextMenu}
+              pendingEdit={pendingEdit}
+              onPendingEditChange={onPendingEditChange}
+              onCommitEdit={onCommitEdit}
+              dirtyPaths={dirtyPaths}
+            />
+          ))}
+          {(showPhantomNewFile || showPhantomNewFolder) && (
+            <div
+              style={{
+                ...styles.row,
+                paddingLeft: `${(depth + 1) * 14 + 8}px`,
+              }}
+            >
+              <span style={styles.icon}>
+                {showPhantomNewFile ? "📄" : "📁"}
+              </span>
+              <InlineEditInput
+                initialValue={pendingEdit?.draft ?? ""}
+                placeholder={
+                  showPhantomNewFile ? "new file name…" : "new folder name…"
+                }
+                onChange={(v) => {
+                  if (
+                    pendingEdit?.kind === "new-file" ||
+                    pendingEdit?.kind === "new-folder"
+                  ) {
+                    onPendingEditChange?.({ ...pendingEdit, draft: v });
+                  }
+                }}
+                onCommit={() => {
+                  if (pendingEdit) onCommitEdit?.(pendingEdit);
+                }}
+                onCancel={() => onPendingEditChange?.(null)}
+              />
+            </div>
+          )}
+        </>
+      )}
     </div>
+  );
+}
+
+interface InlineEditInputProps {
+  initialValue: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+}
+
+function InlineEditInput({
+  initialValue,
+  placeholder,
+  onChange,
+  onCommit,
+  onCancel,
+}: InlineEditInputProps) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  // Local mirror so typing stays smooth even if the parent re-renders;
+  // we still notify the parent on each change for App-level coordination.
+  const [value, setValue] = useState(initialValue);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // For renames, select the basename portion (stem before the last
+    // dot) so the user can immediately overwrite without re-selecting
+    // the extension. For new files / folders the placeholder shows
+    // through and there's nothing to select.
+    //
+    // CRITICAL: empty dependency array — this MUST run only once on
+    // mount. The previous `[initialValue]` deps caused a re-select on
+    // every keystroke (parent passes a new initialValue down on each
+    // onChange, which re-fired this effect, which re-selected the
+    // basename, which clobbered the cursor the user just established).
+    if (initialValue) {
+      const lastDot = initialValue.lastIndexOf(".");
+      if (lastDot > 0) {
+        el.setSelectionRange(0, lastDot);
+      } else {
+        el.select();
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <input
+      ref={ref}
+      type="text"
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => {
+        setValue(e.target.value);
+        onChange(e.target.value);
+      }}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onCommit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+      onBlur={() => {
+        // Blur cancels (matches OS file-explorer behavior — clicking
+        // away abandons the edit). User who wants to commit hits Enter.
+        onCancel();
+      }}
+      className="cortex-filetree-inline-input"
+      style={styles.input}
+    />
   );
 }
 
@@ -221,5 +479,17 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "0.5rem 0.75rem",
     fontSize: "0.85rem",
     color: "var(--danger)",
+  },
+  input: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: "inherit",
+    fontFamily: "inherit",
+    padding: "1px 4px",
+    background: "var(--bg)",
+    color: "var(--text)",
+    border: "1px solid var(--accent)",
+    borderRadius: "3px",
+    outline: "none",
   },
 };

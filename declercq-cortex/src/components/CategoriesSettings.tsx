@@ -125,12 +125,13 @@ export function CategoriesSettings({
   if (!isOpen) return null;
 
   return (
-    <div style={styles.scrim} onClick={onClose}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-label="Manage categories"
+        data-cortex-modal
       >
         <h2 style={styles.heading}>Event categories</h2>
         <p style={styles.hint}>

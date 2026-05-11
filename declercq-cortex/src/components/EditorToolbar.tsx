@@ -16,11 +16,13 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
 } from "react";
+import { createPortal } from "react-dom";
 import type { Editor } from "@tiptap/react";
 // Cluster 21 v1.1 polish — rich-text replace box was attempted via a
 // small TipTap mini-editor in FindReplaceBar. Disabling those imports
@@ -381,6 +383,27 @@ export function EditorToolbar({
   const [recentUnderlineColors, setRecentUnderlineColors] = useState<string[]>(
     [],
   );
+  // Cluster 21 v1.2 — Frame block color picker. The chosen color is
+  // remembered across sessions via localStorage so the user's preferred
+  // frame color persists. null = use the default (var(--accent)) so
+  // unchanged users see exactly the v1.1 visual.
+  const [frameColor, setFrameColor] = useState<string | null>(() => {
+    try {
+      const raw = localStorage.getItem("cortex:frame-color");
+      return raw && raw.length > 0 ? raw : null;
+    } catch {
+      return null;
+    }
+  });
+  const persistFrameColor = (next: string | null) => {
+    setFrameColor(next);
+    try {
+      if (next) localStorage.setItem("cortex:frame-color", next);
+      else localStorage.removeItem("cortex:frame-color");
+    } catch {
+      /* localStorage may be unavailable */
+    }
+  };
   const counts = useLiveCounts(editor);
 
   // Body-level pause flag.
@@ -923,28 +946,28 @@ export function EditorToolbar({
       >
         <TbBtn
           active={editor.isActive({ textAlign: "left" } as any)}
-          onClick={() => editor.chain().focus().setTextAlign("left").run()}
+          onClick={() => applyAlign(editor, "left")}
           title="Align left"
         >
           ⇤
         </TbBtn>
         <TbBtn
           active={editor.isActive({ textAlign: "center" } as any)}
-          onClick={() => editor.chain().focus().setTextAlign("center").run()}
+          onClick={() => applyAlign(editor, "center")}
           title="Align center"
         >
           ⇔
         </TbBtn>
         <TbBtn
           active={editor.isActive({ textAlign: "right" } as any)}
-          onClick={() => editor.chain().focus().setTextAlign("right").run()}
+          onClick={() => applyAlign(editor, "right")}
           title="Align right"
         >
           ⇥
         </TbBtn>
         <TbBtn
           active={editor.isActive({ textAlign: "justify" } as any)}
-          onClick={() => editor.chain().focus().setTextAlign("justify").run()}
+          onClick={() => applyAlign(editor, "justify")}
           title="Justify"
         >
           ☰
@@ -1837,6 +1860,13 @@ export function EditorToolbar({
         >
           ⊳
         </TbBtn>
+        {/* Cluster 21 v1.2 — Frame block now ships paired with a color
+            picker. The Frame button inserts a frame using the currently-
+            chosen color (persisted to localStorage). The adjacent
+            color-swatch button opens a popover with the seven Cluster 2
+            mark colors + black/white + a free-form picker so the user
+            can match the frame's border to whatever palette they're
+            using. */}
         <TbBtn
           onClick={() =>
             editor
@@ -1844,6 +1874,7 @@ export function EditorToolbar({
               .focus()
               .insertContent({
                 type: "cortexFrame" as any,
+                attrs: frameColor ? { color: frameColor } : {},
                 content: [
                   {
                     type: "paragraph",
@@ -1853,10 +1884,77 @@ export function EditorToolbar({
               })
               .run()
           }
-          title="Frame"
+          title={
+            frameColor
+              ? `Frame (color: ${frameColor})`
+              : "Frame (default color)"
+          }
         >
-          ▢
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: "1em",
+              height: "1em",
+              border: `2px solid ${frameColor ?? "currentColor"}`,
+              borderRadius: "3px",
+              boxSizing: "border-box",
+            }}
+          >
+            <span style={{ fontSize: "0.55em" }}> </span>
+          </span>
         </TbBtn>
+        <TbPopover
+          isOpen={popoverIsOpen("frame-color")}
+          onToggle={() => togglePopover("frame-color")}
+          trigger={
+            <span
+              style={{
+                display: "inline-block",
+                width: "0.95em",
+                height: "0.95em",
+                background: frameColor ?? "var(--accent)",
+                borderRadius: "3px",
+                border: "1px solid var(--border)",
+              }}
+              aria-hidden
+            />
+          }
+          title="Frame border color"
+        >
+          <ColorPicker
+            recents={recentTextColors}
+            onPick={(hex) => {
+              persistFrameColor(hex);
+              // If the cursor is currently inside a frame, also re-color
+              // THAT frame so the user sees an immediate change.
+              try {
+                editor
+                  .chain()
+                  .focus()
+                  .updateAttributes("cortexFrame" as any, { color: hex })
+                  .run();
+              } catch {
+                /* not inside a frame — color saved for next insert */
+              }
+              setOpenPopover(null);
+            }}
+            onReset={() => {
+              persistFrameColor(null);
+              try {
+                editor
+                  .chain()
+                  .focus()
+                  .updateAttributes("cortexFrame" as any, { color: null })
+                  .run();
+              } catch {
+                /* not inside a frame */
+              }
+              setOpenPopover(null);
+            }}
+          />
+        </TbPopover>
         <TbPopover
           isOpen={popoverIsOpen("callout")}
           onToggle={() => togglePopover("callout")}
@@ -2207,6 +2305,57 @@ function Group({
   );
 }
 
+/**
+ * Cluster 26 — wire the Align toolbar buttons to also drive any
+ * cortexImage nodes inside the selection.
+ *
+ * For each "left" / "center" / "right" / "justify" click:
+ *   1. Walk the selection's nodes; for every cortexImage NOT in
+ *      wrapMode "free", set its wrapMode to match the alignment
+ *      (left → "left", center → "break", right → "right",
+ *      justify → "break"). Free-positioned images are intentionally
+ *      skipped so user-placed images stay where the user put them.
+ *   2. Run setTextAlign on the surrounding block(s) so prose paragraphs
+ *      and headings respond too (the standard TipTap text-align
+ *      behavior, unchanged).
+ *
+ * The cortexImage wrap mode mutation is dispatched as a single PM
+ * transaction; if multiple images are in the selection, all update at
+ * once. Empty selection (just a caret) falls through to setTextAlign
+ * alone, which is the right behaviour for prose-only alignment.
+ */
+type AlignKind = "left" | "center" | "right" | "justify";
+function applyAlign(editor: any, align: AlignKind): void {
+  const wrapForAlign: Record<AlignKind, string> = {
+    left: "left",
+    center: "break",
+    right: "right",
+    justify: "break",
+  };
+  const { state } = editor;
+  const tr = state.tr;
+  let dirty = false;
+  state.doc.nodesBetween(
+    state.selection.from,
+    state.selection.to,
+    (node: any, pos: number) => {
+      if (node.type.name === "cortexImage" && node.attrs.wrapMode !== "free") {
+        tr.setNodeMarkup(pos, undefined, {
+          ...node.attrs,
+          wrapMode: wrapForAlign[align],
+        });
+        dirty = true;
+      }
+      // Don't descend further: cortexImage is an atom node.
+      return true;
+    },
+  );
+  if (dirty) {
+    editor.view.dispatch(tr);
+  }
+  editor.chain().focus().setTextAlign(align).run();
+}
+
 function TbBtn({
   active,
   onClick,
@@ -2246,9 +2395,106 @@ function TbPopover({
   title: string;
   children: React.ReactNode;
 }) {
+  /* Cortex v1.0 — popover portal.
+   *
+   * The editor toolbar has `backdrop-filter`, which makes it a
+   * containing block for fixed-positioned descendants AND clips
+   * `position: absolute` children at toolbar's bounding box on some
+   * Chromium paint paths. When a TbPopover's trigger is near the
+   * right edge of the toolbar, the popover (left: 0 of trigger,
+   * min-width 220 px) extends past the toolbar's right edge and
+   * gets visually cut off.
+   *
+   * Fix: portal the popover panel to document.body so it escapes
+   * the toolbar's containing block entirely. Compute screen-space
+   * coords from the trigger button's getBoundingClientRect, then
+   * clamp them so the panel never extends past the viewport's
+   * right or bottom edge. Recompute on `resize` / `scroll`.
+   *
+   * Same pattern as ReviewsMenu's dropdown portal. */
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setPos(null);
+      return;
+    }
+    const place = () => {
+      const btn = triggerRef.current;
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      // Provisional position: just below the trigger, anchored to its
+      // left edge.
+      let top = r.bottom + 4;
+      let left = r.left;
+      // Clamp against the viewport. Use the panel's measured size if
+      // available, otherwise fall back to the popover's min-width.
+      const panel = panelRef.current;
+      const panelW = panel?.offsetWidth ?? 220;
+      const panelH = panel?.offsetHeight ?? 0;
+      const margin = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      if (left + panelW + margin > vw) {
+        // Would extend past the right edge — anchor to the trigger's
+        // right edge instead, opening leftward.
+        left = Math.max(margin, r.right - panelW);
+      }
+      if (left < margin) left = margin;
+      if (top + panelH + margin > vh) {
+        // Would extend below the viewport — flip to open upward.
+        top = Math.max(margin, r.top - panelH - 4);
+      }
+      setPos({ top, left });
+    };
+    place();
+    // Re-place when the panel mounts (its measured size becomes
+    // available on the next frame).
+    const raf = requestAnimationFrame(place);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [isOpen]);
+
+  const panel = isOpen ? (
+    <div
+      ref={panelRef}
+      className="cortex-tb-popover"
+      style={
+        pos
+          ? { position: "fixed", top: pos.top, left: pos.left }
+          : // Render initially off-screen so the first measurement
+            // doesn't flash at (0,0).
+            { position: "fixed", top: -9999, left: -9999, visibility: "hidden" }
+      }
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <div
+        style={{
+          fontSize: "0.7rem",
+          color: "var(--text-muted)",
+          marginBottom: 4,
+          textTransform: "uppercase",
+        }}
+      >
+        {title}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {children}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div style={{ position: "relative" }}>
       <button
+        ref={triggerRef}
         type="button"
         className={"cortex-tb-btn" + (isOpen ? " active" : "")}
         onClick={onToggle}
@@ -2256,27 +2502,7 @@ function TbPopover({
       >
         {trigger}
       </button>
-      {isOpen && (
-        <div
-          className="cortex-tb-popover"
-          style={{ top: "calc(100% + 4px)", left: 0 }}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <div
-            style={{
-              fontSize: "0.7rem",
-              color: "var(--text-muted)",
-              marginBottom: 4,
-              textTransform: "uppercase",
-            }}
-          >
-            {title}
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {children}
-          </div>
-        </div>
-      )}
+      {panel && createPortal(panel, document.body)}
     </div>
   );
 }

@@ -89,12 +89,17 @@ interface DailyRollupRow {
  * share a colour but stay separate slices).
  */
 const PIE_PALETTE = [
-  "#6ca0dc", // blue (matches accent)
+  // Cluster 26 — palette anchored on the new Aurora accents.
+  // Position 0 + 4 are the brand pair so the most-frequent category
+  // (the one that hashes to slot 0) renders in the brand blue, and
+  // its visual neighbour (slot 4) renders in brand violet — keeping
+  // the dominant slice of the pie chart tied to the chrome identity.
+  "#7aa2ff", // brand blue (matches --accent)
   "#22a06b", // green
-  "#f59e0b", // amber
-  "#f87171", // coral
-  "#a78bfa", // violet
-  "#14b8a6", // teal
+  "#f5c365", // warm amber (matches --warning)
+  "#ff8a8a", // coral (matches --danger)
+  "#a98bff", // brand violet (matches --accent-2)
+  "#4adcb8", // teal (matches --aurora-3 family)
   "#ec4899", // pink
   "#fbbf24", // yellow
   "#60a5fa", // sky
@@ -263,7 +268,7 @@ export function TimeTracking({
   }, [rows]);
 
   return (
-    <div style={styles.container}>
+    <div className="cortex-view cortex-view-tt" style={styles.container}>
       <div style={styles.header}>
         <div>
           <h1 style={styles.title}>Time tracking</h1>

@@ -191,6 +191,36 @@ export const CortexFrame = Node.create({
   group: "block",
   content: "block+",
   defining: true,
+  // Cluster 21 v1.2 — Frame gains an optional `color` attribute. The
+  // user picks a hex (or one of the seven mark-palette colors) from
+  // the toolbar's Frame-color side button; the chosen color persists
+  // on the node and drives the visible border / accent. parseHTML
+  // reads `data-color`; renderHTML emits both the attr (for round-
+  // trip) and an inline `style` setting `--cortex-frame-color` so the
+  // existing CSS rule for `.cortex-frame` can use
+  // `border-color: var(--cortex-frame-color, var(--accent))`.
+  addAttributes() {
+    return {
+      color: {
+        default: null as string | null,
+        parseHTML: (el) => {
+          const v = el.getAttribute("data-color");
+          return v && v.length > 0 ? v : null;
+        },
+        renderHTML: (attrs: { color?: string | null }) => {
+          if (!attrs.color) return {};
+          // Emit BOTH data-color (round-trip durability) and a CSS
+          // variable assignment via inline style. The CSS rule for
+          // `.cortex-frame` reads `--cortex-frame-color` so the
+          // border + accent flow from this single source.
+          return {
+            "data-color": attrs.color,
+            style: `--cortex-frame-color: ${attrs.color}`,
+          };
+        },
+      },
+    };
+  },
   parseHTML() {
     return [{ tag: "div.cortex-frame" }];
   },

@@ -37,4 +37,11 @@ pdf-extract = "0.7"
 # in any CI/dev environment without a system crypto library. `json` brings
 # in serde_json wiring for deserialising API responses.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Cluster 24: send-to-trash for the FileTree right-click delete. The
+# Windows backend uses IFileOperation under the hood and lands files in
+# the Recycle Bin (recoverable). Cross-platform but only Windows is in
+# scope for v1.0.
+trash = "5"
+# Cluster 24: regex for vault-wide wikilink rewrites on file rename.
+regex = "1"
 

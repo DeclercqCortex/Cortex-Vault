@@ -293,13 +293,14 @@ export function NewHierarchyModal({
   const showParent = kind === "experiment" || kind === "iteration";
 
   return (
-    <div style={styles.scrim} onClick={onClose}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKey}
         role="dialog"
         aria-label={heading}
+        data-cortex-modal
       >
         <h2 style={styles.heading}>{heading}</h2>
 

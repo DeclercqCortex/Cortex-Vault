@@ -14,7 +14,7 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { TextAlign } from "@tiptap/extension-text-align";
 import { Markdown } from "tiptap-markdown";
-import { DOMSerializer } from "@tiptap/pm/model";
+import { DOMSerializer, Slice } from "@tiptap/pm/model";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
 import { useEffect, useRef, useState } from "react";
 import { WikilinkDecoration } from "../editor/WikilinkDecoration";
@@ -780,6 +780,53 @@ export function Editor({
     ],
     content,
     editable,
+    editorProps: {
+      // Cluster 26 — strip structural-block containers from clipboard
+      // copies.
+      //
+      // Bug: copying content from inside a cortexTabsBlock /
+      // cortexTabPanel / cortexCollapsible included the wrapping
+      // container in the clipboard slice. Pasting the result elsewhere
+      // recreated the entire tab/collapsible structure with a single
+      // copied word inside, which is never what the user wants.
+      //
+      // Root cause: `defining: true` on these nodes (and `isolating:
+      // true` on cortexTabPanel) makes ProseMirror's default selection
+      // → slice conversion include the wrapping node so the structural
+      // semantics survive a paste. For the editor's INTERNAL
+      // selection-and-paste behaviour those flags are correct (they're
+      // why Enter inside a tab panel doesn't escape into a sibling
+      // panel). For the CLIPBOARD copy, we want the inner content
+      // only.
+      //
+      // transformCopied unwraps a slice that's wholly contained inside
+      // one of these container types by descending into the single
+      // child node and shrinking openStart/openEnd accordingly. The
+      // loop covers nested cases (e.g. a paragraph copied from inside
+      // a cortexTabPanel that's inside a cortexTabsBlock — two layers
+      // to peel).
+      transformCopied: (slice) => {
+        const wrappers = new Set([
+          "cortexTabsBlock",
+          "cortexTabPanel",
+          "cortexCollapsible",
+        ]);
+        let { content } = slice;
+        let { openStart, openEnd } = slice;
+        // Peel wrappers as long as the slice's top fragment has
+        // exactly one child AND that child is a known wrapper. Stop
+        // the moment we hit non-wrapper content so non-collapsible /
+        // non-tab copies (e.g., a paragraph copy) are unaffected.
+        while (content.childCount === 1) {
+          const only = content.firstChild;
+          if (!only || !wrappers.has(only.type.name)) break;
+          content = only.content;
+          openStart = Math.max(0, openStart - 1);
+          openEnd = Math.max(0, openEnd - 1);
+        }
+        return new Slice(content, openStart, openEnd);
+      },
+    },
     onUpdate: ({ editor }) => {
       if (!onChange) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

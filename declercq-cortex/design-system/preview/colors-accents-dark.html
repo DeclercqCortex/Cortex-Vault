@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../colors_and_type.css"><style>
+html,body{margin:0;padding:0;background:#0d1018}
+.wrap{padding:22px;display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+.col{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+.sw{width:96px;height:80px;border-radius:var(--radius-2);border:1px solid var(--border-2)}
+.grad{width:200px;height:80px;border-radius:var(--radius-2);background:linear-gradient(135deg,#7aa2ff,#a98bff);box-shadow:0 6px 18px rgba(122,162,255,0.3)}
+.nm{font-family:var(--font-sans);font-size:12px;color:#ebeefb;font-weight:500}
+.hx{font-family:var(--font-mono);font-size:10.5px;color:rgba(235,238,251,0.55)}
+</style></head><body class="dark"><div class="wrap">
+<div class="col"><div class="sw" style="background:#7aa2ff"></div><div class="nm">--accent</div><div class="hx">#7aa2ff</div></div>
+<div class="col"><div class="sw" style="background:#a98bff"></div><div class="nm">--accent-2</div><div class="hx">#a98bff</div></div>
+<div class="col"><div class="grad"></div><div class="nm">--accent-gradient</div><div class="hx">135° accent → accent-2</div></div>
+<div class="col"><div class="sw" style="background:rgba(122,162,255,0.12);border:1px dashed rgba(168,192,240,0.16)"></div><div class="nm">--accent-bg</div><div class="hx">.12 alpha</div></div>
+<div class="col"><div class="sw" style="background:rgba(122,162,255,0.22);border:1px dashed rgba(168,192,240,0.16)"></div><div class="nm">--accent-bg-2</div><div class="hx">.22 alpha</div></div>
+</div></body></html>

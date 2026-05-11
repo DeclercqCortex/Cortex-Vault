@@ -38,6 +38,8 @@ import {
   AUTOREPLACE_CHANGED_EVENT,
   type AutoReplaceRule,
 } from "../editor/CortexAutoReplace";
+// Cluster 21 v1.2 — rich snippet editor sub-modal.
+import { RichAfterEditor } from "./RichAfterEditor";
 
 interface AutoReplaceModalProps {
   onClose: () => void;
@@ -54,6 +56,12 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
   // Add-form state.
   const [draftBefore, setDraftBefore] = useState("");
   const [draftAfter, setDraftAfter] = useState("");
+  // Cluster 21 v1.2 — rich-content draft for the add form. Empty when
+  // the user is using only plain-text replacement; populated when they
+  // open the Rich-edit sub-modal and save a snippet.
+  const [draftAfterHtml, setDraftAfterHtml] = useState<string | undefined>(
+    undefined,
+  );
 
   // Edit-in-place state. `editingKey` is the ORIGINAL `before` of
   // the rule being edited (so we can find the right row to update
@@ -61,6 +69,12 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editDraftBefore, setEditDraftBefore] = useState("");
   const [editDraftAfter, setEditDraftAfter] = useState("");
+  const [editDraftAfterHtml, setEditDraftAfterHtml] = useState<
+    string | undefined
+  >(undefined);
+  // Cluster 21 v1.2 — when set, the RichAfterEditor sub-modal is open.
+  // The "target" string says which draft pair to write back to on save.
+  const [richEditing, setRichEditing] = useState<"add" | "edit" | null>(null);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -100,6 +114,7 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
     setEditingKey(rule.before);
     setEditDraftBefore(rule.before);
     setEditDraftAfter(rule.after);
+    setEditDraftAfterHtml(rule.afterHtml);
     setError(null);
   };
 
@@ -107,6 +122,7 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
     setEditingKey(null);
     setEditDraftBefore("");
     setEditDraftAfter("");
+    setEditDraftAfterHtml(undefined);
     setError(null);
   };
 
@@ -154,10 +170,14 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
     const cleaned = userRules.filter(
       (r) => r.before !== editingKey && r.before !== editDraftBefore,
     );
-    const next: AutoReplaceRule[] = [
-      ...cleaned,
-      { before: editDraftBefore, after: editDraftAfter },
-    ];
+    const editedRule: AutoReplaceRule = {
+      before: editDraftBefore,
+      after: editDraftAfter,
+    };
+    if (editDraftAfterHtml && editDraftAfterHtml.trim().length > 0) {
+      editedRule.afterHtml = editDraftAfterHtml;
+    }
+    const next: AutoReplaceRule[] = [...cleaned, editedRule];
     writeUserAutoReplaceRules(next);
     setUserRules(next);
 
@@ -219,14 +239,19 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
     }
     const lastChar = draftBefore[draftBefore.length - 1];
     const isTriggerChar = /\s|[.,;:!?\-+/\\=<>(){}[\]]/.test(lastChar);
-    const next: AutoReplaceRule[] = [
-      ...userRules,
-      { before: draftBefore, after: draftAfter },
-    ];
+    const newRule: AutoReplaceRule = {
+      before: draftBefore,
+      after: draftAfter,
+    };
+    if (draftAfterHtml && draftAfterHtml.trim().length > 0) {
+      newRule.afterHtml = draftAfterHtml;
+    }
+    const next: AutoReplaceRule[] = [...userRules, newRule];
     writeUserAutoReplaceRules(next);
     setUserRules(next);
     setDraftBefore("");
     setDraftAfter("");
+    setDraftAfterHtml(undefined);
     if (!isTriggerChar) {
       setError(
         "Heads up — 'Before' usually ends with a space or other trigger character. The rule was added, but it'll only fire when its trailing character is typed.",
@@ -260,13 +285,22 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
   };
 
   const node = (
-    <div style={styles.scrim} onClick={onClose}>
+    // Cluster 21 v1.2 — modal is STICKY against outside clicks. Only
+    // the explicit Close button, Cancel buttons, or Esc dismiss it.
+    // The scrim still swallows clicks (so they don't leak to the
+    // editor underneath) but doesn't trigger onClose.
+    <div
+      style={styles.scrim}
+      onClick={(e) => e.stopPropagation()}
+      data-cortex-scrim
+    >
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKey}
         role="dialog"
         aria-label="Auto-replace rules"
+        data-cortex-modal
       >
         <div style={styles.headerRow}>
           <h2 style={styles.heading}>Auto-replace rules</h2>
@@ -302,8 +336,13 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
                           key={r.before}
                           before={editDraftBefore}
                           after={editDraftAfter}
+                          hasRichDraft={
+                            !!editDraftAfterHtml &&
+                            editDraftAfterHtml.length > 0
+                          }
                           onChangeBefore={setEditDraftBefore}
                           onChangeAfter={setEditDraftAfter}
+                          onOpenRichEditor={() => setRichEditing("edit")}
                           onSave={saveEdit}
                           onCancel={cancelEdit}
                         />
@@ -339,8 +378,12 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
                       key={`${r.before}-${i}`}
                       before={editDraftBefore}
                       after={editDraftAfter}
+                      hasRichDraft={
+                        !!editDraftAfterHtml && editDraftAfterHtml.length > 0
+                      }
                       onChangeBefore={setEditDraftBefore}
                       onChangeAfter={setEditDraftAfter}
+                      onOpenRichEditor={() => setRichEditing("edit")}
                       onSave={saveEdit}
                       onCancel={cancelEdit}
                     />
@@ -377,7 +420,27 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
                   placeholder="e.g. Too long; didn't read: "
                   spellCheck={false}
                 />
+                <button
+                  onClick={() => setRichEditing("add")}
+                  style={styles.btnSmall}
+                  title="Build a rich snippet (frame / tabs / callout / etc.)"
+                >
+                  ✨ Rich…
+                </button>
               </div>
+              {draftAfterHtml ? (
+                <div style={styles.richIndicator}>
+                  Rich snippet attached. The plain "After" above is the textual
+                  fallback shown in the rule list.
+                  <button
+                    onClick={() => setDraftAfterHtml(undefined)}
+                    style={styles.btnLink}
+                    title="Discard the rich snippet, keep plain text only"
+                  >
+                    clear
+                  </button>
+                </div>
+              ) : null}
               <div style={styles.addFormActions}>
                 <button
                   onClick={handleAdd}
@@ -403,6 +466,35 @@ export function AutoReplaceModal({ onClose }: AutoReplaceModalProps) {
           </button>
         </div>
       </div>
+
+      {/* Cluster 21 v1.2 — Rich-content sub-modal. Opened from the Rich
+          buttons in the add form / edit row; saves both HTML (drives
+          the rich-content insertion path) and plain text (fallback in
+          the rule list display). */}
+      {richEditing === "add" && (
+        <RichAfterEditor
+          initialAfterHtml={draftAfterHtml}
+          initialAfter={draftAfter}
+          onSave={(next) => {
+            setDraftAfter(next.after);
+            setDraftAfterHtml(next.afterHtml);
+            setRichEditing(null);
+          }}
+          onClose={() => setRichEditing(null)}
+        />
+      )}
+      {richEditing === "edit" && (
+        <RichAfterEditor
+          initialAfterHtml={editDraftAfterHtml}
+          initialAfter={editDraftAfter}
+          onSave={(next) => {
+            setEditDraftAfter(next.after);
+            setEditDraftAfterHtml(next.afterHtml);
+            setRichEditing(null);
+          }}
+          onClose={() => setRichEditing(null)}
+        />
+      )}
     </div>
   );
 
@@ -426,11 +518,22 @@ function RuleDisplayRow({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const hasRich = !!rule.afterHtml && rule.afterHtml.length > 0;
   return (
     <div style={styles.ruleRow}>
       <code style={styles.ruleCell}>{visualize(rule.before)}</code>
       <span style={styles.ruleArrow}>→</span>
-      <code style={styles.ruleCell}>{visualize(rule.after)}</code>
+      <code style={styles.ruleCell}>
+        {visualize(rule.after)}
+        {hasRich ? (
+          <span
+            style={styles.richBadge}
+            title="Rich snippet — Frame / Tabs / etc."
+          >
+            ✨
+          </span>
+        ) : null}
+      </code>
       {editable && (
         <div style={styles.rowActions}>
           <button
@@ -456,15 +559,24 @@ function RuleDisplayRow({
 function RuleEditRow({
   before,
   after,
+  hasRichDraft,
   onChangeBefore,
   onChangeAfter,
+  onOpenRichEditor,
   onSave,
   onCancel,
 }: {
   before: string;
   after: string;
+  /** Cluster 21 v1.2 — true when the edit's afterHtml draft is non-
+   *  empty, so the row can show a small ✨ indicator to remind the user
+   *  the rule will fire as rich content. */
+  hasRichDraft: boolean;
   onChangeBefore: (v: string) => void;
   onChangeAfter: (v: string) => void;
+  /** Cluster 21 v1.2 — open the RichAfterEditor sub-modal pre-seeded
+   *  with the current edit drafts. */
+  onOpenRichEditor: () => void;
   onSave: () => void;
   onCancel: () => void;
 }) {
@@ -495,6 +607,17 @@ function RuleEditRow({
         }}
       />
       <div style={styles.rowActions}>
+        <button
+          onClick={onOpenRichEditor}
+          style={styles.btnSmall}
+          title={
+            hasRichDraft
+              ? "Edit the rich snippet (rule already has one)"
+              : "Build a rich snippet (frame / tabs / callout / etc.)"
+          }
+        >
+          {hasRichDraft ? "✨" : "✨+"}
+        </button>
         <button onClick={onSave} style={styles.btnSmall} title="Save changes">
           ✓
         </button>
@@ -733,6 +856,33 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: "3px",
     minWidth: "22px",
     height: "22px",
+  },
+  // Cluster 21 v1.2 — visual cues for the rich-content path.
+  richBadge: {
+    marginLeft: "0.25rem",
+    fontSize: "0.7rem",
+    color: "var(--accent)",
+    verticalAlign: "middle",
+  },
+  richIndicator: {
+    margin: "0.25rem 0 0 0",
+    padding: "0.35rem 0.5rem",
+    fontSize: "0.78rem",
+    color: "var(--text-muted)",
+    background: "var(--bg-elev)",
+    borderRadius: "4px",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+  },
+  btnLink: {
+    background: "transparent",
+    border: 0,
+    color: "var(--accent)",
+    cursor: "pointer",
+    padding: 0,
+    fontSize: "0.78rem",
+    textDecoration: "underline",
   },
   btnDanger: {
     padding: "0 6px",

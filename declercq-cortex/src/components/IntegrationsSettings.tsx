@@ -169,13 +169,14 @@ export function IntegrationsSettings({
   }
 
   return (
-    <div style={styles.scrim} onClick={onClose}>
+    <div style={styles.scrim} onClick={onClose} data-cortex-scrim>
       <div
         style={styles.panel}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKey}
         role="dialog"
         aria-label="Integrations settings"
+        data-cortex-modal
       >
         <h2 style={styles.heading}>Integrations</h2>
         <p style={styles.hint}>

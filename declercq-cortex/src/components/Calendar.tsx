@@ -363,7 +363,7 @@ export function Calendar({ vaultPath, onClose }: CalendarProps) {
   }, [anchor, view]);
 
   return (
-    <div style={styles.wrap}>
+    <div className="cortex-view cortex-view-calendar" style={styles.wrap}>
       <header style={styles.header}>
         <div style={styles.headerLeft}>
           <button
@@ -967,7 +967,7 @@ function WeekView({
               }}
             >
               {allDayEvents.map((ev) => {
-                const color = colorById.get(ev.category) ?? "#888";
+                const color = colorById.get(ev.category) ?? "var(--text-muted)";
                 const renderKey = `${ev.id}@${ev.start_at}`;
                 return (
                   <div
@@ -1088,7 +1088,8 @@ function WeekView({
                   16,
                   ((endMin - startMin) / 60) * HOUR_HEIGHT,
                 );
-                const color = colorById.get(ev.event.category) ?? "#888";
+                const color =
+                  colorById.get(ev.event.category) ?? "var(--text-muted)";
                 const tentative = ev.event.status === "tentative";
                 const isReadOnly = ev.event.source === "google";
                 // Recurring events surface multiple occurrences with
@@ -1227,7 +1228,8 @@ function WeekView({
                     16,
                     ((endMin - startMin) / 60) * HOUR_HEIGHT,
                   );
-                  const color = colorById.get(ev.category) ?? "#888";
+                  const color =
+                    colorById.get(ev.category) ?? "var(--text-muted)";
                   return (
                     <div
                       key={`drag-preview-${ev.id}`}
@@ -1363,7 +1365,8 @@ function MonthView({
               </div>
               <div style={styles.monthDayEvents}>
                 {dayEvents.slice(0, 3).map((ev) => {
-                  const color = colorById.get(ev.category) ?? "#888";
+                  const color =
+                    colorById.get(ev.category) ?? "var(--text-muted)";
                   // Same key composition as WeekView so recurring
                   // occurrences don't collide on `id` alone.
                   const renderKey = `${ev.id}@${ev.start_at}`;

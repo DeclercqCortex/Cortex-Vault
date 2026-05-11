@@ -239,8 +239,12 @@ export function OrphanAttachmentsModal({
   }
 
   return (
-    <div style={styles.backdrop} onClick={onClose}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+    <div style={styles.backdrop} onClick={onClose} data-cortex-scrim>
+      <div
+        style={styles.modal}
+        onClick={(e) => e.stopPropagation()}
+        data-cortex-modal
+      >
         <div style={styles.header}>
           <h2 style={styles.title}>Orphan attachments</h2>
           <button onClick={onClose} style={styles.closeBtn} title="Close (Esc)">
