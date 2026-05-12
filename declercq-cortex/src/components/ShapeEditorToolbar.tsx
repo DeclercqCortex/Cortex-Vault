@@ -15,6 +15,7 @@
 // for size === 2 (which is already trivially distributed).
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import { SHAPE_COLORS, type Shape, type ShapeTool } from "../shapes/types";
 
@@ -188,7 +189,18 @@ export function ShapeEditorToolbar({
 
   // Compute the actual position style. During drag we use the live
   // drag.pos; otherwise we use the host-supplied position (or fall
-  // back to top: 12, right: 12 when null).
+  // back to top: 72, right: 16 when null).
+  //
+  // Cortex v1.0.3 — default top bumped from 12 to 72 so the toolbar
+  // clears the universal EditorToolbar (which sits flush at viewport
+  // top with ~52 px height in default density) instead of overlapping
+  // it. Pre-v1.0.3 the toolbar was technically rendering at top: 12
+  // (overlapping the EditorToolbar) — even portaled to document.body
+  // with z-index 200, the toolbar visually merged into the
+  // EditorToolbar's busy button strip and was effectively impossible
+  // to spot. Sliding it down 60 px puts it cleanly into the empty
+  // strip between the EditorToolbar bottom and the editor pane's
+  // file-path header.
   const positionStyle: CSSProperties = drag
     ? {
         position: "fixed",
@@ -203,9 +215,21 @@ export function ShapeEditorToolbar({
           left: position.x,
           right: "auto",
         }
-      : { position: "fixed", top: 12, right: 12 };
+      : { position: "fixed", top: 72, right: 16 };
 
-  return (
+  // Cortex v1.0.2 — portal the toolbar to document.body so it escapes
+  // EVERY ancestor that might be a containing block for `position:
+  // fixed` (notably the universal EditorToolbar's backdrop-filter
+  // ancestor chain) and EVERY ancestor's stacking context. Same
+  // pattern Cortex v1.0 used for ReviewsMenu / cortex-tb-popover. Pre-
+  // portal, the bumped z-index (100) on the layer wasn't enough — the
+  // toolbar was being clipped or stacked under v1.0 chrome surfaces
+  // that establish their own containing blocks via backdrop-filter
+  // (Chromium treats backdrop-filter as creating a containing block
+  // for fixed-positioned descendants). Portaling makes <body> the
+  // toolbar's parent, so position: fixed anchors to the viewport and
+  // z-index competes at the root stacking context.
+  return createPortal(
     <div
       ref={toolbarRef}
       className="cortex-shape-editor-toolbar"
@@ -444,7 +468,8 @@ export function ShapeEditorToolbar({
           Done
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -454,17 +479,37 @@ const styles: Record<string, CSSProperties> = {
     // either the live drag, the persisted host position, or the
     // default top-right pinning). Position is `fixed` so the
     // toolbar stays in the viewport regardless of document scroll.
+    //
+    // Cortex v1.0.3 — visually distinguish the toolbar from the v1.0
+    // chrome family so it cannot be mistaken for or visually merged
+    // INTO the universal EditorToolbar / sidebar / topbar. The v1.0
+    // chrome reads as glass (translucent + backdrop-filter); the
+    // shape-editor toolbar is SOLID, gets an accent-tinted ring
+    // border, and a substantially heavier drop shadow so it pops off
+    // the page like a Photoshop / Figma floating tool palette. Also
+    // adds backdrop-filter so the toolbar's interior reads as glass
+    // even though the panel is opaque (matches the rest of v1.0).
     background: "var(--bg-card)",
     color: "var(--text)",
-    border: "1px solid var(--border)",
-    borderRadius: "6px",
-    boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+    border: "1px solid color-mix(in oklab, var(--accent) 60%, transparent)",
+    borderRadius: "var(--radius-2, 10px)",
+    boxShadow:
+      "0 12px 32px rgba(0,0,0,0.32)," +
+      " 0 0 0 1px color-mix(in oklab, var(--accent) 25%, transparent)," +
+      " inset 0 1px 0 rgba(255,255,255,0.06)",
+    backdropFilter: "saturate(150%) blur(10px)",
+    WebkitBackdropFilter: "saturate(150%) blur(10px)" as unknown as undefined,
     padding: "8px 10px",
     display: "flex",
     flexDirection: "column",
     gap: "0.4rem",
     minWidth: "210px",
-    zIndex: 80,
+    // Cortex v1.0.2 — toolbar is now portaled to document.body so its
+    // z-index competes in the root stacking context. Bump from 80 to
+    // 200 so it sits above the universal editor toolbar (60), the
+    // main top bar (50), and any v1.0 chrome surface, but stays below
+    // toolbar color-picker popovers (250) and modal scrims (>=900).
+    zIndex: 200,
     fontSize: "0.85rem",
   },
   label: {

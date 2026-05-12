@@ -932,7 +932,23 @@ export function ShapeEditor({
   /** Cluster 20 v1.0.5 — toolbar position in viewport coordinates.
    *  null means "default top-right" (the legacy position). On first
    *  drag the user pins it; the position persists across sessions
-   *  via localStorage. */
+   *  via localStorage.
+   *
+   *  Cortex v1.0.3 — VALIDATE the loaded position against the
+   *  current viewport so a stale value from a smaller / different
+   *  monitor can't render the toolbar off-screen. The clampToViewport
+   *  inside ShapeEditorToolbar only fires during DRAG, not on load.
+   *  Pre-fix, a user who had dragged the toolbar to (1800, 900) on
+   *  one monitor and then opened Cortex on a 1280×800 laptop saw
+   *  nothing — the toolbar was rendering at (1800, 900), well past
+   *  the viewport's right edge.
+   *
+   *  Margin: keep at least 80 px of the toolbar visible on every
+   *  side so the user can always grab it. If the saved position
+   *  would put the toolbar fully off-screen, fall back to null
+   *  (default top-right pinning) so the toolbar visibly reappears
+   *  on shape-editor entry. The user can drag it back to wherever
+   *  they prefer once they see it. */
   const [toolbarPos, setToolbarPos] = useState<{ x: number; y: number } | null>(
     () => {
       try {
@@ -944,7 +960,24 @@ export function ShapeEditor({
             typeof parsed.x === "number" &&
             typeof parsed.y === "number"
           ) {
-            return parsed;
+            const VISIBLE_MARGIN = 80;
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const onScreenX =
+              parsed.x < vw - VISIBLE_MARGIN && parsed.x + 260 > VISIBLE_MARGIN;
+            const onScreenY =
+              parsed.y < vh - VISIBLE_MARGIN && parsed.y > -VISIBLE_MARGIN;
+            if (onScreenX && onScreenY) {
+              return parsed;
+            }
+            // Stored position is off-screen; drop it so the default
+            // top-right pinning kicks in. Also clear the localStorage
+            // entry so we don't keep checking a permanently-bad value.
+            try {
+              localStorage.removeItem("cortex:shape-toolbar-position");
+            } catch {
+              /* ignore */
+            }
           }
         }
       } catch {
@@ -1984,7 +2017,15 @@ export function ShapeEditor({
         width,
         height,
         pointerEvents: active ? "auto" : "none",
-        zIndex: 50,
+        // Cortex v1.0.2 — the SVG canvas needs to sit above prose
+        // content (image free-pos overlays at z-5, decoration
+        // widgets at z-7, etc.) while staying below modals (>=900)
+        // and toolbar popovers (250). The shape-editor toolbar is
+        // portaled to document.body now so its z-index doesn't have
+        // to fit inside this layer's stacking context — but keeping
+        // the layer at 100 still ensures any drawn shapes paint over
+        // the rest of the editor pane content.
+        zIndex: 100,
       }}
     >
       <svg
